@@ -40,9 +40,10 @@ tools/_nsis_unpack/
 *.log
 
 # ---------- 发行产物 ----------
-# 绿色版单文件 exe 可由 build_exe.ps1 重新生成，且内容已包含在安装包中，
-# 因此不入库以控制仓库体积；安装包 AutoGameTool-Setup.exe 按需求入库。
+# 二进制产物体积大（exe / 安装包各约 68 MB），放进 git 会永久留在历史里，
+# 因此统一不入库，改为在 GitHub Releases 中发布（见 README「打包与发布」）。
 /AutoGameTool.exe
+/AutoGameTool-Setup.exe
 
 # ---------- 编辑器 / 系统 ----------
 .vscode/
