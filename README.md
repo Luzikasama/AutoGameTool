@@ -4,6 +4,15 @@
 >
 > 像搭积木一样"画"出游戏脚本：找图、点击、按键、判断分支、循环挂机，全程不写一行代码。
 
+## 下载
+
+| 方式 | 说明 |
+|---|---|
+| **[⬇ 安装包（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool-Setup.exe`，Windows 10 / 11，免管理员，约 68 MB |
+| 从源码构建 | 见 [9. 打包与发布](#9-打包与发布)：`build_exe.ps1` → `build_installer.ps1` |
+
+安装包未做代码签名，若 SmartScreen 提示请选「更多信息 → 仍要运行」。
+
 ---
 
 ## 目录
