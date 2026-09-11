@@ -1,0 +1,9 @@
+# pnpm v11+ 配置
+# v11 起 pnpm 不再读取 package.json#pnpm，也不再从 .npmrc 读取非 registry 配置，
+# 这些设置统一搬到了本文件（camelCase 键名）。
+#
+# allowBuilds：允许执行安装脚本的依赖（合并了 v10 的 onlyBuiltDependencies 等）。
+# esbuild 需要解压平台二进制，vue-demi 需要执行 postinstall 生成兼容入口。
+allowBuilds:
+  esbuild: true
+  vue-demi: true

@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+mss
+pynput
+opencv-python
+rapidocr_onnxruntime

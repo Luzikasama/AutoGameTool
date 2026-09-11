@@ -1,0 +1,90 @@
+:root {
+  --bg: #0e1116;
+  --bg-soft: #161a22;
+  --bg-panel: #1c212b;
+  --border: #2a303c;
+  --text: #e6e8ee;
+  --text-dim: #8a93a5;
+  --accent: #7c6cf0;
+  --accent-soft: rgba(124, 108, 240, 0.16);
+  --danger: #ef4444;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.app-shell {
+  height: 100vh;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a303c;
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a4252;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Vue Flow 主题微调 */
+.vue-flow__node {
+  border-radius: 10px;
+  font-size: 13px;
+}
+.vue-flow__edge-path {
+  stroke: #3a4252;
+  stroke-width: 4;
+}
+.vue-flow__edge.selected .vue-flow__edge-path,
+.vue-flow__edge:hover .vue-flow__edge-path {
+  stroke: var(--accent);
+}
+.vue-flow__handle {
+  width: 9px;
+  height: 9px;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+}
+.vue-flow__controls {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.vue-flow__controls button {
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+.vue-flow__controls button:hover {
+  background: #232936;
+}
+.vue-flow__minimap {
+  border-radius: 8px;
+  overflow: hidden;
+}

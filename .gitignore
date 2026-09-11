@@ -1,0 +1,54 @@
+# ============================================================
+#  AutoGameTool .gitignore
+# ============================================================
+
+# ---------- Python ----------
+engine/.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- PyInstaller 构建产物 ----------
+# 注意：AutoGameTool.spec 与 build.log 由 PyInstaller 生成，
+# 内部会写入构建机的绝对路径（含用户名），因此不要入库。
+engine/build/
+engine/dist/
+engine/build.log
+engine/AutoGameTool.spec
+*.spec.bak
+
+# ---------- 前端 ----------
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/src-tauri/target/
+*.local
+
+# ---------- 打包 / 安装 / 测试的临时文件 ----------
+.tmp/
+.smoketmp/
+.smoketmp*/
+tools/nsis/
+tools/_nsis_unpack/
+*.tmp
+
+# ---------- 日志 ----------
+*.log
+
+# ---------- 发行产物 ----------
+# 绿色版单文件 exe 可由 build_exe.ps1 重新生成，且内容已包含在安装包中，
+# 因此不入库以控制仓库体积；安装包 AutoGameTool-Setup.exe 按需求入库。
+/AutoGameTool.exe
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+Desktop.ini
+ehthumbs.db
