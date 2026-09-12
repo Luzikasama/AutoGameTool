@@ -1,4 +1,5 @@
 """WebSocket 连接管理：向前端广播日志与运行状态。"""
+import asyncio
 import json
 from typing import Any
 
@@ -18,14 +19,19 @@ class ConnectionManager:
         if not self.connections:
             return
         text = json.dumps(message, ensure_ascii=False)
-        dead = []
-        for ws in list(self.connections):
+
+        async def _send(ws) -> bool:
             try:
                 await ws.send_text(text)
+                return True
             except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
+                return False
+
+        # 并发发送：某个客户端接收慢不会拖慢整体日志推送
+        results = await asyncio.gather(*(_send(ws) for ws in list(self.connections)))
+        for ws, ok in zip(list(self.connections), results):
+            if not ok:
+                self.disconnect(ws)
 
 
 manager = ConnectionManager()

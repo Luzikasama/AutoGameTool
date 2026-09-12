@@ -48,13 +48,27 @@ export interface WindowInfo {
   rect: { left: number; top: number; right: number; bottom: number; width: number; height: number }
 }
 
+export interface ScreenRef {
+  width: number
+  height: number
+}
+
+export interface BoundWindow {
+  hwnd: number
+  title: string
+  /** 保存/录制时窗口的位置尺寸，运行时据此做分辨率与窗口缩放适配 */
+  rect?: WindowInfo['rect'] | null
+}
+
 export interface FlowFile {
   format: 'agflow'
   version: number
   name: string
   repeat: number
   input_mode: 'real' | 'simulated'
-  window: { hwnd: number; title: string } | null
+  window: BoundWindow | null
+  /** 保存时的主显示器物理分辨率，跨分辨率运行时坐标按比例换算 */
+  screen?: ScreenRef | null
   nodes: any[]
   edges: any[]
 }

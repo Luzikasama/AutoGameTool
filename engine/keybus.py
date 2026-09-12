@@ -10,11 +10,11 @@ _release_cbs: list = []
 _listener = None
 _press_count = 0
 _release_count = 0
-_last_key = ""
 
 
 def counts() -> dict:
-    return {"press": _press_count, "release": _release_count, "last": _last_key, "alive": bool(_listener and _listener.running)}
+    # 安全：不返回按键内容（_last_key），防止调试接口被用作远程键盘记录器
+    return {"press": _press_count, "release": _release_count, "alive": bool(_listener and _listener.running)}
 
 
 def _ensure() -> None:
@@ -26,9 +26,8 @@ def _ensure() -> None:
 
 
 def _dispatch_press(key) -> None:
-    global _press_count, _last_key
+    global _press_count
     _press_count += 1
-    _last_key = str(key)
     for cb in tuple(_press_cbs):
         try:
             cb(key)

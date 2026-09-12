@@ -87,8 +87,10 @@ watch(
 )
 
 function toLocal(e: PointerEvent) {
-  const rect = stageEl.value!.getBoundingClientRect()
-  return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  const stage = stageEl.value!
+  const rect = stage.getBoundingClientRect()
+  // stage 可滚动（overflow:auto），需补偿滚动偏移，否则大截图滚动后框选错位
+  return { x: e.clientX - rect.left + stage.scrollLeft, y: e.clientY - rect.top + stage.scrollTop }
 }
 function onDown(e: PointerEvent) {
   dragging.value = true
@@ -150,8 +152,14 @@ async function confirmRegion() {
   const ctx = canvas.getContext('2d')!
   ctx.drawImage(imgEl.value, nx, ny, nw, nh, 0, 0, nw, nh)
   const dataUrl = canvas.toDataURL('image/png')
+  // 记录捕获时的参考画面尺寸，分辨率/DPI 变化后引擎可自动缩放模板再匹配
+  const meta = {
+    frame_w: imgEl.value.naturalWidth,
+    frame_h: imgEl.value.naturalHeight,
+    source: selectedWindow.value ? 'window' : 'screen',
+  }
   try {
-    const r = await engine.captureTemplate(dataUrl)
+    const r = await engine.captureTemplate(dataUrl, undefined, meta)
     message.success('模板已保存：' + r.id)
     emit('captured', r.id)
   } catch (e: any) {

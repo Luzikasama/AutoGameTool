@@ -12,6 +12,7 @@ except Exception:
 
 import asyncio
 import os
+import secrets
 import sys
 import threading
 import time
@@ -19,14 +20,14 @@ import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import vision
-from executor import Executor
+from executor import Executor, validate_flow
 from hotkey import HotkeyManager
 from picker import CoordinatePicker
 from recorder import Recorder
@@ -43,6 +44,8 @@ def get_frontend_dir() -> Path:
 class TemplateCapture(BaseModel):
     name: str | None = None
     image: str
+    # 捕获时的参考画面尺寸等元数据（分辨率自适应用），由前端随截图一起上报
+    meta: dict | None = None
 
 
 class RenameTemplateRequest(BaseModel):
@@ -104,9 +107,9 @@ def _setup_hotkey() -> None:
         def _notify() -> None:
             # 有前端连接时通知前端执行（前端调用 /run，与点击“运行”完全一致）
             if manager.connections:
-                asyncio.create_task(manager.broadcast({"type": "hotkey", "ts": time.time()}))
+                _spawn(manager.broadcast({"type": "hotkey", "ts": time.time()}))
             else:
-                asyncio.create_task(executor.toggle())
+                _spawn(executor.toggle())
 
         if _loop:
             _loop.call_soon_threadsafe(_notify)
@@ -120,9 +123,7 @@ def _setup_hotkey() -> None:
     def _on_picked(x: int, y: int) -> None:
         if _loop:
             _loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(
-                    manager.broadcast({"type": "picked", "x": x, "y": y, "ts": time.time()})
-                )
+                lambda: _spawn(manager.broadcast({"type": "picked", "x": x, "y": y, "ts": time.time()}))
             )
 
     picker = CoordinatePicker(_on_picked)
@@ -130,17 +131,13 @@ def _setup_hotkey() -> None:
     def _record_state(recording: bool) -> None:
         if _loop:
             _loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(
-                    manager.broadcast({"type": "recording", "recording": recording, "ts": time.time()})
-                )
+                lambda: _spawn(manager.broadcast({"type": "recording", "recording": recording, "ts": time.time()}))
             )
 
     def _on_recorded(events: list) -> None:
         if _loop:
             _loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(
-                    manager.broadcast({"type": "recorded", "events": events, "ts": time.time()})
-                )
+                lambda: _spawn(manager.broadcast({"type": "recorded", "events": events, "ts": time.time()}))
             )
 
     recorder = Recorder(_record_state, _on_recorded)
@@ -160,19 +157,75 @@ async def lifespan(_: FastAPI):
         recorder.stop_all()
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.2.0", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = FastAPI(title="AutoGameTool Engine", version="0.3.0", lifespan=lifespan)
+
+# ---- 本地访问控制（安全）----
+# 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
+# 而引擎具备操控键鼠、截屏的能力，因此：
+# 1) 所有 API 需要随机令牌（启动时生成，随浏览器 URL 传给前端）；
+# 2) 打包运行与前端同源，不需要 CORS——仅开发模式(AUTOGAMETOOL_DEV=1)放开 vite 端口；
+# 3) 校验 Host 头，防 DNS rebinding。
+# 自动化测试可设 AUTOGAMETOOL_TOKEN 固定令牌。
+_ENGINE_TOKEN = os.environ.get("AUTOGAMETOOL_TOKEN", "").strip() or secrets.token_urlsafe(24)
+_DEV_MODE = os.environ.get("AUTOGAMETOOL_DEV", "").strip().lower() in ("1", "true", "yes", "on")
+_ENTRY_URL = f"http://127.0.0.1:8765/?token={_ENGINE_TOKEN}"
+
+_ALLOWED_HOSTS = {"127.0.0.1:8765", "localhost:8765", "[::1]:8765"}
+# 需要令牌保护的 API 前缀（新增 API 路由时必须加入此列表）
+_PROTECTED_PREFIXES = (
+    "/debug", "/windows", "/screen", "/vision", "/input",
+    "/flow", "/run", "/config", "/pick", "/record",
+    "/docs", "/openapi.json",
 )
+_MAX_BODY_BYTES = 64 * 1024 * 1024  # 请求体上限 64MB（防内存 DoS）
+
+if _DEV_MODE:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:1420", "http://127.0.0.1:1420"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+
+@app.middleware("http")
+async def _guard(request: Request, call_next):
+    host = (request.headers.get("host") or "").lower()
+    if host and host.split("/")[0] not in _ALLOWED_HOSTS:
+        return JSONResponse({"detail": "Forbidden host"}, status_code=403)
+    try:
+        if int(request.headers.get("content-length") or 0) > _MAX_BODY_BYTES:
+            return JSONResponse({"detail": "请求体过大"}, status_code=413)
+    except ValueError:
+        pass
+    if not _DEV_MODE:
+        path = request.url.path
+        if any(path == p or path.startswith(p + "/") for p in _PROTECTED_PREFIXES):
+            auth = request.headers.get("authorization", "")
+            token = request.query_params.get("token", "")
+            if auth != f"Bearer {_ENGINE_TOKEN}" and token != _ENGINE_TOKEN:
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+# 后台任务强引用表：防止 create_task 的任务被 GC 中途取消
+_bg_tasks: set = set()
+
+
+def _spawn(coro) -> "asyncio.Task":
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
+
+
+_run_lock = asyncio.Lock()
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.2.0"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.3.0"}
 
 
 @app.get("/debug/kb")
@@ -189,10 +242,13 @@ async def api_list_windows():
 
 @app.get("/screen/screenshot")
 async def screenshot(window: int | None = None):
-    if window:
-        frame = capture_window(window)
-    else:
-        frame = vision.grab_frame()
+    try:
+        if window:
+            frame = await asyncio.to_thread(capture_window, window)
+        else:
+            frame = await asyncio.to_thread(vision.grab_frame)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {
         "image": vision.frame_to_data_url(frame),
         "width": frame.shape[1],
@@ -225,7 +281,10 @@ async def api_rename_template(req: RenameTemplateRequest):
 
 @app.post("/vision/template/delete")
 async def api_delete_template(req: DeleteTemplateRequest):
-    vision.delete_template(req.id)
+    try:
+        vision.delete_template(req.id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"ok": True}
 
 
@@ -235,7 +294,10 @@ async def capture_template(req: TemplateCapture):
         img = vision.decode_image_b64(req.image)
     except Exception as e:
         raise HTTPException(400, f"图像解码失败: {e}")
-    tpl_id = vision.save_template(img, req.name)
+    try:
+        tpl_id = vision.save_template(img, req.name, req.meta)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"id": tpl_id}
 
 
@@ -243,17 +305,24 @@ async def capture_template(req: TemplateCapture):
 async def match(req: MatchRequest):
     try:
         template = vision.load_template(req.template)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         raise HTTPException(404, str(e))
+    meta = vision.load_template_meta(req.template)
     offset_x = offset_y = 0
-    if req.window:
-        rect = get_window_rect(req.window)
-        offset_x, offset_y = rect["left"], rect["top"]
-        frame = capture_window(req.window)
-    else:
-        frame = vision.grab_frame()
-    found, x, y, score = vision.match_template(frame, template, req.threshold)
-    result = {"found": found, "x": x + offset_x, "y": y + offset_y, "score": score}
+    try:
+        if req.window:
+            rect = get_window_rect(req.window)
+            offset_x, offset_y = rect["left"], rect["top"]
+            frame = await asyncio.to_thread(capture_window, req.window)
+        else:
+            frame = await asyncio.to_thread(vision.grab_frame)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    # 分辨率自适应匹配：模板捕获分辨率与当前不同则自动缩放模板
+    found, x, y, score, scale = await asyncio.to_thread(
+        vision.match_template_auto, frame, template, meta, req.threshold
+    )
+    result = {"found": found, "x": x + offset_x, "y": y + offset_y, "score": score, "scale": scale}
     if found:
         result["annotated"] = vision.frame_to_data_url(vision.annotate_match(frame, template, x, y))
     return result
@@ -296,22 +365,42 @@ async def api_text(req: TextRequest):
 @app.post("/flow/load")
 async def load_flow(req: RunRequest):
     """仅加载流程（不执行），供快捷键启停使用。"""
+    try:
+        validate_flow(req.flow)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     executor.current_flow = req.flow
     return {"ok": True}
 
 
 @app.post("/run")
 async def run(req: RunRequest):
-    if executor.running:
-        raise HTTPException(409, "已有流程在运行")
-    asyncio.create_task(executor.run(req.flow))
+    try:
+        validate_flow(req.flow)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    # 加锁保证「检查-启动」原子性，防止并发 /run 双双通过检查
+    async with _run_lock:
+        if executor.running:
+            raise HTTPException(409, "已有流程在运行")
+        # 先置 running 再派生任务：/run/state 在任务起跑前就能反映真实状态，
+        # 避免前端轮询在「POST 已返回、任务未起跑」的缝隙里读到假 idle 造成按钮闪烁
+        executor.running = True
+        _spawn(executor.run(req.flow))
     return {"ok": True}
 
 
 @app.post("/run/stop")
 async def stop():
     executor.stop()
-    return {"ok": True}
+    # 返回引擎真实运行状态，前端据此纠正本地状态（修复假运行卡死）
+    return {"ok": True, "running": executor.running}
+
+
+@app.get("/run/state")
+async def run_state():
+    """前端 WS 重连/定时轮询时同步真实运行状态。"""
+    return {"running": executor.running}
 
 
 @app.get("/config/hotkey")
@@ -322,7 +411,10 @@ async def get_hotkey():
 @app.post("/config/hotkey")
 async def set_hotkey(req: HotkeyRequest):
     if hotkey_manager:
-        hotkey_manager.set(req.hotkey)
+        try:
+            hotkey_manager.set(req.hotkey)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
         return {"hotkey": hotkey_manager.get()}
     return {"hotkey": req.hotkey}
 
@@ -357,11 +449,17 @@ async def record_stop():
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    # WebSocket 同样校验令牌（网页可跨域发起 WS 连接，不校验则日志/事件全部泄露）
+    if not _DEV_MODE and ws.query_params.get("token", "") != _ENGINE_TOKEN:
+        await ws.close(code=4401)
+        return
     await manager.connect(ws)
     try:
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
+        manager.disconnect(ws)
+    except Exception:
         manager.disconnect(ws)
 
 
@@ -373,8 +471,14 @@ if (_frontend_dir / "index.html").is_file():
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
         if full_path:
-            candidate = _frontend_dir / full_path
-            if candidate.is_file():
+            # 安全：resolve 后必须仍在前端目录内，防 ../ 与编码点段路径遍历
+            base = _frontend_dir.resolve()
+            try:
+                candidate = (base / full_path).resolve()
+                candidate.relative_to(base)
+            except (ValueError, OSError):
+                candidate = None
+            if candidate and candidate.is_file():
                 return FileResponse(candidate)
         return FileResponse(_frontend_dir / "index.html")
 
@@ -391,13 +495,15 @@ if __name__ == "__main__":
     _single_mutex = _kernel32.CreateMutexW(None, False, "AutoGameTool_SingleInstance")
     if _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         print("[AutoGameTool] 检测到程序已在运行，本次启动退出（避免多开导致快捷键冲突）。", flush=True)
-        threading.Thread(target=lambda: webbrowser.open("http://127.0.0.1:8765"), daemon=True).start()
+        threading.Thread(target=lambda: webbrowser.open(_ENTRY_URL), daemon=True).start()
         time.sleep(0.5)
         sys.exit(0)
 
     def _open_browser() -> None:
         time.sleep(1.5)
-        webbrowser.open("http://127.0.0.1:8765")
+        webbrowser.open(_ENTRY_URL)
+
+    print(f"[AutoGameTool] 编辑器地址: {_ENTRY_URL}", flush=True)
 
     # 设置 AUTOGAMETOOL_NO_BROWSER=1 可禁止自动打开浏览器（自动化测试 / 无人值守场景）
     if os.environ.get("AUTOGAMETOOL_NO_BROWSER", "").strip().lower() in ("1", "true", "yes", "on"):
@@ -405,4 +511,8 @@ if __name__ == "__main__":
     else:
         threading.Thread(target=_open_browser, daemon=True).start()
 
-    uvicorn.run(app, host="127.0.0.1", port=8765)
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=8765)
+    except OSError as e:
+        print(f"[AutoGameTool] 引擎启动失败：{e}（端口 8765 可能被其他程序占用）", flush=True)
+        sys.exit(1)

@@ -1,4 +1,11 @@
-"""流程执行器：图执行（支持判断分支、单次执行、终止条件、循环与全局启停）。"""
+"""流程执行器：图执行（支持判断分支、单次执行、终止条件、循环与全局启停）。
+
+分辨率自适应：
+- 流程可携带 screen={width,height}（保存时的主显示器物理分辨率）与
+  window.rect（保存时绑定窗口的位置尺寸）。
+- 运行时若当前分辨率/窗口尺寸与参考值不同，点击与宏坐标按比例换算，
+  使脚本可跨分辨率/跨 DPI 复用；模板匹配的分辨率自适应见 vision.match_template_auto。
+"""
 import asyncio
 import time
 import traceback
@@ -7,6 +14,30 @@ from typing import Any, Callable
 import inputctl
 import vision
 import window
+
+
+def validate_flow(flow: dict) -> None:
+    """校验流程结构，非法时抛 ValueError（避免执行器带着脏数据运行）。"""
+    if not isinstance(flow, dict):
+        raise ValueError("流程必须是 JSON 对象")
+    nodes = flow.get("nodes", [])
+    edges = flow.get("edges", [])
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise ValueError("流程 nodes/edges 必须是数组")
+    try:
+        repeat = int(flow.get("repeat", 1))
+    except (TypeError, ValueError):
+        raise ValueError(f"循环轮数无效: {flow.get('repeat')!r}")
+    if not 1 <= repeat <= 100000:
+        raise ValueError(f"循环轮数超出范围(1~100000): {repeat}")
+    ids = set()
+    for n in nodes:
+        if not isinstance(n, dict) or not n.get("id"):
+            raise ValueError("存在缺少 id 的节点")
+        ids.add(n["id"])
+    for e in edges:
+        if not isinstance(e, dict) or e.get("source") not in ids or e.get("target") not in ids:
+            raise ValueError(f"存在指向不存在节点的连线: {e!r}")
 
 
 class Executor:
@@ -38,21 +69,78 @@ class Executor:
         else:
             await self.log("warn", "暂无已加载流程，无法通过快捷键启动")
 
+    def _make_scaler(self, flow: dict, hwnd):
+        """构造坐标换算函数。返回 (scale_fn, 说明) 或 (None, None)。
+
+        优先按「绑定窗口的参考 rect → 当前 rect」换算（同时覆盖窗口移动/缩放/
+        分辨率变化）；未绑定窗口时按「参考屏幕分辨率 → 当前主屏分辨率」换算。
+        """
+        win = flow.get("window")
+        ref_rect = win.get("rect") if isinstance(win, dict) else None
+        if hwnd and isinstance(ref_rect, dict) and ref_rect.get("width") and ref_rect.get("height"):
+            rw, rh = float(ref_rect["width"]), float(ref_rect["height"])
+            rl, rt = float(ref_rect.get("left", 0)), float(ref_rect.get("top", 0))
+
+            def scale_by_window(x, y):
+                try:
+                    rect = window.get_window_rect(hwnd)
+                except Exception:
+                    return int(x), int(y)
+                if rect["width"] <= 0 or rect["height"] <= 0:
+                    return int(x), int(y)
+                nx = rect["left"] + (float(x) - rl) * rect["width"] / rw
+                ny = rect["top"] + (float(y) - rt) * rect["height"] / rh
+                return int(round(nx)), int(round(ny))
+
+            return scale_by_window, f"窗口参考 {int(rw)}x{int(rh)}"
+
+        ref_screen = flow.get("screen")
+        if isinstance(ref_screen, dict) and ref_screen.get("width") and ref_screen.get("height"):
+            rw, rh = float(ref_screen["width"]), float(ref_screen["height"])
+            try:
+                cur_w, cur_h = vision.primary_monitor_size()
+            except Exception:
+                return None, None
+            if rw <= 0 or rh <= 0:
+                return None, None
+            if abs(cur_w / rw - 1) < 0.01 and abs(cur_h / rh - 1) < 0.01:
+                return None, None  # 分辨率一致，无需换算
+
+            def scale_by_screen(x, y):
+                return int(round(float(x) * cur_w / rw)), int(round(float(y) * cur_h / rh))
+
+            return scale_by_screen, f"屏幕参考 {int(rw)}x{int(rh)} → 当前 {cur_w}x{cur_h}"
+
+        return None, None
+
     async def run(self, flow: dict) -> None:
         self.current_flow = flow
-        self.stopped = False
-        self.running = True
-        await self._state("running")
-        repeat = max(1, int(flow.get("repeat", 1)))
+        # 先校验再置 running：畸形流程直接拒绝，不会让 running 卡死在 True
+        try:
+            validate_flow(flow)
+            repeat = max(1, int(flow.get("repeat", 1)))
+        except ValueError as e:
+            self.running = False  # /run 端点会提前置位，拒绝时必须复位
+            await self.log("error", f"流程数据无效，已拒绝执行: {e}")
+            await self._state("idle")
+            return
+
         nodes = flow.get("nodes", [])
         edges = flow.get("edges", [])
         input_mode = flow.get("input_mode", "real")
         win = flow.get("window")
         hwnd = win.get("hwnd") if isinstance(win, dict) else None
+
+        self.stopped = False
+        self.running = True
+        await self._state("running")
         await self.log(
             "info",
             f"开始执行「{flow.get('name', '未命名')}」：{len(nodes)} 节点 × {repeat} 轮，输入模式={input_mode}",
         )
+        scale_fn, scale_desc = self._make_scaler(flow, hwnd)
+        if scale_fn:
+            await self.log("info", f"分辨率/窗口尺寸适配已启用（{scale_desc}），坐标将按比例换算")
         try:
             node_map = {n["id"]: n for n in nodes}
             adj: dict[str, list[tuple[str, str]]] = {}
@@ -63,6 +151,11 @@ class Executor:
             if not starts:
                 await self.log("error", "流程缺少起始节点")
                 return
+            if len(starts) > 1:
+                await self.log("warn", f"存在 {len(starts)} 个起始节点，仅从 {starts[0]} 开始执行")
+            unreachable = [nid for nid in node_map if nid not in self._reachable(adj, starts[0])]
+            if unreachable:
+                await self.log("warn", f"{len(unreachable)} 个节点从起始节点不可达，不会执行: {unreachable}")
             start_id = starts[0]
             executed_once: set[str] = set()
 
@@ -72,7 +165,13 @@ class Executor:
                     return
                 await self.log("info", f"--- 第 {r + 1}/{repeat} 轮 ---")
                 current = start_id
+                visited = 0
+                max_steps = max(1000, len(node_map) * 100)  # 单轮步数上限，防无终止环空转
                 while current and not self.stopped:
+                    visited += 1
+                    if visited > max_steps:
+                        await self.log("error", f"单轮执行超过 {max_steps} 步（疑似无终止条件的环），已停止")
+                        return
                     node = node_map.get(current)
                     if not node:
                         break
@@ -100,7 +199,7 @@ class Executor:
 
                     await self.log("info", f"节点: {ntype}", current)
                     try:
-                        await self._run_step(node, input_mode, hwnd)
+                        await self._run_step(node, input_mode, hwnd, scale_fn)
                     except Exception as e:
                         # 单步失败只记录，不中断整个流程（挂机场景更稳）
                         await self.log("error", f"节点执行失败({ntype}): {e}", current)
@@ -115,25 +214,41 @@ class Executor:
             self.running = False
             await self._state("idle")
 
+    @staticmethod
+    def _reachable(adj: dict, start: str) -> set[str]:
+        seen: set[str] = set()
+        stack = [start]
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            stack.extend(t for _, t in adj.get(cur, []))
+        return seen
+
     async def _do_judge(self, params: dict, input_mode: str, hwnd) -> bool:
         tpl_id = params.get("template")
         threshold = float(params.get("threshold", 0.85))
         timeout_ms = int(params.get("timeout_ms", 5000))
         try:
-            template = vision.load_template(tpl_id)
-        except FileNotFoundError:
-            await self.log("error", f"判断模板不存在: {tpl_id}")
+            template = await asyncio.to_thread(vision.load_template, tpl_id)
+        except (FileNotFoundError, ValueError) as e:
+            await self.log("error", f"判断模板不可用: {e}")
             return False
+        meta = await asyncio.to_thread(vision.load_template_meta, tpl_id)
         start = time.time()
         while not self.stopped:
             try:
-                frame = self._capture(hwnd, input_mode)
+                frame = await asyncio.to_thread(self._capture, hwnd, input_mode)
+                found, _, _, score, scale = await asyncio.to_thread(
+                    vision.match_template_auto, frame, template, meta, threshold
+                )
             except Exception as e:
                 await self.log("error", f"判断截图失败: {e}")
                 return False
-            found, _, _, score = vision.match_template(frame, template, threshold)
             if found:
-                await self.log("info", f"判断：找到「{tpl_id}」（{score:.3f}）→ 成功分支")
+                extra = f"，缩放 x{scale:.2f}" if abs(scale - 1) > 0.01 else ""
+                await self.log("info", f"判断：找到「{tpl_id}」（{score:.3f}{extra}）→ 成功分支")
                 return True
             if time.time() - start > timeout_ms / 1000:
                 await self.log("info", f"判断：超时未找到「{tpl_id}」→ 失败分支")
@@ -141,7 +256,7 @@ class Executor:
             await asyncio.sleep(0.2)
         return False
 
-    async def _run_step(self, node: dict, input_mode: str, hwnd) -> None:
+    async def _run_step(self, node: dict, input_mode: str, hwnd, scale_fn=None) -> None:
         stype = node.get("type")
         params = node.get("params") or {}
         if stype == "delay":
@@ -159,22 +274,27 @@ class Executor:
             await self._do_find(params, input_mode, hwnd)
         elif stype == "click":
             x, y = int(params.get("x", 0)), int(params.get("y", 0))
-            inputctl.click(x, y, params.get("button", "left"), int(params.get("clicks", 1)), input_mode, hwnd)
+            if scale_fn:
+                x, y = scale_fn(x, y)
+            await asyncio.to_thread(
+                inputctl.click, x, y, params.get("button", "left"),
+                int(params.get("clicks", 1)), input_mode, hwnd,
+            )
             await self.log("debug", f"点击 ({x}, {y}) 按键={params.get('button', 'left')} 模式={input_mode}")
         elif stype == "key":
             key = str(params.get("key", ""))
-            inputctl.press_key(key, input_mode, hwnd)
+            await asyncio.to_thread(inputctl.press_key, key, input_mode, hwnd)
             await self.log("debug", f"按键 {key} 模式={input_mode}")
         elif stype == "text":
             text = str(params.get("text", ""))
-            inputctl.type_text(text, input_mode, hwnd)
+            await asyncio.to_thread(inputctl.type_text, text, input_mode, hwnd)
             await self.log("debug", f"输入文本 {text!r}")
         elif stype == "macro":
-            await self._run_macro(params, input_mode, hwnd)
+            await self._run_macro(params, input_mode, hwnd, scale_fn)
         else:
             await self.log("warn", f"未知节点类型: {stype}")
 
-    async def _run_macro(self, params: dict, input_mode: str, hwnd) -> None:
+    async def _run_macro(self, params: dict, input_mode: str, hwnd, scale_fn=None) -> None:
         """回放键鼠录制步骤。"""
         events = params.get("events") or []
         try:
@@ -198,17 +318,31 @@ class Executor:
             etype = ev.get("type")
             try:
                 if etype == "mousemove":
-                    inputctl.move(ev.get("x", 0), ev.get("y", 0), input_mode, hwnd)
+                    x, y = (scale_fn(ev.get("x", 0), ev.get("y", 0)) if scale_fn
+                            else (ev.get("x", 0), ev.get("y", 0)))
+                    await asyncio.to_thread(inputctl.move, x, y, input_mode, hwnd)
                 elif etype == "mousedown":
-                    inputctl.mouse_down(ev.get("x", 0), ev.get("y", 0), ev.get("button", "left"), input_mode, hwnd)
+                    x, y = (scale_fn(ev.get("x", 0), ev.get("y", 0)) if scale_fn
+                            else (ev.get("x", 0), ev.get("y", 0)))
+                    await asyncio.to_thread(
+                        inputctl.mouse_down, x, y, ev.get("button", "left"), input_mode, hwnd
+                    )
                 elif etype == "mouseup":
-                    inputctl.mouse_up(ev.get("x", 0), ev.get("y", 0), ev.get("button", "left"), input_mode, hwnd)
+                    x, y = (scale_fn(ev.get("x", 0), ev.get("y", 0)) if scale_fn
+                            else (ev.get("x", 0), ev.get("y", 0)))
+                    await asyncio.to_thread(
+                        inputctl.mouse_up, x, y, ev.get("button", "left"), input_mode, hwnd
+                    )
                 elif etype == "scroll":
-                    inputctl.scroll(ev.get("dx", 0), ev.get("dy", 0))
+                    sx, sy = (scale_fn(ev.get("x", 0), ev.get("y", 0)) if scale_fn
+                              else (ev.get("x", 0), ev.get("y", 0)))
+                    await asyncio.to_thread(
+                        inputctl.scroll, ev.get("dx", 0), ev.get("dy", 0), input_mode, hwnd, sx, sy
+                    )
                 elif etype == "keydown":
-                    inputctl.key_down(str(ev.get("key", "")), input_mode, hwnd)
+                    await asyncio.to_thread(inputctl.key_down, str(ev.get("key", "")), input_mode, hwnd)
                 elif etype == "keyup":
-                    inputctl.key_up(str(ev.get("key", "")), input_mode, hwnd)
+                    await asyncio.to_thread(inputctl.key_up, str(ev.get("key", "")), input_mode, hwnd)
             except Exception as e:
                 await self.log("warn", f"回放事件失败({etype}): {e}")
         await self.log("info", "录制回放完成")
@@ -219,10 +353,11 @@ class Executor:
         timeout_ms = int(params.get("timeout_ms", 5000))
         do_click = bool(params.get("click", False))
         try:
-            template = vision.load_template(tpl_id)
-        except FileNotFoundError:
-            await self.log("error", f"模板不存在: {tpl_id}")
+            template = await asyncio.to_thread(vision.load_template, tpl_id)
+        except (FileNotFoundError, ValueError) as e:
+            await self.log("error", f"模板不可用: {e}")
             return
+        meta = await asyncio.to_thread(vision.load_template_meta, tpl_id)
         offset_x = offset_y = 0
         if hwnd:
             rect = window.get_window_rect(hwnd)
@@ -230,16 +365,19 @@ class Executor:
         start = time.time()
         while not self.stopped:
             try:
-                frame = self._capture(hwnd, input_mode)
+                frame = await asyncio.to_thread(self._capture, hwnd, input_mode)
+                found, x, y, score, scale = await asyncio.to_thread(
+                    vision.match_template_auto, frame, template, meta, threshold
+                )
             except Exception as e:
                 await self.log("error", f"窗口截图失败: {e}")
                 return
-            found, x, y, score = vision.match_template(frame, template, threshold)
             if found:
                 sx, sy = x + offset_x, y + offset_y
-                await self.log("info", f"找到模板「{tpl_id}」位置 ({sx}, {sy}) 相似度 {score:.3f}")
+                extra = f"，缩放 x{scale:.2f}" if abs(scale - 1) > 0.01 else ""
+                await self.log("info", f"找到模板「{tpl_id}」位置 ({sx}, {sy}) 相似度 {score:.3f}{extra}")
                 if do_click:
-                    inputctl.click(sx, sy, "left", 1, input_mode, hwnd)
+                    await asyncio.to_thread(inputctl.click, sx, sy, "left", 1, input_mode, hwnd)
                     await self.log("info", f"已点击匹配位置 ({sx}, {sy})")
                 return
             if time.time() - start > timeout_ms / 1000:

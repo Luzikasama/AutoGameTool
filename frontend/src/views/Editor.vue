@@ -71,7 +71,38 @@ const inspectorWidth = ref(280)
 const logBody = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 let ws: WebSocket | null = null
+let wsRetry: ReturnType<typeof setTimeout> | null = null
+let wsFailCount = 0
+let destroyed = false
 let nodeSeq = 0
+
+// 分辨率参考上下文：从加载的脚本文件中带出（坐标/模板均以此分辨率为基准），
+// 新建脚本则使用当前分辨率。引擎运行时据此做跨分辨率坐标换算。
+const fileScreen = ref<{ width: number; height: number } | null>(null)
+const fileWindowRect = ref<WindowInfo['rect'] | null>(null)
+
+function currentScreen() {
+  const dpr = window.devicePixelRatio || 1
+  return {
+    width: Math.round(window.screen.width * dpr),
+    height: Math.round(window.screen.height * dpr),
+  }
+}
+
+function currentWindowRect(): WindowInfo['rect'] | null {
+  if (!store.boundWindow) return null
+  const w = windows.value.find((x) => x.hwnd === store.boundWindow!.hwnd)
+  return w ? w.rect : null
+}
+
+function flowWindow() {
+  if (!store.boundWindow) return null
+  return {
+    hwnd: store.boundWindow.hwnd,
+    title: store.boundWindow.title,
+    rect: fileWindowRect.value ?? currentWindowRect(),
+  }
+}
 
 const selectedNode = computed(() => nodes.value.find((n) => n.id === selectedId.value) || null)
 
@@ -363,16 +394,22 @@ function onWindowChange(hwnd: number) {
 
 // ---------- 保存 / 加载 ----------
 async function saveFlow() {
+  // 分辨率参考：沿用文件原参考（坐标未变），新建脚本用当前分辨率
+  const screenRef = fileScreen.value ?? currentScreen()
+  const windowRef = fileWindowRect.value ?? currentWindowRect()
   const data: FlowFile = {
     format: 'agflow',
     version: 1,
     name: store.flowName,
     repeat: store.repeat,
     input_mode: store.inputMode,
-    window: store.boundWindow,
+    window: store.boundWindow ? { ...store.boundWindow, rect: windowRef } : null,
+    screen: screenRef,
     nodes: nodes.value,
     edges: edges.value,
   }
+  fileScreen.value = screenRef
+  fileWindowRect.value = windowRef
   const json = JSON.stringify(data, null, 2)
   const w = window as any
   // 优先使用文件系统访问 API：弹出原生保存对话框（可覆盖/另存）
@@ -423,7 +460,14 @@ function onLoadFile(e: Event) {
       selectedWinHwnd.value = data.window?.hwnd ?? 0
       nodes.value = data.nodes || []
       edges.value = data.edges || []
-      nodeSeq = nodes.value.length
+      // 保留文件的分辨率参考（其中的坐标以该分辨率为基准）
+      fileScreen.value = data.screen ?? null
+      fileWindowRect.value = data.window?.rect ?? null
+      // 取现有节点 ID 的最大数字后缀，避免新增节点撞 ID
+      nodeSeq = Math.max(
+        0,
+        ...nodes.value.map((n) => parseInt(String(n.id).replace(/\D/g, ''), 10) || 0),
+      )
       selectedId.value = null
       message.success('脚本已加载')
     } catch (err: any) {
@@ -520,7 +564,8 @@ async function run() {
       name: store.flowName,
       repeat: store.repeat,
       input_mode: store.inputMode,
-      window: store.boundWindow,
+      window: flowWindow(),
+      screen: fileScreen.value ?? currentScreen(),
       ...graph,
     })
     store.running = true
@@ -531,7 +576,9 @@ async function run() {
 
 async function stop() {
   try {
-    await engine.stop()
+    const r = await engine.stop()
+    // 以引擎返回的真实状态为准：若流程早已结束（假运行），立即解除按钮卡死
+    store.running = !!r.running
   } catch (e: any) {
     message.error('停止失败：' + e.message)
   }
@@ -588,8 +635,24 @@ function onRecorded(events: any[]) {
   loadFlowToEngine()
 }
 
+// 以引擎为唯一事实来源同步运行状态（WS 断连/广播丢失时靠它自愈）
+async function syncRunState() {
+  try {
+    const r = await engine.runState()
+    store.running = !!r.running
+  } catch {
+    /* 引擎不可达时下个周期再试 */
+  }
+}
+
 function connectWs() {
+  if (destroyed) return
   ws = new WebSocket(engineWsUrl())
+  ws.onopen = () => {
+    if (wsFailCount >= 3) message.success('已重新连接引擎')
+    wsFailCount = 0
+    syncRunState()
+  }
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data)
@@ -605,6 +668,14 @@ function connectWs() {
   }
   ws.onclose = () => {
     store.running = false
+    if (destroyed) return
+    // 自动重连：断线期间日志/状态会丢，重连后立即同步真实状态
+    wsFailCount += 1
+    if (wsFailCount === 3) {
+      message.warning('与引擎的连接已断开，正在自动重连…若引擎刚重启，请从程序重新打开页面')
+    }
+    if (wsRetry) clearTimeout(wsRetry)
+    wsRetry = setTimeout(connectWs, 2000)
   }
 }
 
@@ -649,17 +720,24 @@ function formatTime(ts: number) {
 
 let loadTimer: ReturnType<typeof setTimeout> | null = null
 
-function loadFlowToEngine() {
-  const graph = flowGraph()
-  engine
-    .loadFlow({
-      name: store.flowName,
-      repeat: store.repeat,
-      input_mode: store.inputMode,
-      window: store.boundWindow,
-      ...graph,
-    })
-    .catch(() => {})
+let lastSyncedJson = ''
+
+function loadFlowToEngine(force = false) {
+  const payload = {
+    name: store.flowName,
+    repeat: store.repeat,
+    input_mode: store.inputMode,
+    window: flowWindow(),
+    screen: fileScreen.value ?? currentScreen(),
+    ...flowGraph(),
+  }
+  // 指纹未变化则跳过，避免每秒全量同步空打引擎
+  const json = JSON.stringify(payload)
+  if (!force && json === lastSyncedJson) return
+  lastSyncedJson = json
+  engine.loadFlow(payload).catch(() => {
+    lastSyncedJson = '' // 失败后下次重试
+  })
 }
 
 // 流程变化时同步到引擎，供快捷键 alt+f1 启停（直接用 refs 监听 + 短防抖）
@@ -673,19 +751,25 @@ watch(
 )
 
 let syncTimer: ReturnType<typeof setInterval> | null = null
+let stateTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   connectWs()
   refreshTemplates()
   refreshWindows()
   loadHotkey()
-  loadFlowToEngine()
-  // 定时同步流程到引擎，确保全局快捷键随时可用
-  syncTimer = setInterval(loadFlowToEngine, 1000)
+  loadFlowToEngine(true)
+  // 定时兜底同步流程到引擎（内部已按指纹去重），确保全局快捷键随时可用
+  syncTimer = setInterval(() => loadFlowToEngine(), 1000)
+  // 定时同步真实运行状态：任何状态广播丢失都能在一秒内自愈，按钮不再卡死
+  stateTimer = setInterval(syncRunState, 1000)
 })
 onBeforeUnmount(() => {
+  destroyed = true
+  if (wsRetry) clearTimeout(wsRetry)
   ws?.close()
   if (syncTimer) clearInterval(syncTimer)
+  if (stateTimer) clearInterval(stateTimer)
 })
 </script>
 

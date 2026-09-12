@@ -38,6 +38,8 @@ user32.GetGUIThreadInfo.restype = wintypes.BOOL
 user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.c_void_p]
 user32.VkKeyScanW.restype = ctypes.c_short
 user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
+user32.GetCursorPos.restype = wintypes.BOOL
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
 
 GA_ROOT = 2
 
@@ -55,7 +57,7 @@ WM_CHAR = 0x0102
 
 _VK = {
     "enter": 0x0D, "esc": 0x1B, "space": 0x20, "tab": 0x09,
-    "shift": 0x10, "ctrl": 0x11, "alt": 0x12,
+    "shift": 0x10, "ctrl": 0x11, "alt": 0x12, "win": 0x5B,
     "backspace": 0x08, "delete": 0x2E, "home": 0x24, "end": 0x23,
     "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
     "page_up": 0x21, "page_down": 0x22,
@@ -65,7 +67,7 @@ _VK = {
 
 _KEY_MAP = {
     "enter": Key.enter, "esc": Key.esc, "space": Key.space, "tab": Key.tab,
-    "shift": Key.shift, "ctrl": Key.ctrl, "alt": Key.alt,
+    "shift": Key.shift, "ctrl": Key.ctrl, "alt": Key.alt, "win": Key.cmd,
     "up": Key.up, "down": Key.down, "left": Key.left, "right": Key.right,
     "backspace": Key.backspace, "delete": Key.delete,
     "home": Key.home, "end": Key.end,
@@ -73,6 +75,11 @@ _KEY_MAP = {
     "f1": Key.f1, "f2": Key.f2, "f3": Key.f3, "f4": Key.f4, "f5": Key.f5, "f6": Key.f6,
     "f7": Key.f7, "f8": Key.f8, "f9": Key.f9, "f10": Key.f10, "f11": Key.f11, "f12": Key.f12,
 }
+
+# 扩展键（lParam bit 24 需置 1，否则方向键/编辑键在部分程序中错乱）
+_EXTENDED_VKS = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2E, 0x5B, 0x5C, 0x5D}
+
+_MOD_KEYS = ("ctrl", "alt", "shift", "win")
 
 
 class GUITHREADINFO(ctypes.Structure):
@@ -87,6 +94,15 @@ class GUITHREADINFO(ctypes.Structure):
         ("hwndCaret", wintypes.HWND),
         ("rcCaret", wintypes.RECT),
     ]
+
+
+# ---------- 组合键解析 ----------
+def _split_combo(key: str) -> tuple[list[str], list[str]]:
+    """把 "ctrl+shift+a" 拆成 (修饰键列表, 主键列表)，保持出现顺序。"""
+    parts = [p.strip().lower() for p in str(key).split("+") if p.strip()]
+    mods = [p for p in parts if p in _MOD_KEYS]
+    mains = [p for p in parts if p not in _MOD_KEYS]
+    return mods, mains
 
 
 # ---------- 公共入口 ----------
@@ -107,17 +123,36 @@ def move(x: int, y: int, mode: str = "real", hwnd: int | None = None) -> None:
 
 
 def press_key(key: str, mode: str = "real", hwnd: int | None = None) -> None:
+    """按下并抬起按键，支持 "ctrl+shift+a" 组合键。"""
+    mods, mains = _split_combo(key)
+    if not mains:
+        mains = mods  # 纯修饰键（如单独 "ctrl"）按普通键处理
+        mods = []
     if mode == "simulated" and hwnd:
         target = _focus_of(int(hwnd))
-        vk = _key_to_vk(key)
-        if vk:
+        mod_vks = [v for v in (_key_to_vk(m) for m in mods) if v]
+        main_vks = [v for v in (_key_to_vk(k) for k in mains) if v]
+        if not main_vks:
+            return
+        for vk in mod_vks:
+            user32.PostMessageW(target, WM_KEYDOWN, vk, _key_lparam(vk, False))
+        for vk in main_vks:
             user32.PostMessageW(target, WM_KEYDOWN, vk, _key_lparam(vk, False))
             time.sleep(0.03)
             user32.PostMessageW(target, WM_KEYUP, vk, _key_lparam(vk, True))
+        for vk in reversed(mod_vks):
+            user32.PostMessageW(target, WM_KEYUP, vk, _key_lparam(vk, True))
     else:
-        k = _map_key(key)
-        _keyboard.press(k)
-        _keyboard.release(k)
+        pressed_mods = []
+        for m in mods:
+            _keyboard.press(_map_key(m))
+            pressed_mods.append(m)
+        for k in mains:
+            mk = _map_key(k)
+            _keyboard.press(mk)
+            _keyboard.release(mk)
+        for m in reversed(pressed_mods):
+            _keyboard.release(_map_key(m))
 
 
 def type_text(text: str, mode: str = "real", hwnd: int | None = None) -> None:
@@ -153,25 +188,44 @@ def mouse_up(x: int, y: int, button: str = "left", mode: str = "real", hwnd: int
 def key_down(key: str, mode: str = "real", hwnd: int | None = None) -> None:
     if mode == "simulated" and hwnd:
         target = _focus_of(int(hwnd))
-        vk = _key_to_vk(key)
-        if vk:
-            user32.PostMessageW(target, WM_KEYDOWN, vk, _key_lparam(vk, False))
+        for part in [p.strip().lower() for p in str(key).split("+") if p.strip()]:
+            vk = _key_to_vk(part)
+            if vk:
+                user32.PostMessageW(target, WM_KEYDOWN, vk, _key_lparam(vk, False))
     else:
-        _keyboard.press(_map_key(key))
+        for part in [p.strip().lower() for p in str(key).split("+") if p.strip()]:
+            _keyboard.press(_map_key(part))
 
 
 def key_up(key: str, mode: str = "real", hwnd: int | None = None) -> None:
+    parts = [p.strip().lower() for p in str(key).split("+") if p.strip()]
     if mode == "simulated" and hwnd:
         target = _focus_of(int(hwnd))
-        vk = _key_to_vk(key)
-        if vk:
-            user32.PostMessageW(target, WM_KEYUP, vk, _key_lparam(vk, True))
+        for part in reversed(parts):
+            vk = _key_to_vk(part)
+            if vk:
+                user32.PostMessageW(target, WM_KEYUP, vk, _key_lparam(vk, True))
     else:
-        _keyboard.release(_map_key(key))
+        for part in reversed(parts):
+            _keyboard.release(_map_key(part))
 
 
-def scroll(dx: int, dy: int) -> None:
-    _mouse.scroll(int(dx), int(dy))
+def scroll(dx: int, dy: int, mode: str = "real", hwnd: int | None = None,
+           x: int | None = None, y: int | None = None) -> None:
+    """滚轮。模拟模式用 PostMessage(WM_MOUSEWHEEL) 发给目标窗口焦点，不占用物理鼠标。"""
+    if mode == "simulated" and hwnd:
+        target = _focus_of(int(hwnd))
+        # WM_MOUSEWHEEL: wParam 高 16 位为 delta（120 的倍数），lParam 为屏幕坐标
+        if x is None or y is None:
+            pt = wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            x, y = pt.x, pt.y
+        delta = int(dy) * 120
+        wparam = (int(delta) & 0xFFFF) << 16
+        lparam = ((int(y) & 0xFFFF) << 16) | (int(x) & 0xFFFF)
+        user32.PostMessageW(target, WM_MOUSEWHEEL, wparam, lparam)
+    else:
+        _mouse.scroll(int(dx), int(dy))
 
 
 def probe(hwnd: int, x: int, y: int) -> dict:
@@ -259,6 +313,8 @@ def _mouse_lparam(cx: int, cy: int) -> int:
 def _key_lparam(vk: int, up: bool) -> int:
     scan = int(user32.MapVirtualKeyW(int(vk), 0)) & 0xFF
     lp = 1 | (scan << 16)
+    if int(vk) in _EXTENDED_VKS:
+        lp |= 1 << 24  # 扩展键标志（方向键/Ins/Del/Win 等）
     if up:
         lp |= (1 << 30) | (1 << 31)
     return lp

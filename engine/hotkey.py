@@ -22,6 +22,8 @@ def _norm(key) -> str:
             return "ctrl"
         if name.startswith("shift"):
             return "shift"
+        if name.startswith("cmd"):  # pynput 的 Win 键叫 cmd/cmd_l/cmd_r，前端记为 win
+            return "win"
         return name
     if isinstance(key, keyboard.KeyCode):
         return (key.char or "").lower()
@@ -51,7 +53,10 @@ class HotkeyManager:
         return list(self.keys)
 
     def set(self, keys: list[str]) -> None:
-        self.keys = [str(k).lower() for k in keys if k]
+        cleaned = [str(k).strip().lower() for k in keys if str(k).strip()]
+        if not cleaned:
+            raise ValueError("快捷键不能为空")
+        self.keys = cleaned
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data: dict = {}
         try:
@@ -59,7 +64,10 @@ class HotkeyManager:
         except Exception:
             pass
         data["hotkey"] = self.keys
-        self.path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        # 原子写入：先写临时文件再替换，避免崩溃时截断配置
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self.path)
 
     def _on_press(self, key):
         self.pressed.add(_norm(key))

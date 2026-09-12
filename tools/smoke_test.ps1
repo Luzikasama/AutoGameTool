@@ -61,6 +61,9 @@ New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 $env:TEMP = $tmpDir
 $env:TMP  = $tmpDir
 $env:AUTOGAMETOOL_NO_BROWSER = '1'
+# 引擎 0.3.0 起 API 需要访问令牌：测试通过环境变量固定令牌并随请求携带
+$env:AUTOGAMETOOL_TOKEN = 'smoke-test-token'
+$AuthHeaders = @{ Authorization = 'Bearer smoke-test-token' }
 
 function Clear-SmokeTemp {
     # 清掉本次兜底创建的临时目录，避免污染 exe 所在目录（进而影响卸载后目录能否删除）
@@ -124,33 +127,51 @@ if (-not $up) {
 }
 
 # ---------------------------------------------------------- 2. 接口检查
+# 安全回归：不带令牌的 API 请求必须被拒（401）
 try {
-    $kb = Invoke-RestMethod "$Base/debug/kb" -TimeoutSec 5
+    $null = Invoke-RestMethod "$Base/windows/list" -TimeoutSec 5
+    Add-Result 'API 鉴权（无令牌应 401）' $false '无令牌请求竟被放行'
+} catch {
+    $code = $null
+    if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+    Add-Result 'API 鉴权（无令牌应 401）' ($code -eq 401) "HTTP $code"
+}
+
+try {
+    $kb = Invoke-RestMethod "$Base/debug/kb" -Headers $AuthHeaders -TimeoutSec 5
     $alive = $null
     if ($kb.PSObject.Properties.Name -contains 'alive') { $alive = $kb.alive }
-    Add-Result '/debug/kb 键盘钩子' ($alive -ne $false) "alive=$alive press=$($kb.press) release=$($kb.release)"
+    $noLast = -not ($kb.PSObject.Properties.Name -contains 'last')
+    Add-Result '/debug/kb 键盘钩子' (($alive -ne $false) -and $noLast) "alive=$alive press=$($kb.press) release=$($kb.release) 不含按键内容=$noLast"
 } catch { Add-Result '/debug/kb 键盘钩子' $false $_.Exception.Message }
 
 try {
-    $w = Invoke-RestMethod "$Base/windows/list" -TimeoutSec 8
+    $w = Invoke-RestMethod "$Base/windows/list" -Headers $AuthHeaders -TimeoutSec 8
     Add-Result '/windows/list 窗口枚举' ($null -ne $w) "$(@($w).Count) 个任务栏窗口"
 } catch { Add-Result '/windows/list 窗口枚举' $false $_.Exception.Message }
 
 try {
-    $t = Invoke-RestMethod "$Base/vision/templates" -TimeoutSec 8
+    $t = Invoke-RestMethod "$Base/vision/templates" -Headers $AuthHeaders -TimeoutSec 8
     Add-Result '/vision/templates 模板列表' ($null -ne $t) "$(@($t).Count) 个模板"
 } catch { Add-Result '/vision/templates 模板列表' $false $_.Exception.Message }
 
 try {
-    $hk = Invoke-RestMethod "$Base/config/hotkey" -TimeoutSec 5
+    $hk = Invoke-RestMethod "$Base/config/hotkey" -Headers $AuthHeaders -TimeoutSec 5
     Add-Result '/config/hotkey 快捷键' ($null -ne $hk) ($hk | ConvertTo-Json -Compress)
 } catch { Add-Result '/config/hotkey 快捷键' $false $_.Exception.Message }
 
 try {
     $body = @{ flow = @{ name = 'smoke'; repeat = 1; input_mode = 'real'; window = $null; nodes = @(); edges = @() } } | ConvertTo-Json -Depth 8
-    $fl = Invoke-RestMethod "$Base/flow/load" -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 8
+    $fl = Invoke-RestMethod "$Base/flow/load" -Method Post -Body $body -ContentType 'application/json' -Headers $AuthHeaders -TimeoutSec 8
     Add-Result 'POST /flow/load 流程装载' ($null -ne $fl) ($fl | ConvertTo-Json -Compress)
 } catch { Add-Result 'POST /flow/load 流程装载' $false $_.Exception.Message }
+
+# 安全回归：SPA 路径遍历必须被拦截（应回退到 index.html 而不是读到引擎源码）
+try {
+    $r = Invoke-WebRequest "$Base/x/%2e%2e/main.py" -TimeoutSec 8 -UseBasicParsing
+    $leaked = $r.Content -match 'FastAPI'
+    Add-Result 'SPA 路径遍历防护' (-not $leaked) $(if ($leaked) { '泄露了引擎源码！' } else { '已回退 index.html' })
+} catch { Add-Result 'SPA 路径遍历防护' $true "请求被拒绝（$($_.Exception.Message)）" }
 
 # ---------------------------------------------------------- 3. 内嵌前端资源
 try {
