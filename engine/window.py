@@ -1,5 +1,6 @@
 """窗口模块：枚举任务栏窗口、获取窗口区域、截图指定窗口（ctypes + mss）。"""
 import ctypes
+import os
 import time
 from ctypes import wintypes
 
@@ -8,6 +9,7 @@ import mss
 import numpy as np
 
 user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
 dwmapi = ctypes.windll.dwmapi
 gdi32 = ctypes.windll.gdi32
 
@@ -18,6 +20,13 @@ WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
 DWMWA_CLOAKED = 14
 SW_RESTORE = 9
+
+
+class WindowMinimizedError(ValueError):
+    """目标窗口已最小化，且调用方不允许引擎自动把它弹出来。
+
+    继承 ValueError，使既有的 `except ValueError` 分支无需改动也能捕获。
+    """
 
 
 class RECT(ctypes.Structure):
@@ -109,10 +118,20 @@ def get_window(hwnd: int) -> dict | None:
     return None
 
 
-def capture_window(hwnd: int) -> np.ndarray:
-    """截取指定窗口内容（PrintWindow，可捕获被遮挡/DirectX 窗口），返回 BGR。"""
-    # 最小化则先恢复
+def capture_window(hwnd: int, restore_minimized: bool = False) -> np.ndarray:
+    """截取指定窗口内容（PrintWindow，可捕获被遮挡/DirectX 窗口），返回 BGR。
+
+    `restore_minimized=False`（默认）时，若窗口已最小化就抛 WindowMinimizedError，
+    **不**自动把窗口弹出来。原因：挂机时用户常常故意把窗口最小化，旧版无条件
+    ShowWindow(SW_RESTORE) 会让窗口反复弹回前台，表现为"最小化失败"
+    （代码审查报告 R3）。需要弹窗的调用方（用户主动点击的预览/取模板）显式传 True。
+    """
     if user32.IsIconic(hwnd):
+        if not restore_minimized:
+            raise WindowMinimizedError(
+                "目标窗口已最小化。为避免打断你正在做的事，引擎不会自动把它弹到前台；"
+                "请先恢复该窗口，或在界面里用「截取」手动抓取。"
+            )
         user32.ShowWindow(hwnd, SW_RESTORE)
         time.sleep(0.3)
     rect = get_window_rect(hwnd)
@@ -223,3 +242,143 @@ def capture_window_fast(hwnd: int) -> np.ndarray:
 
 def set_foreground(hwnd: int) -> None:
     user32.SetForegroundWindow(hwnd)
+
+
+def _process_exe(pid: int) -> str:
+    """取进程可执行文件名（小写，仅文件名），失败返回空串。"""
+    try:
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+        ]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return buf.value.rsplit("\\", 1)[-1].lower()
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+    return ""
+
+
+def _class_name(hwnd: int) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
+# 常见浏览器进程名 / 窗口类名（Chromium 系与 Firefox 系的类名很稳定，
+# 比只认 exe 名字更能覆盖改了名的 Chromium 套壳浏览器）
+_BROWSER_EXES = {
+    "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe",
+    "vivaldi.exe", "chromium.exe", "thorium.exe", "arc.exe", "iexplore.exe",
+    "360se.exe", "360chrome.exe", "qqbrowser.exe", "sogouexplorer.exe",
+    "maxthon.exe", "ucbrowser.exe", "liebao.exe", "theworld.exe", "avastbrowser.exe",
+}
+_BROWSER_CLASSES = ("Chrome_WidgetWin", "MozillaWindowClass")
+
+
+def find_webui_window(page_title: str, exclude_pids: set[int] | None = None) -> dict | None:
+    """定位 WebUI 所在的**浏览器**窗口。
+
+    为什么不能只按标题匹配：项目目录经常被资源管理器打开着，其窗口标题恰好就是
+    「AutoGameTool」。旧实现只按标题找、还优先选未最小化的窗口，于是「界面」按钮
+    永远弹出资源管理器而不是最小化的浏览器。因此这里再加两道约束：
+
+    1. 类名或进程名必须看起来像浏览器；
+    2. 排除自身进程与 explorer.exe。
+
+    排序：先浏览器 → 再未最小化 → 最后取面积最大的（主窗口而非小面板）。
+    """
+    hint = (page_title or "").strip().lower()
+    if not hint:
+        return None
+    exclude = set(exclude_pids or ())
+    exclude.add(os.getpid())
+
+    matched: list[dict] = []
+    proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = buf.value
+        if hint not in title.lower():
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value in exclude:
+            return True
+        exe = _process_exe(pid.value)
+        if exe == "explorer.exe":
+            return True
+        cls = _class_name(hwnd)
+        is_browser = exe in _BROWSER_EXES or any(cls.startswith(c) for c in _BROWSER_CLASSES)
+        rect = get_window_rect(hwnd)
+        matched.append(
+            {
+                "hwnd": hwnd,
+                "title": title,
+                "rect": rect,
+                "minimized": bool(user32.IsIconic(hwnd)),
+                "exe": exe,
+                "class": cls,
+                "browser": is_browser,
+            }
+        )
+        return True
+
+    try:
+        user32.EnumWindows(proc_type(_cb), 0)
+    except Exception:
+        return None
+    if not matched:
+        return None
+    matched.sort(
+        key=lambda w: (
+            not w["browser"],
+            w["minimized"],
+            -(w["rect"]["width"] * w["rect"]["height"]),
+        )
+    )
+    return matched[0]
+
+
+def focus_window(hwnd: int) -> bool:
+    """把窗口恢复（若已最小化）并切到前台，成功返回 True。
+
+    用同步的 ShowWindow 而不是 ShowWindowAsync：后者只是把请求投递到目标线程的
+    消息队列，若目标线程没有在跑消息泵就永远不会生效。
+    """
+    try:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+        if user32.SetForegroundWindow(hwnd):
+            return True
+        # 兜底：把本线程输入附加到当前前台线程后再切换（Windows 限制前台切换权限）
+        fg = user32.GetForegroundWindow()
+        if fg and fg != hwnd:
+            tid_fg = user32.GetWindowThreadProcessId(fg, None)
+            tid_self = kernel32.GetCurrentThreadId()
+            if tid_fg and tid_fg != tid_self:
+                user32.AttachThreadInput(tid_self, tid_fg, True)
+                try:
+                    user32.SetForegroundWindow(hwnd)
+                finally:
+                    user32.AttachThreadInput(tid_self, tid_fg, False)
+        return bool(user32.SetForegroundWindow(hwnd))
+    except Exception:
+        return False

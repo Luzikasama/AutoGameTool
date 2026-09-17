@@ -9,6 +9,7 @@ from pynput import mouse
 
 import keybus
 import mousebus
+import overlay
 from hotkey import _norm
 
 
@@ -23,6 +24,8 @@ class Recorder:
         self._last_move = 0.0
         self._pressed: set[str] = set()
         self._fired = False
+        # 已被过滤的按下键（用于把配对的抬起也一起丢掉，避免留下孤立 mouseup）
+        self._suppressed: set[str] = set()
         # 键盘回调常驻（用于 alt+9 热键）
         keybus.register(on_press=self._on_press, on_release=self._on_release)
 
@@ -47,6 +50,9 @@ class Recorder:
 
     # ---- 鼠标 ----
     def _on_move(self, x, y):
+        # 悬浮框自身的移动轨迹不录（点它只是为了操作悬浮框）
+        if overlay.hit_test(x, y):
+            return
         now = time.time()
         if now - self._last_move < 0.03:
             return
@@ -55,6 +61,15 @@ class Recorder:
 
     def _on_click(self, x, y, button, pressed):
         b = "right" if button == mouse.Button.right else ("middle" if button == mouse.Button.middle else "left")
+        # 点在自己身上的按下/抬起都不录：否则用悬浮框按钮开始或停止录制时，
+        # 这一下点击会被录进宏里，回放时又点到同一个按钮 → 递归录制。
+        if pressed:
+            if overlay.hit_test(x, y):
+                self._suppressed.add(b)
+                return
+        elif b in self._suppressed:
+            self._suppressed.discard(b)
+            return
         self.events.append(
             {
                 "t": self._ts(),
@@ -66,6 +81,8 @@ class Recorder:
         )
 
     def _on_scroll(self, x, y, dx, dy):
+        if overlay.hit_test(x, y):
+            return
         self.events.append(
             {"t": self._ts(), "type": "scroll", "x": int(x), "y": int(y), "dx": int(dx), "dy": int(dy)}
         )
@@ -82,6 +99,7 @@ class Recorder:
             return
         self.recording = True
         self.events = []
+        self._suppressed.clear()
         self._start_time = time.time()
         self._last_move = 0.0
         # 只注册鼠标回调，监听器本身常驻

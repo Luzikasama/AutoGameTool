@@ -1,16 +1,8 @@
 """全局快捷键监听（基于常驻键盘事件总线），默认 alt+f1。"""
-import json
-import os
-from pathlib import Path
-
 from pynput import keyboard
 
+import appconfig
 import keybus
-
-
-def _config_path() -> Path:
-    base = Path(os.environ.get("APPDATA", str(Path.home()))) / "AutoGameTool"
-    return base / "config.json"
 
 
 def _norm(key) -> str:
@@ -33,20 +25,15 @@ def _norm(key) -> str:
 class HotkeyManager:
     def __init__(self, callback) -> None:
         self.callback = callback
-        self.path = _config_path()
         self.keys = self._load()
         self.pressed: set[str] = set()
         self._fired = False
         keybus.register(on_press=self._on_press, on_release=self._on_release)
 
     def _load(self) -> list[str]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            keys = data.get("hotkey", ["alt", "f1"])
-            if isinstance(keys, list) and keys:
-                return [str(k).lower() for k in keys]
-        except Exception:
-            pass
+        keys = appconfig.get("hotkey", ["alt", "f1"])
+        if isinstance(keys, list) and keys:
+            return [str(k).lower() for k in keys]
         return ["alt", "f1"]
 
     def get(self) -> list[str]:
@@ -57,17 +44,8 @@ class HotkeyManager:
         if not cleaned:
             raise ValueError("快捷键不能为空")
         self.keys = cleaned
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict = {}
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-        data["hotkey"] = self.keys
-        # 原子写入：先写临时文件再替换，避免崩溃时截断配置
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self.path)
+        # 原子写入交由 appconfig 统一处理，避免多处读-改-写互相覆盖
+        appconfig.update(hotkey=self.keys)
 
     def _on_press(self, key):
         self.pressed.add(_norm(key))

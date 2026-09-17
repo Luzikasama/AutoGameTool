@@ -89,6 +89,18 @@ export const engine = {
   loadFlow: (flow: unknown) => apiPost('/flow/load', { flow }),
   stop: () => apiPost<{ ok: boolean; running: boolean }>('/run/stop'),
   runState: () => apiGet<{ running: boolean }>('/run/state'),
+  overlayState: () =>
+    apiGet<{
+      enabled: boolean
+      available: boolean
+      visible: boolean
+      loop: number
+      total: number
+      step: string
+      error: string
+    }>('/overlay/state'),
+  setOverlay: (enabled: boolean) =>
+    apiPost<{ enabled: boolean; available: boolean; error: string }>('/overlay/enable', { enabled }),
   getHotkey: () => apiGet<{ hotkey: string[] }>('/config/hotkey'),
   setHotkey: (hotkey: string[]) => apiPost('/config/hotkey', { hotkey }),
   startPick: () => apiPost('/pick/start'),

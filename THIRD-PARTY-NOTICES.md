@@ -30,6 +30,8 @@
 | anyio | — | MIT |
 | mss | 10.2.0 | MIT |
 | CPython / Python 标准库 | 3.13.x | PSF-2.0 |
+| tkinter（Python 标准库模块，悬浮框使用） | 3.13.x | PSF-2.0 |
+| Tcl/Tk（tkinter 依赖的原生库，随 Python 分发） | 8.6 | Tcl/Tk License（BSD 风格） |
 
 ### 构建工具（用于生成发行版，不作为运行时组件打包）
 

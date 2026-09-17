@@ -453,23 +453,33 @@ function onLoadFile(e: Event) {
     try {
       const data = JSON.parse(reader.result as string) as FlowFile
       if (data.format !== 'agflow') throw new Error('不是有效的 AutoGameTool 脚本文件')
-      store.flowName = data.name || '未命名脚本'
+      // 脚本名：优先用文件内记录的名字；若为空或是占位名「未命名脚本」，则退回用文件名。
+      // （没改名就保存的文件，内部记的就是占位名，此时用文件名才对应你给脚本起的名字）
+      const innerName = String(data.name ?? '').trim()
+      const fileName = String(file.name || '').replace(/\.agflow$/i, '').trim()
+      store.flowName =
+        innerName && innerName !== '未命名脚本' ? innerName : fileName || innerName || '未命名脚本'
       store.repeat = data.repeat || 1
       store.inputMode = data.input_mode || 'real'
-      store.boundWindow = data.window || null
-      selectedWinHwnd.value = data.window?.hwnd ?? 0
+      // 默认全局：不恢复脚本里保存的窗口绑定。
+      // 旧文件里的 hwnd 早就失效，直接恢复会让下拉框显示成一个「空进程」并要求手动重选。
+      // 需要绑定时在顶栏手动选择即可。
+      const hadWindow = !!data.window
+      store.boundWindow = null
+      selectedWinHwnd.value = 0
       nodes.value = data.nodes || []
       edges.value = data.edges || []
       // 保留文件的分辨率参考（其中的坐标以该分辨率为基准）
       fileScreen.value = data.screen ?? null
-      fileWindowRect.value = data.window?.rect ?? null
+      // 不再绑定窗口，窗口 rect 参考也一并作废，避免之后手动绑定窗口时用到旧 rect
+      fileWindowRect.value = null
       // 取现有节点 ID 的最大数字后缀，避免新增节点撞 ID
       nodeSeq = Math.max(
         0,
         ...nodes.value.map((n) => parseInt(String(n.id).replace(/\D/g, ''), 10) || 0),
       )
       selectedId.value = null
-      message.success('脚本已加载')
+      message.success(hadWindow ? '脚本已加载（默认全局绑定，未恢复原窗口）' : '脚本已加载')
     } catch (err: any) {
       message.error('加载失败：' + err.message)
     }
@@ -645,6 +655,31 @@ async function syncRunState() {
   }
 }
 
+// ---------- 悬浮框（由引擎创建的原生置顶小窗，显示循环进度与当前步骤）----------
+const overlayEnabled = ref(false)
+const overlayAvailable = ref(true)
+
+async function syncOverlay() {
+  try {
+    const s = await engine.overlayState()
+    overlayEnabled.value = !!s.enabled
+    overlayAvailable.value = s.available !== false
+  } catch {
+    /* 引擎不可达时下个周期再试 */
+  }
+}
+
+async function toggleOverlay() {
+  try {
+    const s = await engine.setOverlay(!overlayEnabled.value)
+    overlayEnabled.value = !!s.enabled
+    overlayAvailable.value = s.available !== false
+    message.success(overlayEnabled.value ? '悬浮框已开启' : '悬浮框已关闭')
+  } catch (e: any) {
+    message.error('切换悬浮框失败：' + e.message)
+  }
+}
+
 function connectWs() {
   if (destroyed) return
   ws = new WebSocket(engineWsUrl())
@@ -658,6 +693,8 @@ function connectWs() {
       const msg = JSON.parse(ev.data)
       if (msg.type === 'log') store.addLog(msg)
       else if (msg.type === 'state') store.running = msg.state === 'running'
+      else if (msg.type === 'overlay') overlayEnabled.value = !!msg.enabled
+      else if (msg.type === 'repeat') store.repeat = Number(msg.value) || 1
       else if (msg.type === 'picked') onPicked(msg.x, msg.y)
       else if (msg.type === 'hotkey') toggleScript()
       else if (msg.type === 'recording') macroRecording.value = !!msg.recording
@@ -758,6 +795,7 @@ onMounted(() => {
   refreshTemplates()
   refreshWindows()
   loadHotkey()
+  syncOverlay()
   loadFlowToEngine(true)
   // 定时兜底同步流程到引擎（内部已按指纹去重），确保全局快捷键随时可用
   syncTimer = setInterval(() => loadFlowToEngine(), 1000)
@@ -817,6 +855,23 @@ onBeforeUnmount(() => {
             <n-button size="small" @click="hotkeyVisible = true">⌨ 快捷键</n-button>
           </template>
           全局启停快捷键（默认 alt+f1）
+        </n-tooltip>
+      </div>
+      <div class="setting">
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button
+              size="small"
+              :type="overlayEnabled ? 'primary' : 'default'"
+              :disabled="!overlayAvailable"
+              @click="toggleOverlay"
+            >
+              🪟 悬浮框{{ overlayEnabled ? '已开' : '' }}
+            </n-button>
+          </template>
+          {{ overlayAvailable
+            ? '在游戏画面上方置顶显示循环进度与当前步骤（可拖拽，点 ✕ 收起）'
+            : '悬浮框不可用：当前运行环境缺少 tkinter' }}
         </n-tooltip>
       </div>
       <div class="setting">

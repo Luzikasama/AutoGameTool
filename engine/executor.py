@@ -12,8 +12,21 @@ import traceback
 from typing import Any, Callable
 
 import inputctl
+import overlay
 import vision
 import window
+
+# 悬浮框里显示的节点中文名
+_STEP_LABEL = {
+    "delay": "延时",
+    "find_image": "找图",
+    "click": "鼠标点击",
+    "key": "键盘按键",
+    "text": "输入文本",
+    "judge": "判断分支",
+    "macro": "键鼠回放",
+    "terminate": "终止条件",
+}
 
 
 def validate_flow(flow: dict) -> None:
@@ -46,9 +59,25 @@ class Executor:
         self.stopped = False
         self.running = False
         self.current_flow: dict | None = None
+        # 当前执行任务的强引用，供 stop()/reconcile() 判断「是否真有流程在跑」
+        self.task: "asyncio.Task | None" = None
 
     def stop(self) -> None:
         self.stopped = True
+        # 没有真正在跑的任务（例如任务已异常退出但状态残留）时直接复位，
+        # 否则前端的「停止」按钮会一直卡住，点也点不回来
+        if self.task is None or self.task.done():
+            self.running = False
+
+    def reconcile(self) -> bool:
+        """把 running 与实际任务状态对齐，返回修正后的 running。
+
+        兜底任何让 run() 的 finally 未能执行的异常路径：任务已结束却仍标记运行中时
+        自动复位，前端靠 1 秒轮询 /run/state 即可自愈。
+        """
+        if self.running and (self.task is None or self.task.done()):
+            self.running = False
+        return self.running
 
     async def log(self, level: str, msg: str, step: str | None = None) -> None:
         await self.broadcast(
@@ -56,11 +85,44 @@ class Executor:
         )
 
     async def _state(self, state: str) -> None:
+        # 悬浮框上的启停按钮要跟着真实状态走
+        try:
+            overlay.set_run_state(state == "running")
+        except Exception:
+            pass
         await self.broadcast({"type": "state", "state": state, "ts": time.time()})
+
+    @staticmethod
+    def _ov(loop: int, total: int, step: str) -> None:
+        """更新悬浮框。
+
+        必须彻底防御：悬浮框只是显示层，任何异常都不能影响流程执行
+        （曾因 overlay 模块缺少模块级 update() 而让每次运行都在起跑处异常退出）。
+        """
+        try:
+            overlay.update(loop, total, step)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _step_text(node: dict) -> str:
+        ntype = str(node.get("type") or "?")
+        label = _STEP_LABEL.get(ntype, ntype)
+        p = node.get("params") or {}
+        extra = ""
+        if ntype in ("find_image", "judge"):
+            extra = str(p.get("template") or "")
+        elif ntype == "key":
+            extra = str(p.get("key") or "")
+        elif ntype == "delay":
+            extra = f"{p.get('ms', 0)} ms"
+        elif ntype == "text":
+            extra = str(p.get("text") or "")[:14]
+        return f"{label} {extra}".strip()
 
     async def toggle(self) -> None:
         """全局快捷键启停。"""
-        if self.running:
+        if self.running and not (self.task and self.task.done()):
             self.stop()
             await self.log("warn", "快捷键触发：停止")
         elif self.current_flow:
@@ -115,33 +177,42 @@ class Executor:
 
     async def run(self, flow: dict) -> None:
         self.current_flow = flow
-        # 先校验再置 running：畸形流程直接拒绝，不会让 running 卡死在 True
-        try:
-            validate_flow(flow)
-            repeat = max(1, int(flow.get("repeat", 1)))
-        except ValueError as e:
-            self.running = False  # /run 端点会提前置位，拒绝时必须复位
-            await self.log("error", f"流程数据无效，已拒绝执行: {e}")
-            await self._state("idle")
-            return
-
-        nodes = flow.get("nodes", [])
-        edges = flow.get("edges", [])
-        input_mode = flow.get("input_mode", "real")
-        win = flow.get("window")
-        hwnd = win.get("hwnd") if isinstance(win, dict) else None
-
+        # 关键：置位 running 之后的全部逻辑都必须落在 try/finally 内。
+        # 旧版把「开跑日志 + 分辨率换算」放在 try 之外，这段一旦抛异常，
+        # finally 不会执行，running 会永久卡在 True——前端右上角一直显示「停止」
+        # 且点击无效（因为 /run/stop 原样回传 running）。
         self.stopped = False
         self.running = True
-        await self._state("running")
-        await self.log(
-            "info",
-            f"开始执行「{flow.get('name', '未命名')}」：{len(nodes)} 节点 × {repeat} 轮，输入模式={input_mode}",
-        )
-        scale_fn, scale_desc = self._make_scaler(flow, hwnd)
-        if scale_fn:
-            await self.log("info", f"分辨率/窗口尺寸适配已启用（{scale_desc}），坐标将按比例换算")
         try:
+            await self._state("running")
+            self._ov(0, 0, "准备中…")
+
+            # 先校验：畸形流程直接拒绝，不会让 running 卡死在 True
+            try:
+                validate_flow(flow)
+                repeat = max(1, int(flow.get("repeat", 1)))
+            except ValueError as e:
+                await self.log("error", f"流程数据无效，已拒绝执行: {e}")
+                return
+
+            nodes = flow.get("nodes", [])
+            edges = flow.get("edges", [])
+            input_mode = flow.get("input_mode", "real")
+            win = flow.get("window")
+            hwnd = win.get("hwnd") if isinstance(win, dict) else None
+
+            await self.log(
+                "info",
+                f"开始执行「{flow.get('name', '未命名')}」：{len(nodes)} 节点 × {repeat} 轮，输入模式={input_mode}",
+            )
+            # 分辨率换算容错：屏幕/窗口数据畸形时退化为不做换算，而不是中断整个流程
+            try:
+                scale_fn, scale_desc = self._make_scaler(flow, hwnd)
+            except Exception as e:
+                scale_fn, scale_desc = None, None
+                await self.log("warn", f"分辨率适配计算失败，将按原坐标执行: {e}")
+            if scale_fn:
+                await self.log("info", f"分辨率/窗口尺寸适配已启用（{scale_desc}），坐标将按比例换算")
             node_map = {n["id"]: n for n in nodes}
             adj: dict[str, list[tuple[str, str]]] = {}
             for e in edges:
@@ -162,8 +233,10 @@ class Executor:
             for r in range(repeat):
                 if self.stopped:
                     await self.log("warn", "已手动停止")
+                    self._ov(r + 1, repeat, "已手动停止")
                     return
                 await self.log("info", f"--- 第 {r + 1}/{repeat} 轮 ---")
+                self._ov(r + 1, repeat, "本轮开始")
                 current = start_id
                 visited = 0
                 max_steps = max(1000, len(node_map) * 100)  # 单轮步数上限，防无终止环空转
@@ -181,10 +254,12 @@ class Executor:
 
                     if ntype == "terminate":
                         await self.log("info", "触发终止条件，立即停止运行")
+                        self._ov(r + 1, repeat, "触发终止条件")
                         self.stopped = True
                         return
 
                     if ntype == "judge":
+                        self._ov(r + 1, repeat, self._step_text(node))
                         found = await self._do_judge(params, input_mode, hwnd)
                         label = "yes" if found else "no"
                         nxt = [t for (h, t) in adj.get(current, []) if h == label]
@@ -198,6 +273,7 @@ class Executor:
                         continue
 
                     await self.log("info", f"节点: {ntype}", current)
+                    self._ov(r + 1, repeat, self._step_text(node))
                     try:
                         await self._run_step(node, input_mode, hwnd, scale_fn)
                     except Exception as e:
@@ -207,12 +283,18 @@ class Executor:
                     nxt = adj.get(current, [])
                     current = nxt[0][1] if nxt else None
             await self.log("info", "流程执行完成")
+            self._ov(repeat, repeat, "流程执行完成")
         except Exception as e:
             await self.log("error", f"执行异常: {e}")
+            self._ov(0, 0, f"执行异常：{e}")
             traceback.print_exc()
         finally:
             self.running = False
-            await self._state("idle")
+            # 广播失败不应把异常抛回调用方（此时 running 已复位，状态本来就正确）
+            try:
+                await self._state("idle")
+            except Exception:
+                pass
 
     @staticmethod
     def _reachable(adj: dict, start: str) -> set[str]:
@@ -392,6 +474,8 @@ class Executor:
     def _capture(self, hwnd, input_mode: str = "real"):
         if hwnd:
             if input_mode == "simulated":
+                # restore_minimized 默认 False：窗口被最小化时报错，而不是把它弹到前台。
+                # 否则用户故意最小化的窗口会被每个找图/判断节点反复弹回（"最小化失败"）。
                 return window.capture_window(hwnd)  # PrintWindow（后台也能截）
             return window.capture_window_fast(hwnd)  # mss（快，窗口需可见）
         return vision.grab_frame()

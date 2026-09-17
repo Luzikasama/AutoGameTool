@@ -26,12 +26,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import appconfig
+import overlay
 import vision
 from executor import Executor, validate_flow
 from hotkey import HotkeyManager
 from picker import CoordinatePicker
 from recorder import Recorder
-from window import capture_window, get_window_rect, list_windows
+from window import capture_window, find_webui_window, focus_window, get_window_rect, list_windows
 from ws_manager import manager
 
 
@@ -92,6 +94,10 @@ class HotkeyRequest(BaseModel):
     hotkey: list[str]
 
 
+class OverlayRequest(BaseModel):
+    enabled: bool
+
+
 executor = Executor(manager.broadcast)
 hotkey_manager: HotkeyManager | None = None
 picker: CoordinatePicker | None = None
@@ -99,20 +105,124 @@ recorder: Recorder | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 
 
+_REPEAT_MIN, _REPEAT_MAX = 1, 9999
+_repeat_value = 1
+# 页面标题（frontend/index.html 的 <title>），用于定位 WebUI 所在窗口
+_WEBUI_TITLE_HINT = "AutoGameTool"
+
+
+def _overlay_closed() -> None:
+    """悬浮框上点 ✕：同步开关到前端并持久化。
+
+    该回调由 Tk 线程触发，因此必须切回事件循环线程再做广播。
+    """
+    appconfig.update(overlay=False)
+    if _loop is None:
+        return
+    _loop.call_soon_threadsafe(
+        lambda: _spawn(manager.broadcast({"type": "overlay", "enabled": False, "ts": time.time()}))
+    )
+
+
+async def _toggle_run() -> None:
+    """启停流程：全局快捷键与悬浮框按钮共用这一条链路。
+
+    有前端连接时通知前端执行（前端调用 /run，保证跑的是画布上最新的流程）；
+    否则退化为引擎侧 toggle（使用最近一次 /flow/load 的流程）。
+    """
+    if manager.connections:
+        await manager.broadcast({"type": "hotkey", "ts": time.time()})
+    else:
+        await executor.toggle()
+
+
+def _toggle_record() -> None:
+    if recorder is not None:
+        recorder.toggle()
+
+
+def _sync_repeat(flow: dict) -> None:
+    """把流程里的循环轮数同步到引擎侧阴影值与悬浮框显示。"""
+    global _repeat_value
+    try:
+        value = int(flow.get("repeat", 1))
+    except (TypeError, ValueError):
+        value = 1
+    _repeat_value = max(_REPEAT_MIN, min(_REPEAT_MAX, value))
+    overlay.set_repeat(_repeat_value)
+
+
+def _change_repeat(delta: int) -> int:
+    global _repeat_value
+    _repeat_value = max(_REPEAT_MIN, min(_REPEAT_MAX, _repeat_value + delta))
+    overlay.set_repeat(_repeat_value)
+    flow = executor.current_flow
+    if isinstance(flow, dict):
+        # 无前端连接时，引擎侧也能按新的轮数执行
+        flow["repeat"] = _repeat_value
+    return _repeat_value
+
+
+async def _focus_webui() -> None:
+    """把 WebUI 所在的浏览器窗口恢复并切到前台（悬浮框「界面」按钮）。
+
+    注意只按标题找会命中同名文件夹的资源管理器窗口，因此 window.find_webui_window
+    额外要求「类名/进程像浏览器」并排除 explorer.exe 与自身进程。
+    """
+    target = await asyncio.to_thread(find_webui_window, _WEBUI_TITLE_HINT)
+    if not target:
+        await manager.broadcast(
+            {
+                "type": "log",
+                "level": "warn",
+                "message": "未找到 WebUI 浏览器窗口：请确认 AutoGameTool 标签页仍开着（页面标题需含 AutoGameTool）",
+                "step": None,
+                "ts": time.time(),
+            }
+        )
+        return
+    ok = await asyncio.to_thread(focus_window, target["hwnd"])
+    if not ok:
+        await manager.broadcast(
+            {
+                "type": "log",
+                "level": "warn",
+                "message": f"无法切到 WebUI 窗口：{target['title']}",
+                "step": None,
+                "ts": time.time(),
+            }
+        )
+
+
+async def _do_overlay_action(name: str) -> None:
+    if name == "toggle_run":
+        await _toggle_run()
+    elif name == "toggle_record":
+        _toggle_record()
+    elif name in ("repeat_up", "repeat_down"):
+        value = _change_repeat(1 if name == "repeat_up" else -1)
+        await manager.broadcast({"type": "repeat", "value": value, "ts": time.time()})
+    elif name == "focus_ui":
+        await _focus_webui()
+
+
+def _overlay_action(name: str) -> None:
+    """悬浮框按钮回调（由 Tk 线程触发）→ 切回事件循环线程执行。"""
+    if _loop is None:
+        return
+    _loop.call_soon_threadsafe(lambda: _spawn(_do_overlay_action(name)))
+
+
+overlay.configure(on_close=_overlay_closed, on_action=_overlay_action)
+
+
 def _setup_hotkey() -> None:
     global hotkey_manager, picker, recorder, _loop
     _loop = asyncio.get_running_loop()
 
     def _cb() -> None:
-        def _notify() -> None:
-            # 有前端连接时通知前端执行（前端调用 /run，与点击“运行”完全一致）
-            if manager.connections:
-                _spawn(manager.broadcast({"type": "hotkey", "ts": time.time()}))
-            else:
-                _spawn(executor.toggle())
-
         if _loop:
-            _loop.call_soon_threadsafe(_notify)
+            _loop.call_soon_threadsafe(lambda: _spawn(_toggle_run()))
 
     hotkey_manager = HotkeyManager(_cb)
     print(
@@ -129,6 +239,8 @@ def _setup_hotkey() -> None:
     picker = CoordinatePicker(_on_picked)
 
     def _record_state(recording: bool) -> None:
+        # 悬浮框的录制按钮要跟着真实状态走（该回调可能来自按键钩子线程）
+        overlay.set_recording(recording)
         if _loop:
             _loop.call_soon_threadsafe(
                 lambda: _spawn(manager.broadcast({"type": "recording", "recording": recording, "ts": time.time()}))
@@ -147,7 +259,10 @@ def _setup_hotkey() -> None:
 async def lifespan(_: FastAPI):
     vision.ensure_template_dir()
     _setup_hotkey()
+    # 悬浮框：按上次的开关状态启动（不可用时内部自动降级，不影响其它功能）
+    overlay.start(enabled=bool(appconfig.get("overlay", False)))
     yield
+    overlay.stop()
     executor.stop()
     if hotkey_manager:
         hotkey_manager.stop()
@@ -157,7 +272,7 @@ async def lifespan(_: FastAPI):
         recorder.stop_all()
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.5.1", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -174,7 +289,7 @@ _ALLOWED_HOSTS = {"127.0.0.1:8765", "localhost:8765", "[::1]:8765"}
 # 需要令牌保护的 API 前缀（新增 API 路由时必须加入此列表）
 _PROTECTED_PREFIXES = (
     "/debug", "/windows", "/screen", "/vision", "/input",
-    "/flow", "/run", "/config", "/pick", "/record",
+    "/flow", "/run", "/config", "/pick", "/record", "/overlay",
     "/docs", "/openapi.json",
 )
 _MAX_BODY_BYTES = 64 * 1024 * 1024  # 请求体上限 64MB（防内存 DoS）
@@ -225,7 +340,7 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.3.0"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.5.1"}
 
 
 @app.get("/debug/kb")
@@ -244,7 +359,8 @@ async def api_list_windows():
 async def screenshot(window: int | None = None):
     try:
         if window:
-            frame = await asyncio.to_thread(capture_window, window)
+            # 用户主动点击的截图/取模板：允许把最小化的窗口恢复出来
+            frame = await asyncio.to_thread(capture_window, window, True)
         else:
             frame = await asyncio.to_thread(vision.grab_frame)
     except ValueError as e:
@@ -313,7 +429,8 @@ async def match(req: MatchRequest):
         if req.window:
             rect = get_window_rect(req.window)
             offset_x, offset_y = rect["left"], rect["top"]
-            frame = await asyncio.to_thread(capture_window, req.window)
+            # 用户主动点击的“测试匹配”：允许把最小化的窗口恢复出来
+            frame = await asyncio.to_thread(capture_window, req.window, True)
         else:
             frame = await asyncio.to_thread(vision.grab_frame)
     except ValueError as e:
@@ -370,6 +487,7 @@ async def load_flow(req: RunRequest):
     except ValueError as e:
         raise HTTPException(400, str(e))
     executor.current_flow = req.flow
+    _sync_repeat(req.flow)
     return {"ok": True}
 
 
@@ -386,20 +504,28 @@ async def run(req: RunRequest):
         # 先置 running 再派生任务：/run/state 在任务起跑前就能反映真实状态，
         # 避免前端轮询在「POST 已返回、任务未起跑」的缝隙里读到假 idle 造成按钮闪烁
         executor.running = True
-        _spawn(executor.run(req.flow))
+        _sync_repeat(req.flow)
+        executor.task = _spawn(executor.run(req.flow))
     return {"ok": True}
 
 
 @app.post("/run/stop")
 async def stop():
     executor.stop()
-    # 返回引擎真实运行状态，前端据此纠正本地状态（修复假运行卡死）
+    # stop() 会在「没有实际任务在跑」时直接复位 running；这里再 reconcile 兜底，
+    # 保证返回的是真实状态，前端按钮不会卡在「停止」
+    executor.reconcile()
     return {"ok": True, "running": executor.running}
 
 
 @app.get("/run/state")
 async def run_state():
-    """前端 WS 重连/定时轮询时同步真实运行状态。"""
+    """前端 WS 重连 / 定时轮询时同步真实运行状态。
+
+    reconcile() 兜底任何让 executor.run() 的 finally 未能执行的异常路径：
+    任务已结束却仍标记运行中时自动复位，前端 1 秒轮询即可自愈。
+    """
+    executor.reconcile()
     return {"running": executor.running}
 
 
@@ -417,6 +543,24 @@ async def set_hotkey(req: HotkeyRequest):
             raise HTTPException(400, str(e))
         return {"hotkey": hotkey_manager.get()}
     return {"hotkey": req.hotkey}
+
+
+@app.get("/overlay/state")
+async def get_overlay():
+    """悬浮框状态：开关、是否可用、当前循环/总循环与正在执行的步骤。"""
+    return overlay.state()
+
+
+@app.post("/overlay/enable")
+async def set_overlay(req: OverlayRequest):
+    overlay.set_enabled(req.enabled)
+    appconfig.update(overlay=req.enabled)
+    state = overlay.state()
+    if not state["available"]:
+        raise HTTPException(500, state["error"] or "悬浮框不可用")
+    # 广播给所有已连接页面，多标签页开关状态保持一致
+    await manager.broadcast({"type": "overlay", "enabled": req.enabled, "ts": time.time()})
+    return state
 
 
 @app.post("/pick/start")
