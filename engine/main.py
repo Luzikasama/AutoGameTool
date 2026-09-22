@@ -33,7 +33,7 @@ from executor import Executor, validate_flow
 from hotkey import HotkeyManager
 from picker import CoordinatePicker
 from recorder import Recorder
-from window import capture_window, find_webui_window, focus_window, get_window_rect, list_windows
+from window import capture_window, find_webui_window, focus_window, get_window_rect, is_minimized, list_windows
 from ws_manager import manager
 
 
@@ -163,6 +163,29 @@ def _change_repeat(delta: int) -> int:
     return _repeat_value
 
 
+async def _restore_audit(hwnd: int | None, why: str) -> None:
+    """记录「是谁恢复了最小化的窗口」。
+
+    这类操作只应发生在用户主动点击时（截取 / 测试匹配 / 悬浮框「界面」）。
+    打一条醒目日志，万一再出现「最小化后又被弹出来」可以直接从日志定位来源。
+    """
+    if not hwnd:
+        return
+    try:
+        if await asyncio.to_thread(is_minimized, hwnd):
+            await manager.broadcast(
+                {
+                    "type": "log",
+                    "level": "warn",
+                    "message": f"{why}：目标窗口原本处于最小化，已恢复显示（不激活到前台）",
+                    "step": None,
+                    "ts": time.time(),
+                }
+            )
+    except Exception:
+        pass
+
+
 async def _focus_webui() -> None:
     """把 WebUI 所在的浏览器窗口恢复并切到前台（悬浮框「界面」按钮）。
 
@@ -272,7 +295,7 @@ async def lifespan(_: FastAPI):
         recorder.stop_all()
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.5.1", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.6.0", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -340,7 +363,7 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.5.1"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.6.0"}
 
 
 @app.get("/debug/kb")
@@ -359,7 +382,8 @@ async def api_list_windows():
 async def screenshot(window: int | None = None):
     try:
         if window:
-            # 用户主动点击的截图/取模板：允许把最小化的窗口恢复出来
+            # 用户主动点击的截图/取模板：允许把最小化的窗口恢复出来（但不激活到前台）
+            await _restore_audit(window, "截图")
             frame = await asyncio.to_thread(capture_window, window, True)
         else:
             frame = await asyncio.to_thread(vision.grab_frame)
@@ -429,7 +453,8 @@ async def match(req: MatchRequest):
         if req.window:
             rect = get_window_rect(req.window)
             offset_x, offset_y = rect["left"], rect["top"]
-            # 用户主动点击的“测试匹配”：允许把最小化的窗口恢复出来
+            # 用户主动点击的“测试匹配”：允许把最小化的窗口恢复出来（但不激活到前台）
+            await _restore_audit(req.window, "测试匹配")
             frame = await asyncio.to_thread(capture_window, req.window, True)
         else:
             frame = await asyncio.to_thread(vision.grab_frame)

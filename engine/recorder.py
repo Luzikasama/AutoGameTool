@@ -21,7 +21,6 @@ class Recorder:
         self.recording = False
         self.events: list[dict] = []
         self._start_time = 0.0
-        self._last_move = 0.0
         self._pressed: set[str] = set()
         self._fired = False
         # 已被过滤的按下键（用于把配对的抬起也一起丢掉，避免留下孤立 mouseup）
@@ -49,16 +48,8 @@ class Recorder:
             self.events.append({"t": self._ts(), "type": "keyup", "key": k})
 
     # ---- 鼠标 ----
-    def _on_move(self, x, y):
-        # 悬浮框自身的移动轨迹不录（点它只是为了操作悬浮框）
-        if overlay.hit_test(x, y):
-            return
-        now = time.time()
-        if now - self._last_move < 0.03:
-            return
-        self._last_move = now
-        self.events.append({"t": self._ts(), "type": "mousemove", "x": int(x), "y": int(y)})
-
+    # 刻意不录制鼠标轨迹（mousemove）：回放时 mouse_down 本身就会把光标移到点击坐标，
+    # 轨迹既冗余，又会让录制结果臃肿、难以拆分成可编辑的步骤。
     def _on_click(self, x, y, button, pressed):
         b = "right" if button == mouse.Button.right else ("middle" if button == mouse.Button.middle else "left")
         # 点在自己身上的按下/抬起都不录：否则用悬浮框按钮开始或停止录制时，
@@ -101,16 +92,15 @@ class Recorder:
         self.events = []
         self._suppressed.clear()
         self._start_time = time.time()
-        self._last_move = 0.0
-        # 只注册鼠标回调，监听器本身常驻
-        mousebus.register(on_move=self._on_move, on_click=self._on_click, on_scroll=self._on_scroll)
+        # 只注册点击/滚轮回调（不再需要 on_move），监听器本身常驻
+        mousebus.register(on_click=self._on_click, on_scroll=self._on_scroll)
         self.on_state(True)
 
     def stop(self) -> None:
         if not self.recording:
             return
         self.recording = False
-        mousebus.unregister(on_move=self._on_move, on_click=self._on_click, on_scroll=self._on_scroll)
+        mousebus.unregister(on_click=self._on_click, on_scroll=self._on_scroll)
         events = list(self.events)
         self.events = []
         # 去掉因按开始/停止快捷键产生的残留事件
@@ -129,7 +119,7 @@ class Recorder:
         try:
             if self.recording:
                 self.recording = False
-                mousebus.unregister(on_move=self._on_move, on_click=self._on_click, on_scroll=self._on_scroll)
+                mousebus.unregister(on_click=self._on_click, on_scroll=self._on_scroll)
             keybus.unregister(on_press=self._on_press, on_release=self._on_release)
         except Exception:
             pass

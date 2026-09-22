@@ -21,6 +21,7 @@ import ScreenCapture from '../components/ScreenCapture.vue'
 import { engine, engineWsUrl } from '../api/client'
 import { useProjectStore } from '../stores/project'
 import { STEP_META, type FlowFile, type StepType, type WindowInfo } from '../types'
+import { compileMacroPieces, expandPieces } from '../lib/macroSplit'
 
 const store = useProjectStore()
 const message = useMessage()
@@ -645,6 +646,63 @@ function onRecorded(events: any[]) {
   loadFlowToEngine()
 }
 
+// 把一段键鼠录制拆成可编辑的流程节点。
+// 具体合并规则见 src/lib/macroSplit.ts（纯函数，便于单独验证）。
+function splitMacro() {
+  const node = selectedNode.value
+  if (!node || node.data.stepType !== 'macro') return
+  const events: any[] = node.data.params?.events || []
+  if (!events.length) {
+    message.warning('录制内容为空，无法拆分')
+    return
+  }
+
+  const speed = node.data.params?.speed ?? 1.0
+  const steps = expandPieces(compileMacroPieces(events, speed))
+  if (!steps.length) {
+    message.warning('没有可转换的事件')
+    return
+  }
+
+  // 生成节点：间隔 >= 80ms 的位置已插入延时节点，保留原来的节奏
+  const macroId = node.id
+  const base = node.position || { x: 0, y: 0 }
+  const created: any[] = []
+  const ids: string[] = []
+  let y = base.y
+  for (const s of steps) {
+    const nid = `n${++nodeSeq}`
+    created.push({
+      id: nid,
+      type: 'step',
+      position: { x: base.x, y },
+      data: { stepType: s.stepType, label: STEP_META[s.stepType].label, params: s.params, once: false },
+    })
+    y += 76
+    ids.push(nid)
+  }
+
+  const incoming = edges.value.filter((e) => e.target === macroId)
+  const outgoing = edges.value.filter((e) => e.source === macroId)
+  nodes.value = nodes.value.filter((nd) => nd.id !== macroId)
+  edges.value = edges.value.filter((e) => e.source !== macroId && e.target !== macroId)
+  nodes.value.push(...created)
+  for (let i = 0; i + 1 < ids.length; i++) {
+    edges.value.push({ id: `e-${ids[i]}-${ids[i + 1]}`, source: ids[i], target: ids[i + 1], sourceHandle: null })
+  }
+  // 原本接在录制节点前后的连线，改接到拆分后的首尾节点上
+  for (const e of incoming) {
+    edges.value.push({ ...e, id: `e-${e.source}-${ids[0]}`, target: ids[0] })
+  }
+  for (const e of outgoing) {
+    edges.value.push({ ...e, id: `e-${ids[ids.length - 1]}-${e.target}`, source: ids[ids.length - 1], sourceHandle: null })
+  }
+
+  selectedId.value = ids[0]
+  message.success(`已拆分为 ${ids.length} 个可编辑步骤`)
+  loadFlowToEngine()
+}
+
 // 以引擎为唯一事实来源同步运行状态（WS 断连/广播丢失时靠它自愈）
 async function syncRunState() {
   try {
@@ -1059,12 +1117,20 @@ onBeforeUnmount(() => {
             <div class="field">
               <label>录制内容</label>
               <p class="terminate-hint">
-                共 {{ (selectedNode.data.params.events || []).length }} 个事件（鼠标移动/点击/滚轮、键盘按下/抬起）
+                共 {{ (selectedNode.data.params.events || []).length }} 个事件（鼠标点击、滚轮、键盘按下/抬起；不再记录鼠标轨迹）
               </p>
             </div>
             <div class="field">
               <label>回放速度：x{{ selectedNode.data.params.speed }}</label>
               <n-slider v-model:value="selectedNode.data.params.speed" :min="0.25" :max="4" :step="0.25" />
+            </div>
+            <div class="field">
+              <n-popconfirm @positive-click="splitMacro">
+                <template #trigger>
+                  <n-button size="small" block type="warning">✂ 拆分为可编辑步骤</n-button>
+                </template>
+                拆分会把这一步替换成一串「鼠标点击 / 键盘按键 / 滚轮 / 延时」节点，原录制节点将被删除（间隔 ≥80ms 会插入延时以保留节奏）。确定？
+              </n-popconfirm>
             </div>
             <div class="field">
               <n-button
@@ -1077,7 +1143,10 @@ onBeforeUnmount(() => {
               </n-button>
             </div>
             <div class="field">
-              <p class="terminate-hint">提示：录制会覆盖当前步骤内容；录制时请切换到目标窗口操作，再次按 alt+9 结束。</p>
+              <p class="terminate-hint">
+                提示：录制会覆盖当前步骤内容；录制时请切换到目标窗口操作，再次按 alt+9 结束。
+                拆分后每个动作都是独立节点，可以单独删除/改坐标/改按键；长按某个键会被化简为单击（如需长按可在其后手动加延时）。
+              </p>
             </div>
           </template>
         </template>

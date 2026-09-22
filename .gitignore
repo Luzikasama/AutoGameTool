@@ -45,7 +45,7 @@ _*.log
 *.log
 
 # ---------- 发行产物 ----------
-# 二进制产物体积大（exe / 安装包各约 68 MB），放进 git 会永久留在历史里，
+# 二进制产物体积大（v0.6.0 实测 exe / 安装包各约 71 MB），放进 git 会永久留在历史里，
 # 因此统一不入库，改为在 GitHub Releases 中发布（见 README「打包与发布」）。
 /AutoGameTool.exe
 /AutoGameTool-Setup.exe

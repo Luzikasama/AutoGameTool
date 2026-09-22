@@ -24,7 +24,6 @@ from ctypes import wintypes
 from typing import Callable
 
 _POLL_MS = 120        # 队列消费间隔
-_TOPMOST_MS = 3000    # 检查 topmost 的间隔（仅在丢失时才写 Z 序）
 _MARGIN = 24
 _WIDTH = 300
 
@@ -92,7 +91,6 @@ class Overlay:
         self._step_lbl = None
         self._drag_from = (0, 0)
         self._win_at = (0, 0)
-        self._ticks = 0
         self._stopping = False
 
     # ---------------------------------------------------- 对外接口（任意线程可调）
@@ -258,6 +256,12 @@ class Overlay:
             w.bind("<Button-1>", self._on_press)
             w.bind("<B1-Motion>", self._on_drag)
 
+        # 置顶改为「按需」：只有鼠标移上来（说明用户要操作它）时才确认一次置顶。
+        # 旧版每 3 秒无条件 SetWindowPos(HWND_TOPMOST)，这是应用内唯一一处周期性
+        # 窗口写操作，会在别的窗口播放最小化动画时搅动 Z 序，造成最小化偶发失败。
+        for w in (frame, tools):
+            w.bind("<Enter>", lambda _e: self._ensure_topmost())
+
         root.update_idletasks()
         self._hwnd = self._resolve_hwnd(root)
         self._apply_window_flags()
@@ -405,10 +409,6 @@ class Overlay:
         if dirty:
             self._render()
 
-        self._ticks += 1
-        if self._visible and self._ticks * _POLL_MS >= _TOPMOST_MS:
-            self._ticks = 0
-            self._ensure_topmost()
         if not self._stopping:
             root.after(_POLL_MS, lambda: self._pump(root))
 

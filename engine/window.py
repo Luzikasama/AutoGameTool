@@ -20,6 +20,7 @@ WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
 DWMWA_CLOAKED = 14
 SW_RESTORE = 9
+SW_SHOWNOACTIVATE = 4
 
 
 class WindowMinimizedError(ValueError):
@@ -132,7 +133,9 @@ def capture_window(hwnd: int, restore_minimized: bool = False) -> np.ndarray:
                 "目标窗口已最小化。为避免打断你正在做的事，引擎不会自动把它弹到前台；"
                 "请先恢复该窗口，或在界面里用「截取」手动抓取。"
             )
-        user32.ShowWindow(hwnd, SW_RESTORE)
+        # 用 SW_SHOWNOACTIVATE 而不是 SW_RESTORE：SW_RESTORE 会把窗口**激活**到前台，
+        # 这正是"最小化后又被弹出来"的来源。这里只把窗口恢复出来，不抢前台。
+        user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
         time.sleep(0.3)
     rect = get_window_rect(hwnd)
     w, h = rect["width"], rect["height"]
@@ -240,10 +243,6 @@ def capture_window_fast(hwnd: int) -> np.ndarray:
         return cv2.cvtColor(np.array(raw), cv2.COLOR_BGRA2BGR)
 
 
-def set_foreground(hwnd: int) -> None:
-    user32.SetForegroundWindow(hwnd)
-
-
 def _process_exe(pid: int) -> str:
     """取进程可执行文件名（小写，仅文件名），失败返回空串。"""
     try:
@@ -284,6 +283,14 @@ _BROWSER_EXES = {
     "maxthon.exe", "ucbrowser.exe", "liebao.exe", "theworld.exe", "avastbrowser.exe",
 }
 _BROWSER_CLASSES = ("Chrome_WidgetWin", "MozillaWindowClass")
+
+
+def is_minimized(hwnd: int) -> bool:
+    """窗口是否处于最小化状态（供调用方记录「是谁恢复了窗口」的审计日志）。"""
+    try:
+        return bool(user32.IsIconic(hwnd))
+    except Exception:
+        return False
 
 
 def find_webui_window(page_title: str, exclude_pids: set[int] | None = None) -> dict | None:
