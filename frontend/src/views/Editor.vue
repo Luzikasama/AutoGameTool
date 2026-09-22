@@ -107,6 +107,12 @@ function flowWindow() {
 
 const selectedNode = computed(() => nodes.value.find((n) => n.id === selectedId.value) || null)
 
+// 画布上所有「键鼠录制」步骤（工具栏的拆分入口据此决定可用状态）
+const macroNodes = computed(() => nodes.value.filter((n) => n.data.stepType === 'macro'))
+
+// 引擎版本：显示在顶栏。排查「界面没看到某个功能」时，一眼就能确认页面/进程是不是新版
+const engineVersion = ref('')
+
 const winOptions = computed(() => [
   { label: '🌐 不绑定（全局）', value: 0 },
   ...windows.value.map((w) => ({ label: w.title.slice(0, 40), value: w.hwnd })),
@@ -642,14 +648,18 @@ function onRecorded(events: any[]) {
     data: { stepType: 'macro', label: '键鼠录制', params: { events, speed: 1.0 }, once: false },
   } as any)
   selectedId.value = id
-  message.success(`已录制 ${events.length} 个事件，并生成一个录制步骤`)
+  message.success(
+    `已录制 ${events.length} 个事件，并生成一个录制步骤（可点顶栏「✂ 拆分录制」拆成可编辑节点）`,
+    { duration: 6000 },
+  )
   loadFlowToEngine()
 }
 
 // 把一段键鼠录制拆成可编辑的流程节点。
 // 具体合并规则见 src/lib/macroSplit.ts（纯函数，便于单独验证）。
-function splitMacro() {
-  const node = selectedNode.value
+// nodeArg 省略时作用于当前选中的录制节点（属性面板按钮的用法）。
+function splitMacro(nodeArg?: any) {
+  const node = nodeArg || selectedNode.value
   if (!node || node.data.stepType !== 'macro') return
   const events: any[] = node.data.params?.events || []
   if (!events.length) {
@@ -701,6 +711,25 @@ function splitMacro() {
   selectedId.value = ids[0]
   message.success(`已拆分为 ${ids.length} 个可编辑步骤`)
   loadFlowToEngine()
+}
+
+// 工具栏上的「✂ 拆分录制」入口。
+// 之所以要有它：拆分按钮原先只在「选中录制节点」时出现在右侧属性面板里，
+// 不在工具栏、也不在左侧步骤面板，用户根本找不到。现在流程里只要有录制步骤，
+// 顶栏就有一个常驻可见的入口。
+function splitMacroFromToolbar() {
+  const sel = selectedNode.value
+  if (sel && sel.data.stepType === 'macro') return splitMacro(sel)
+  const list = macroNodes.value
+  if (!list.length) {
+    message.warning('流程里还没有「键鼠录制」步骤：先点「⏺ 开始录制 (alt+9)」录一段操作')
+    return
+  }
+  if (list.length > 1) {
+    message.warning(`流程里有 ${list.length} 个录制步骤，请先在画布上选中要拆分的那个`)
+    return
+  }
+  return splitMacro(list[0])
 }
 
 // 以引擎为唯一事实来源同步运行状态（WS 断连/广播丢失时靠它自愈）
@@ -855,6 +884,15 @@ onMounted(() => {
   loadHotkey()
   syncOverlay()
   loadFlowToEngine(true)
+  // 顶栏显示引擎版本：确认「当前跑的是哪一版」时不用再翻发布页
+  engine
+    .health()
+    .then((h) => {
+      engineVersion.value = String(h?.version || '')
+    })
+    .catch(() => {
+      /* 引擎不可达时留空 */
+    })
   // 定时兜底同步流程到引擎（内部已按指纹去重），确保全局快捷键随时可用
   syncTimer = setInterval(() => loadFlowToEngine(), 1000)
   // 定时同步真实运行状态：任何状态广播丢失都能在一秒内自愈，按钮不再卡死
@@ -876,6 +914,9 @@ onBeforeUnmount(() => {
       <div class="brand">🎮 AutoGameTool</div>
       <n-input v-model:value="store.flowName" class="name-input" placeholder="脚本名称" />
       <div class="spacer" />
+      <span v-if="engineVersion" class="ver-badge" title="引擎版本（界面右上角可确认是否为最新版）">
+        v{{ engineVersion }}
+      </span>
       <n-button size="small" @click="saveFlow">💾 保存</n-button>
       <n-button size="small" @click="triggerLoad">📂 加载</n-button>
       <input ref="fileInput" type="file" accept=".agflow,application/json" style="display: none" @change="onLoadFile" />
@@ -940,6 +981,26 @@ onBeforeUnmount(() => {
         >
           {{ macroRecording ? '⏹ 停止录制 (alt+9)' : '⏺ 开始录制 (alt+9)' }}
         </n-button>
+      </div>
+      <div class="setting">
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button
+              size="small"
+              type="warning"
+              :disabled="!macroNodes.length"
+              @click="splitMacroFromToolbar"
+            >
+              ✂ 拆分录制{{ macroNodes.length > 1 ? ` (${macroNodes.length})` : '' }}
+            </n-button>
+          </template>
+          {{
+            macroNodes.length
+              ? '把「键鼠录制」步骤拆成可单独编辑的鼠标点击 / 键盘按键 / 延时节点' +
+                (macroNodes.length > 1 ? '；流程里有多个录制步骤，先在画布上选中要拆的那个' : '')
+              : '流程里还没有「键鼠录制」步骤：先用 ⏺ 开始录制 (alt+9) 录一段操作'
+          }}
+        </n-tooltip>
       </div>
     </div>
 
@@ -1125,12 +1186,16 @@ onBeforeUnmount(() => {
               <n-slider v-model:value="selectedNode.data.params.speed" :min="0.25" :max="4" :step="0.25" />
             </div>
             <div class="field">
-              <n-popconfirm @positive-click="splitMacro">
+              <label>拆分为可编辑步骤</label>
+              <n-popconfirm @positive-click="splitMacro()">
                 <template #trigger>
                   <n-button size="small" block type="warning">✂ 拆分为可编辑步骤</n-button>
                 </template>
                 拆分会把这一步替换成一串「鼠标点击 / 键盘按键 / 滚轮 / 延时」节点，原录制节点将被删除（间隔 ≥80ms 会插入延时以保留节奏）。确定？
               </n-popconfirm>
+              <p class="terminate-hint">
+                顶栏也有常驻入口「✂ 拆分录制」，不必先选中本节点（流程里只有一个录制步骤时直接生效）。
+              </p>
             </div>
             <div class="field">
               <n-button
@@ -1259,6 +1324,15 @@ onBeforeUnmount(() => {
 }
 .spacer {
   flex: 1;
+}
+/* 顶栏版本号：排查「界面里看不到某功能」时用来确认页面是不是最新版 */
+.ver-badge {
+  font-size: 12px;
+  color: #94a3b8;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 1px 8px;
+  white-space: nowrap;
 }
 
 .settings-bar {
