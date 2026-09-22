@@ -21,7 +21,19 @@ import ScreenCapture from '../components/ScreenCapture.vue'
 import { engine, engineWsUrl } from '../api/client'
 import { useProjectStore } from '../stores/project'
 import { STEP_META, type FlowFile, type StepType, type WindowInfo } from '../types'
-import { compileMacroPieces, expandPieces } from '../lib/macroSplit'
+import {
+  canPack,
+  COL_PITCH,
+  compileMacroPieces,
+  expandPieces,
+  NODE_H,
+  NODE_W,
+  orderChain,
+  packStepsToMacro,
+  ROW_PITCH,
+  splitGridLayout,
+  splitGridPositions,
+} from '../lib/macroSplit'
 
 const store = useProjectStore()
 const message = useMessage()
@@ -33,6 +45,10 @@ const stepTypes = Object.entries(STEP_META) as Array<[StepType, { label: string;
 const nodes = ref<any[]>([])
 const edges = ref<any[]>([])
 const selectedId = ref<string | null>(null)
+// 多选（Vue Flow 内建：Shift+拖拽框选、Ctrl+点击逐个加选）选中的节点 id。
+// 用 selection-change 事件单独记一份，而不是依赖 node.selected —— 打包按钮的
+// 可用状态/数量要能跟着选择实时变。
+const selIds = ref<string[]>([])
 const templates = ref<{ label: string; value: string }[]>([])
 const windows = ref<WindowInfo[]>([])
 const selectedWinHwnd = ref<number>(0)
@@ -200,6 +216,30 @@ function onConnect(conn: Connection) {
 
 function onNodeClick({ node }: any) {
   selectedId.value = node.id
+  refreshSelection()
+}
+
+function onPaneClick() {
+  selectedId.value = null
+  refreshSelection()
+}
+
+// 刷新多选集合。
+// 注意：@vue-flow/core 1.48 的 emits 列表里**没有** selectionChange（只有
+// selectionStart / selectionDrag / selectionEnd / nodeClick / paneClick），
+// 所以这里不监听"选择变化"，而是在这几个真实存在的事件里主动向 Vue Flow
+// 要一次当前选中集合（getSelectedNodes 是权威来源）。
+function refreshSelection() {
+  try {
+    const list = vf?.getSelectedNodes?.()
+    if (Array.isArray(list)) {
+      selIds.value = list.map((n: any) => n.id)
+      return
+    }
+  } catch {
+    /* 退回到节点自身的 selected 标记 */
+  }
+  selIds.value = nodes.value.filter((n: any) => n.selected).map((n) => n.id)
 }
 
 // ---------- 模板 / 坐标拾取 ----------
@@ -655,6 +695,21 @@ function onRecorded(events: any[]) {
   loadFlowToEngine()
 }
 
+// ---------- 拆分/打包的布局 ----------
+/** 画布可见区域换算成 flow 坐标（用于决定"填多少才叫填满编辑区"）。 */
+function viewportFlowHeight(): number {
+  let h = 520
+  try {
+    const d: any = (vf as any)?.dimensions
+    const dim = d && typeof d === 'object' && 'value' in d ? d.value : d
+    const zoom = Number(vf?.getViewport?.()?.zoom) || 1
+    if (dim?.height > 0 && zoom > 0) h = dim.height / zoom
+  } catch {
+    /* 视口拿不到时用默认值，不影响正确性 */
+  }
+  return h
+}
+
 // 把一段键鼠录制拆成可编辑的流程节点。
 // 具体合并规则见 src/lib/macroSplit.ts（纯函数，便于单独验证）。
 // nodeArg 省略时作用于当前选中的录制节点（属性面板按钮的用法）。
@@ -674,21 +729,24 @@ function splitMacro(nodeArg?: any) {
     return
   }
 
-  // 生成节点：间隔 >= 80ms 的位置已插入延时节点，保留原来的节奏
+  // 布局：蛇形网格填满编辑区（原来是一条一直往下的长竖线，几十步就拖出去很远，
+  // 还会盖住下面的节点、连线也绕）。间隔 >= 80ms 的位置已插入延时节点，保留节奏。
   const macroId = node.id
   const base = node.position || { x: 0, y: 0 }
+  const gridH = viewportFlowHeight()
+  const { rows, cols } = splitGridLayout(steps.length, gridH)
+  const slots = splitGridPositions(steps.length, gridH)
   const created: any[] = []
   const ids: string[] = []
-  let y = base.y
-  for (const s of steps) {
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i]
     const nid = `n${++nodeSeq}`
     created.push({
       id: nid,
       type: 'step',
-      position: { x: base.x, y },
+      position: { x: base.x + slots[i].x, y: base.y + slots[i].y },
       data: { stepType: s.stepType, label: STEP_META[s.stepType].label, params: s.params, once: false },
     })
-    y += 76
     ids.push(nid)
   }
 
@@ -696,7 +754,25 @@ function splitMacro(nodeArg?: any) {
   const outgoing = edges.value.filter((e) => e.source === macroId)
   nodes.value = nodes.value.filter((nd) => nd.id !== macroId)
   edges.value = edges.value.filter((e) => e.source !== macroId && e.target !== macroId)
+
+  // 方块会盖住原本在它范围内的节点：把被盖住的节点**整体**下移同一个距离，
+  // 既让开了位置，又保持它们彼此之间的相对排布不变。
+  const blockRight = base.x + (cols - 1) * COL_PITCH + NODE_W
+  const blockBottom = base.y + (rows - 1) * ROW_PITCH + NODE_H
+  const covered = (p: any) =>
+    p && p.x + NODE_W > base.x && p.x < blockRight && p.y + NODE_H > base.y && p.y < blockBottom
+  let shift = 0
+  for (const nd of nodes.value) {
+    if (covered(nd.position)) shift = Math.max(shift, blockBottom + 40 - nd.position.y)
+  }
+  if (shift > 0) {
+    for (const nd of nodes.value) {
+      if (covered(nd.position)) nd.position = { x: nd.position.x, y: nd.position.y + shift }
+    }
+  }
+
   nodes.value.push(...created)
+  // 步骤之间依次相连（i → i+1），蛇形走位保证这些连线都很短、不交叉
   for (let i = 0; i + 1 < ids.length; i++) {
     edges.value.push({ id: `e-${ids[i]}-${ids[i + 1]}`, source: ids[i], target: ids[i + 1], sourceHandle: null })
   }
@@ -709,8 +785,9 @@ function splitMacro(nodeArg?: any) {
   }
 
   selectedId.value = ids[0]
-  message.success(`已拆分为 ${ids.length} 个可编辑步骤`)
+  message.success(`已拆分为 ${ids.length} 个可编辑步骤（${cols} 列 × ${rows} 行）`)
   loadFlowToEngine()
+  nextTick(() => fitView())
 }
 
 // 工具栏上的「✂ 拆分录制」入口。
@@ -730,6 +807,98 @@ function splitMacroFromToolbar() {
     return
   }
   return splitMacro(list[0])
+}
+
+// ---------- 打包合并（拆分的逆操作）----------
+
+// 当前选中的节点。以 selection-change 记下的 id 为准，并用节点自身的 selected
+// 标记兜底（不同 Vue Flow 版本对选择状态的同步方式略有差异）。
+const selNodes = computed(() => {
+  const byId = nodes.value.filter((n) => selIds.value.includes(n.id))
+  const flagged = nodes.value.filter((n: any) => n.selected)
+  return flagged.length > byId.length ? flagged : byId
+})
+
+/** 把选中的节点按连线顺序排成一条链；不是「一条连续链」时返回 null。
+ *  判定规则见 src/lib/macroSplit.ts 的 orderChain（纯函数，可单独断言）。 */
+function orderSelectedChain(sel: any[]): any[] | null {
+  return orderChain(sel, edges.value)
+}
+
+/** 打包时真正要用的选中集合：优先向 Vue Flow 要（权威），再退回本地记录。
+ *  这样即使响应式刷新慢一拍，按钮亮着就一定能打包。 */
+function currentSelection(): any[] {
+  try {
+    const list = vf?.getSelectedNodes?.()
+    if (Array.isArray(list) && list.length >= 2) return list
+  } catch {
+    /* 忽略 */
+  }
+  return selNodes.value
+}
+
+/** 打包合并：把选中的一串相邻步骤合并成一个「键鼠录制」步骤。 */
+function mergeSelected() {
+  const sel = currentSelection()
+  if (sel.length < 2) {
+    message.warning('请先在画布上选中至少 2 个相邻步骤（Shift+拖拽框选，或 Ctrl+点击逐个加选）')
+    return
+  }
+  const chain = orderSelectedChain(sel)
+  if (!chain) {
+    message.warning('只能打包**连成一串**的相邻步骤：请确认选中的步骤首尾相接、且中间没有分支')
+    return
+  }
+  const badTypes = [...new Set(chain.filter((n) => !canPack(n.data.stepType)).map((n) => n.data.stepType))]
+  if (badTypes.length) {
+    message.warning(
+      '这些步骤没法打包进录制：' +
+        badTypes.map((t) => STEP_META[t as StepType]?.label || t).join('、') +
+        '（录制只表达键鼠动作）',
+    )
+    return
+  }
+  const onceOn = chain.filter((n) => n.data.once)
+  if (onceOn.length) {
+    message.warning(`选中的步骤里有 ${onceOn.length} 个勾了「单次执行」，录制步骤表达不了，请先取消勾选`)
+    return
+  }
+
+  const res = packStepsToMacro(
+    chain.map((n) => ({ stepType: n.data.stepType, params: n.data.params || {} })),
+  )
+  if (!res.ok) {
+    message.warning(res.badTypes.length ? '选中的步骤里没有可打包的键鼠动作' : '选中的步骤打包后没有任何事件')
+    return
+  }
+
+  const ids = chain.map((n) => n.id)
+  const idSet = new Set(ids)
+  const head = chain[0]
+  const newId = `n${++nodeSeq}`
+  const incoming = edges.value.filter((e) => !idSet.has(e.source) && idSet.has(e.target))
+  const outgoing = edges.value.filter((e) => idSet.has(e.source) && !idSet.has(e.target))
+
+  nodes.value = nodes.value.filter((n) => !idSet.has(n.id))
+  edges.value = edges.value.filter((e) => !idSet.has(e.source) && !idSet.has(e.target))
+  nodes.value.push({
+    id: newId,
+    type: 'step',
+    position: { x: head.position?.x ?? 0, y: head.position?.y ?? 0 },
+    data: { stepType: 'macro', label: '键鼠录制', params: { events: res.events, speed: 1.0 }, once: false },
+  })
+  for (const e of incoming) {
+    edges.value.push({ ...e, id: `e-${e.source}-${newId}`, target: newId })
+  }
+  for (const e of outgoing) {
+    edges.value.push({ ...e, id: `e-${newId}-${e.target}`, source: newId, sourceHandle: null })
+  }
+
+  selectedId.value = newId
+  refreshSelection()
+  message.success(`已把 ${chain.length} 个步骤打包成一个录制步骤（${res.events.length} 个键鼠事件）`)
+  loadFlowToEngine()
+  nextTick(() => fitView())
 }
 
 // 以引擎为唯一事实来源同步运行状态（WS 断连/广播丢失时靠它自愈）
@@ -1002,6 +1171,20 @@ onBeforeUnmount(() => {
           }}
         </n-tooltip>
       </div>
+      <div class="setting">
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button size="small" :disabled="selNodes.length < 2" @click="mergeSelected">
+              📦 打包合并{{ selNodes.length >= 2 ? ` (${selNodes.length})` : '' }}
+            </n-button>
+          </template>
+          {{
+            selNodes.length >= 2
+              ? `把选中的 ${selNodes.length} 个相邻步骤合并成一个「键鼠录制」步骤（拆分的逆操作）`
+              : '先选中至少 2 个相邻步骤：Shift+拖拽框选，或按住 Ctrl 逐个点击加选'
+          }}
+        </n-tooltip>
+      </div>
     </div>
 
     <div class="main">
@@ -1011,7 +1194,9 @@ onBeforeUnmount(() => {
           <span class="palette-icon" :style="{ background: meta.color }">{{ meta.icon }}</span>
           <span>{{ meta.label }}</span>
         </div>
-        <div class="palette-hint">点击添加步骤<br />拖动节点圆点手动连线</div>
+        <div class="palette-hint">
+          点击添加步骤<br />拖动节点圆点手动连线<br /><b>Shift+拖拽</b> 框选多个步骤<br /><b>Ctrl+点击</b> 逐个加选
+        </div>
       </aside>
 
       <section class="canvas" @mousemove="onCanvasMove">
@@ -1024,7 +1209,9 @@ onBeforeUnmount(() => {
           :fit-view-on-init="false"
           @connect="onConnect"
           @node-click="onNodeClick"
-          @pane-click="selectedId = null"
+          @selection-end="refreshSelection"
+          @selection-drag="refreshSelection"
+          @pane-click="onPaneClick"
           @pane-ready="onPaneReady"
         >
           <Background :gap="18" />
@@ -1195,6 +1382,7 @@ onBeforeUnmount(() => {
               </n-popconfirm>
               <p class="terminate-hint">
                 顶栏也有常驻入口「✂ 拆分录制」，不必先选中本节点（流程里只有一个录制步骤时直接生效）。
+                想把拆开的步骤再合回去：选中它们后点顶栏「📦 打包合并」。
               </p>
             </div>
             <div class="field">
