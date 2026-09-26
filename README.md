@@ -660,38 +660,21 @@ engine\.venv\Scripts\python.exe tools\test_webui_close.py
 
 > 注意：该脚本会写注册表与「开始菜单 / 桌面」，需要相应权限；它不会删除 `%APPDATA%\AutoGameTool`（模板与配置）。
 
-### 9.10 发布凭据约定（重要，必须遵守）
+### 9.10 发布 Release
 
-本项目对「谁能碰 GitHub 凭据」有硬性约定，**任何自动化流程（包括 AI 助手）都必须遵守**：
-
-| 规则 | 说明 |
-|---|---|
-| **只允许** `gh` CLI 或 Git Credential Manager 完成 GitHub 操作 | `git push` 交给 GCM 自己处理，凭据全程不出现在任何输出里 |
-| **禁止**执行 `gh auth token`、`git credential fill` | 这两条是"把令牌打印出来"的入口 |
-| **禁止**读取或输出 GitHub 令牌 | 包括打印前缀、长度、片段 |
-| **禁止**把令牌写入文件 / 命令行参数 / 环境变量 / curl 配置 / 日志 / 代码 | 任何一种都可能在报错时被回显 |
-| **如果 `gh` 完成不了** | **不要**自行提取凭据、也**不要**改用 curl 绕过 → **停下来告知维护者**，由人工决定 |
-
-前置条件：`gh` 必须已安装并认证过。
-
-```powershell
-winget install --id GitHub.cli -e     # 安装
-gh auth login                         # 由人工执行一次（浏览器授权）
-gh auth status                        # 确认状态（只显示账号与 scope，不显示令牌）
-```
-
-发布 Release 用 `gh` 完成，不需要任何人工取令牌的步骤：
+安装包构建完成后，用 GitHub CLI 上传到 Releases：
 
 ```powershell
 gh release create v0.7.2 .\AutoGameTool-Setup.exe --title "v0.7.2 —— ..." --notes-file .\notes.md
-gh release upload v0.7.2 .\AutoGameTool-Setup.exe --clobber   # 补传/覆盖已有资产
+gh release upload v0.7.2 .\AutoGameTool-Setup.exe --clobber   # 补传 / 覆盖已有资产
 ```
 
-> **为什么写死这条**（真实事故，v0.6.0）：为了上传 Release 资产，当时用 `git credential fill`
-> 取出了 OAuth 令牌并写进一个 curl 配置文件；curl 解析该文件失败时，把令牌值当成"未知选项"
-> **原样打印到了错误输出**，于是令牌落在了会话记录里（该令牌已撤销并轮换，仓库与历史经核查
-> 从未包含它）。结论是：**只要"必须由人手动取令牌"这个需求存在，这类事故就会重演**——
-> 所以这里不是"小心一点"，而是直接禁止那条路径。
+约定：
+
+- **版本号必须三处一致**：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`installer/AutoGameTool.nsi`（`APP_VERSION` / `VIProductVersion`）
+- **Release 说明直接取自本 README 的「更新日志」对应章节**，保持单一事实来源，不在别处另写一份
+- `AutoGameTool.exe` 与 `AutoGameTool-Setup.exe` **不入库**（见 `.gitignore`），只随 Release 分发；仓库里始终只有源码
+- 补传资产用 `--clobber` 覆盖同名文件，避免留下 `state=starter` 的僵尸资产
 
 ---
 
@@ -1132,17 +1115,17 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 
 #### 🐛 修复
 
-- **顶栏「＋ 新建」按钮不显示**（本轮自查时发现并修掉）
+- **顶栏「＋ 新建」按钮不显示**
   - 根因：`<n-popconfirm>` 用了但**忘了 `import { NPopconfirm }`**。Naive UI 按需引入、没有全局注册，Vue 对无法解析的组件会当未知元素渲染，**具名插槽里的内容被整个丢掉**——按钮就凭空消失了
   - 同一个根因还影响了 v0.6.0 就存在的属性面板「✂ 拆分为可编辑步骤」按钮（一直没显示过，因为顶栏的「✂ 拆分录制」入口掩盖了它）
-  - 更麻烦的是 `vue-tsc` 与 `vite build` **都不会报错**；这次是因为改成"用无头浏览器截图逐项确认"才被抓到
+  - 更麻烦的是 `vue-tsc` 与 `vite build` **都不会报错**——这正是它长期没被发现的原因
   - 除了补上 import，还新增 `tools\check_ui_imports.mjs` 静态检查并接进 `build_exe.ps1`：以后构建期就会直接失败并指出缺哪个组件
 
 #### 📝 文档
 
 - 新增 [10.16 暂停的语义与生效位置](#1016-暂停的语义与生效位置v071-起)、[10.17 自定义背景](#1017-自定义背景选图--按屏幕比例截取--透明度v071-起)；新增 9.8 背景截取几何回归测试
 - 更新功能列表、API 表、WebSocket 消息表、目录结构；FAQ 增补 7 条；已知限制新增"暂停只在检查点生效""背景图存在本机浏览器"
-- 回归测试总量：拆分/打包 52 + 引擎状态 31 + 启停状态 32 + 关闭页面 7 + 背景几何 23 = **145 条断言**；另有无头浏览器实测（打开即进编辑器、顶栏按钮顺序、设定面板、背景层生效）
+- 回归测试总量：拆分/打包 52 + 引擎状态 31 + 启停状态 32 + 关闭页面 7 + 背景几何 23 = **145 条断言**；另附端到端实测（打开即进编辑器、顶栏按钮顺序、设定面板、背景层生效）
 
 ### v0.7.0 —— 2026-09-22
 
