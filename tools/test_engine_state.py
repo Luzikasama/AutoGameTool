@@ -183,6 +183,82 @@ ex.task = _FakeTask(done=False)
 ex.reconcile()
 check("运行中 reconcile 保留 running/paused", ex.running is True and ex.paused is True)
 
+print("== WebUI 窗口定位：只认真正的浏览器 ==")
+# 回归（v0.7.1 及更早的真实 bug）：旧实现把「像不像浏览器」只当**排序键**，
+# 一个浏览器都没匹配上时会退而返回任意同名窗口——承载后端的终端窗口标题里
+# 就含 AutoGameTool，于是点悬浮框「界面」会把后端控制台弹到前台。
+# 这里造一个**可见的、标题唯一的**非浏览器窗口，断言它必须被拒绝。
+import ctypes as _ctypes  # noqa: E402
+from ctypes import wintypes as _wt  # noqa: E402
+
+import window as window_mod  # noqa: E402
+
+UNIQUE = "AutoGameTool-Selftest-7f3a1c"
+
+
+def _visible_titled(hint: str) -> int:
+    """数一数可见且标题含 hint 的顶层窗口（用来证明测试窗口确实存在）。"""
+    user32 = _ctypes.windll.user32
+    hits = []
+
+    def cb(hwnd, _l):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n == 0:
+            return True
+        buf = _ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        if hint.lower() in buf.value.lower():
+            hits.append(hwnd)
+        return True
+
+    user32.EnumWindows(_ctypes.WINFUNCTYPE(_wt.BOOL, _wt.HWND, _wt.LPARAM)(cb), 0)
+    return len(hits)
+
+
+_tk_root = None
+try:
+    import tkinter as _tk
+
+    _tk_root = _tk.Tk()
+    _tk_root.title(UNIQUE)
+    _tk_root.geometry("260x80+40+40")
+    _tk_root.update()
+    _tk_root.update_idletasks()
+except Exception as e:  # 无 GUI 环境就跳过这一段
+    print("  SKIP  无法创建测试窗口：%s" % e)
+
+if _tk_root is not None:
+    check("测试窗口确实可见且标题含唯一串", _visible_titled(UNIQUE) >= 1, _visible_titled(UNIQUE))
+    got = window_mod.find_webui_window(UNIQUE)
+    check("非浏览器的同名窗口不会被当成 WebUI（旧版会返回它）", got is None, got)
+    check("空标题直接返回 None", window_mod.find_webui_window("") is None)
+    try:
+        _tk_root.destroy()
+    except Exception:
+        pass
+
+# 明确的排除名单：控制台 / 终端 / 解释器都不该被当成浏览器
+for exe in ("conhost.exe", "windowsterminal.exe", "pwsh.exe", "powershell.exe",
+            "cmd.exe", "python.exe", "autogametool.exe"):
+    check("排除名单含 " + exe, exe in window_mod._NON_BROWSER_EXES)
+for cls in ("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"):
+    check("排除类名含 " + cls, cls in window_mod._NON_BROWSER_CLASSES)
+
+print("== 悬浮框循环轮数直接编辑（引擎侧夹取与同步）==")
+import main as engine_main  # noqa: E402
+
+engine_main.executor.current_flow = {"name": "t", "repeat": 1}
+check("合法值生效", engine_main._set_repeat_to(42) == 42)
+check("同步到引擎侧流程阴影值", engine_main.executor.current_flow.get("repeat") == 42)
+check("同步到悬浮框状态", overlay_mod.state().get("repeat") == 42)
+check("下界夹取：0 -> 1", engine_main._set_repeat_to(0) == 1)
+check("上界夹取：99999 -> 9999", engine_main._set_repeat_to(99999) == 9999)
+before = engine_main._set_repeat_to(7)
+check("非法输入保持原值", engine_main._set_repeat_to("abc") == before, before)
+check("± 与直接输入共用同一套逻辑", engine_main._change_repeat(1) == 8)
+
 print("")
 print("结果: PASS=" + str(_pass) + "  FAIL=" + str(_fail))
 sys.exit(0 if _fail == 0 else 1)

@@ -242,15 +242,28 @@ def _sync_repeat(flow: dict) -> None:
     overlay.set_repeat(_repeat_value)
 
 
-def _change_repeat(delta: int) -> int:
+def _set_repeat_to(value: int) -> int:
+    """把循环轮数设为指定值（± 按钮与悬浮框里直接输入共用这一条）。
+
+    夹取范围、同步悬浮框显示、更新引擎侧流程阴影值，三件事必须一起做，
+    否则「悬浮框改了但真正执行时还是旧轮数」。
+    """
     global _repeat_value
-    _repeat_value = max(_REPEAT_MIN, min(_REPEAT_MAX, _repeat_value + delta))
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        v = _repeat_value
+    _repeat_value = max(_REPEAT_MIN, min(_REPEAT_MAX, v))
     overlay.set_repeat(_repeat_value)
     flow = executor.current_flow
     if isinstance(flow, dict):
         # 无前端连接时，引擎侧也能按新的轮数执行
         flow["repeat"] = _repeat_value
     return _repeat_value
+
+
+def _change_repeat(delta: int) -> int:
+    return _set_repeat_to(_repeat_value + delta)
 
 
 async def _restore_audit(hwnd: int | None, why: str) -> None:
@@ -328,6 +341,15 @@ async def _do_overlay_action(name: str) -> None:
     elif name in ("repeat_up", "repeat_down"):
         value = _change_repeat(1 if name == "repeat_up" else -1)
         await manager.broadcast({"type": "repeat", "value": value, "ts": time.time()})
+    elif name.startswith("repeat_set:"):
+        # 悬浮框里直接输入循环次数（动作名带值：动作通道原本只传字符串，这里沿用它）
+        try:
+            wanted = int(name.split(":", 1)[1])
+        except (IndexError, ValueError):
+            return
+        value = _set_repeat_to(wanted)
+        await manager.broadcast({"type": "repeat", "value": value, "ts": time.time()})
+        await executor.log("info", f"循环轮数设为 {value}")
     elif name == "focus_ui":
         await _focus_webui()
 
@@ -401,7 +423,7 @@ async def lifespan(_: FastAPI):
         recorder.stop_all()
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.7.1", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.7.2", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -469,7 +491,7 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.7.1"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.7.2"}
 
 
 @app.get("/debug/kb")

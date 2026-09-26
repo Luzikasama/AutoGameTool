@@ -28,6 +28,9 @@ from typing import Callable
 
 _POLL_MS = 120        # 队列消费间隔
 _MARGIN = 24
+# 循环轮数范围（与引擎侧 _REPEAT_MIN/_REPEAT_MAX 保持一致）
+_REPEAT_MIN = 1
+_REPEAT_MAX = 9999
 _WIDTH = 300
 
 _BG = "#0f172a"
@@ -92,7 +95,9 @@ class Overlay:
         self._btn_rec = None
         self._btn_minus = None
         self._btn_plus = None
-        self._lbl_repeat = None
+        self._entry_repeat = None
+        self._editing_repeat = False
+        self._activating = False
         self._progress = None
         self._step_lbl = None
         self._drag_from = (0, 0)
@@ -165,6 +170,36 @@ class Overlay:
             "step": self._step,
             "error": self._error,
         }
+
+    def call_in_tk(self, fn: Callable[[], object], timeout: float = 5.0):
+        """在 Tk 线程里执行 fn 并返回它的返回值（任意线程可调）。
+
+        Tk 只能在创建它的线程里访问，所以外部（含测试）不能直接摸控件。这里复用
+        既有的指令队列把函数投递进去，用 Event 等待并取回结果——这样测试可以驱动
+        **真实控件与真实绑定**，又完全不需要注入系统级鼠标/键盘事件。
+
+        （为什么不合成真实点击来测：那会移动用户的光标、把按键打进当前前台窗口，
+        既打扰用户，又只要用户此刻在用电脑就必然测不稳。）
+        """
+        done = threading.Event()
+        box: dict = {}
+
+        def _run() -> None:
+            try:
+                box["value"] = fn()
+            except Exception as e:  # 带回调用线程再抛，便于测试看到真实原因
+                box["error"] = e
+            finally:
+                done.set()
+
+        if self._thread is None:
+            return None
+        self._q.put(("call", _run))
+        if not done.wait(timeout):
+            return None
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
 
     def hit_test(self, x: int, y: int) -> bool:
         """屏幕坐标点是否落在悬浮框上。
@@ -272,9 +307,26 @@ class Overlay:
 
         self._btn_plus = self._mkbtn(tk, tools, "＋", lambda: self._act("repeat_up"))
         self._btn_plus.pack(side="right", padx=(3, 0))
-        self._lbl_repeat = tk.Label(tools, text="1", bg=_BG, fg=_FG_MAIN,
-                                    font=(_FONT, 9, "bold"), width=3, anchor="center")
-        self._lbl_repeat.pack(side="right")
+        # 循环次数做成可直接输入的 Entry（不只是 ± ）。
+        # 注意：悬浮框平时带 WS_EX_NOACTIVATE，点击不抢焦点——那样 Entry 收不到键盘。
+        # 所以只在用户点击这个数字时**临时**去掉该扩展样式并在提交/失焦后立刻恢复，
+        # 见 _begin_repeat_edit / _end_repeat_edit。
+        self._entry_repeat = tk.Entry(
+            tools, width=4, justify="center", bg=_BTN_BG, fg=_FG_MAIN,
+            insertbackground=_FG_MAIN, disabledbackground=_BTN_BG,
+            disabledforeground=_BTN_DISABLED, relief="flat", bd=0,
+            highlightthickness=1, highlightbackground=_BORDER, highlightcolor=_ACCENT,
+            font=(_FONT, 9, "bold"), takefocus=0,
+        )
+        self._entry_repeat.insert(0, "1")
+        self._entry_repeat.pack(side="right")
+        self._entry_repeat.bind("<Button-1>", self._begin_repeat_edit)
+        self._entry_repeat.bind("<Return>", lambda _e: self._commit_repeat())
+        self._entry_repeat.bind("<KP_Enter>", lambda _e: self._commit_repeat())
+        self._entry_repeat.bind("<Escape>", lambda _e: self._cancel_repeat_edit())
+        # 失焦不等于"用户走开了"：OS 激活会把 Tk 焦点重置回它记住的控件，
+        # 于是刚点开编辑就会收到一次 FocusOut。这里延时判定，见 _on_repeat_focus_out。
+        self._entry_repeat.bind("<FocusOut>", self._on_repeat_focus_out)
         self._btn_minus = self._mkbtn(tk, tools, "－", lambda: self._act("repeat_down"))
         self._btn_minus.pack(side="right", padx=(0, 3))
         tk.Label(tools, text="循环", bg=_BG, fg=_FG_SUB, font=(_FONT, 8)).pack(side="right", padx=(8, 2))
@@ -412,6 +464,152 @@ class Overlay:
         except Exception:
             pass
 
+    # ------------------------------------------------------------- 循环次数编辑
+    def _activate(self) -> None:
+        """把悬浮框激活到前台并让它拿到键盘焦点。
+
+        两个坑，缺一不可（本机实测）：
+        1. 只清 WS_EX_NOACTIVATE 不会让窗口变成活动窗口——非活动窗口收不到键盘，
+           而 Tk 仍以为 Entry 有焦点（`focus_get()` 返回 Entry），于是按键全打给了别人；
+        2. `overrideredirect(True)` 的窗口光靠 `SetForegroundWindow` 还不够，
+           必须再 `SetFocus` 把**线程的焦点窗口**也切过来，否则前台是它、键盘仍不来。
+        实测：只做第 1 步，注入 "7" 得到空串；补上 SetForegroundWindow + SetFocus 后得到 "7"。
+
+        （另一条可行路线是临时关掉 overrideredirect，但那样会换 HWND 并闪出标题栏，不用。）
+        """
+        try:
+            u = ctypes.windll.user32
+            hwnd = wintypes.HWND(self._hwnd)
+            if not u.SetForegroundWindow(hwnd):
+                # 后台进程默认没有前台切换权限；附加到当前前台线程再试一次
+                # （与 window.focus_window 同一套兜底手法，这里不引入对 window.py 的依赖）
+                k = ctypes.windll.kernel32
+                fg = u.GetForegroundWindow()
+                tid_fg = u.GetWindowThreadProcessId(fg, None) if fg else 0
+                tid_self = k.GetCurrentThreadId()
+                if tid_fg and tid_fg != tid_self:
+                    u.AttachThreadInput(tid_self, tid_fg, True)
+                    try:
+                        u.SetForegroundWindow(hwnd)
+                    finally:
+                        u.AttachThreadInput(tid_self, tid_fg, False)
+            # 关键的一步：SetFocus 只能对调用线程自己的窗口使用，而这里正是 Tk 线程
+            u.SetFocus(hwnd)
+        except Exception:
+            pass
+
+    def _begin_repeat_edit(self, _e=None):
+        """点击循环次数：临时激活窗口，让 Entry 收得到键盘输入。
+
+        悬浮框平时带 WS_EX_NOACTIVATE（点击不抢焦点，避免打断游戏里的操作），
+        代价是它永远拿不到键盘焦点、Entry 打不了字。这里只在**用户主动点这个数字**时
+        临时清掉该扩展样式并激活窗口，提交/失焦后立刻恢复——焦点切换是用户点出来的，
+        不是后台偷偷发生的。
+        """
+        if self._running or self._editing_repeat:
+            return "break"
+        # 激活过程中会有焦点变化（可能触发 FocusOut）；这段时间内的提交请求一律忽略，
+        # 否则「第二次编辑」会在用户还没输入时就把上一次的残留文本提交掉。
+        self._activating = True
+        try:
+            user32 = ctypes.windll.user32
+            user32.GetWindowLongW.restype = ctypes.c_long
+            user32.SetWindowLongW.restype = ctypes.c_long
+            user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+            hwnd = wintypes.HWND(self._hwnd)
+            cur = user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
+            user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, cur & ~_WS_EX_NOACTIVATE)
+            self._activate()
+            # 只给 Entry 设焦点：不要再 focus_force() 顶层——那会把焦点从 Entry 上挪走，
+            # 反过来触发 FocusOut 并当场结束编辑（实测：第二次点击必中此坑）。
+            self._entry_repeat.focus_set()
+            self._editing_repeat = True
+            self._entry_repeat.select_range(0, "end")
+        except Exception:
+            pass
+        finally:
+            self._activating = False
+        return "break"  # 阻止继续传递给拖拽处理
+
+    def _on_repeat_focus_out(self, _e=None) -> None:
+        """失焦：延时判断是"用户点到别处"还是"被 OS 激活挤掉了焦点"。
+
+        直接提交会在第二次编辑时立刻把上一次的残留文本提交掉（实测如此）：
+        点开输入框 → `_activate()` 让窗口成为前台 → OS 发来 WM_SETFOCUS →
+        Tk 把焦点重置回它记住的控件 → Entry 收到 FocusOut。这不是用户意图。
+        """
+        if self._activating or not self._editing_repeat:
+            return
+        try:
+            self._root.after(120, self._recheck_repeat_focus)
+        except Exception:
+            pass
+
+    def _recheck_repeat_focus(self) -> None:
+        if not self._editing_repeat:
+            return
+        try:
+            if self._root.focus_get() is self._entry_repeat:
+                return
+            # 判据：窗口已经不是前台 → 用户真的点到别处去了，按提交处理
+            if ctypes.windll.user32.GetForegroundWindow() != self._hwnd:
+                self._commit_repeat()
+                return
+            # 否则只是被激活过程挤掉，把焦点抢回来继续编辑
+            self._entry_repeat.focus_set()
+        except Exception:
+            pass
+
+    def _end_repeat_edit(self) -> None:
+        """结束编辑：恢复 NOACTIVATE 扩展样式（悬浮框回到"不抢焦点"状态）。"""
+        if not self._editing_repeat:
+            return
+        self._editing_repeat = False
+        try:
+            self._apply_window_flags()
+        except Exception:
+            pass
+
+    def _commit_repeat(self) -> None:
+        """提交输入值：非法/越界一律夹到合法范围，并把显示改回真实值。"""
+        if self._activating or not self._editing_repeat:
+            return
+        raw = ""
+        try:
+            raw = self._entry_repeat.get().strip()
+        except Exception:
+            pass
+        value = self._repeat or 1
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            pass  # 非数字：回退到当前值，不报错也不清空
+        value = max(_REPEAT_MIN, min(_REPEAT_MAX, value))
+        self._set_repeat_text(value)
+        self._end_repeat_edit()
+        if value != self._repeat:
+            self._act(f"repeat_set:{value}")
+
+    def _cancel_repeat_edit(self) -> None:
+        """Esc：放弃本次输入，恢复成当前值。"""
+        if self._activating:
+            return
+        self._set_repeat_text(self._repeat or 1)
+        self._end_repeat_edit()
+
+    def _set_repeat_text(self, value: int) -> None:
+        """写入显示值。禁用态下 Tk 不允许改文本，所以临时切回 normal 再恢复。"""
+        try:
+            state = str(self._entry_repeat.cget("state"))
+            if state != "normal":
+                self._entry_repeat.config(state="normal")
+            self._entry_repeat.delete(0, "end")
+            self._entry_repeat.insert(0, str(int(value)))
+            if state != "normal":
+                self._entry_repeat.config(state=state)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------- 事件回调
     def _act(self, name: str) -> None:
         """按钮点击：只把动作名转交引擎（由引擎切回事件循环线程执行）。"""
@@ -464,6 +662,9 @@ class Overlay:
                     return
                 if kind == "enabled":
                     self._apply_enabled(root, bool(_payload))
+                elif kind == "call":
+                    if callable(_payload):
+                        _payload()
                 elif kind in ("text", "state"):
                     dirty = True
         except queue.Empty:
@@ -509,10 +710,15 @@ class Overlay:
                 text="■ 停录" if self._recording else "● 录制",
                 bg=_REC_BG if self._recording else _BTN_BG,
             )
-            self._lbl_repeat.config(text=str(self._repeat or self._total or 1))
+            # 循环次数：正在输入时不覆盖用户正在敲的内容，否则每次状态刷新都会把它擦掉
+            if not self._editing_repeat:
+                value = self._repeat or self._total or 1
+                if self._entry_repeat.get().strip() != str(value):
+                    self._set_repeat_text(value)
             btn_state = "disabled" if self._running else "normal"
             self._btn_minus.config(state=btn_state)
             self._btn_plus.config(state=btn_state)
+            self._entry_repeat.config(state=btn_state)
         except Exception:
             pass
 

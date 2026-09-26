@@ -284,6 +284,21 @@ _BROWSER_EXES = {
 }
 _BROWSER_CLASSES = ("Chrome_WidgetWin", "MozillaWindowClass")
 
+# 明确不是浏览器的宿主：控制台 / 终端 / 解释器。
+# 这些窗口的标题经常带上项目名（例如承载后端的终端窗口标题就是 AutoGameTool），
+# 一旦被当成 WebUI，点「界面」就会把后端控制台弹到前台。
+_NON_BROWSER_EXES = {
+    "explorer.exe", "conhost.exe", "openconsole.exe", "windowsterminal.exe", "wt.exe",
+    "cmd.exe", "powershell.exe", "pwsh.exe", "python.exe", "pythonw.exe",
+    "autogametool.exe", "mintty.exe", "bash.exe", "wsl.exe", "code.exe",
+}
+_NON_BROWSER_CLASSES = (
+    "ConsoleWindowClass",
+    "CASCADIA_HOSTING_WINDOW_CLASS",   # Windows Terminal
+    "PseudoConsoleWindow",
+    "mintty",
+)
+
 
 def is_minimized(hwnd: int) -> bool:
     """窗口是否处于最小化状态（供调用方记录「是谁恢复了窗口」的审计日志）。"""
@@ -294,16 +309,21 @@ def is_minimized(hwnd: int) -> bool:
 
 
 def find_webui_window(page_title: str, exclude_pids: set[int] | None = None) -> dict | None:
-    """定位 WebUI 所在的**浏览器**窗口。
+    """定位 WebUI 所在的**浏览器**窗口；找不到就返回 None。
 
     为什么不能只按标题匹配：项目目录经常被资源管理器打开着，其窗口标题恰好就是
-    「AutoGameTool」。旧实现只按标题找、还优先选未最小化的窗口，于是「界面」按钮
-    永远弹出资源管理器而不是最小化的浏览器。因此这里再加两道约束：
+    「AutoGameTool」。因此这里要求窗口**必须真的是浏览器**：
 
-    1. 类名或进程名必须看起来像浏览器；
-    2. 排除自身进程与 explorer.exe。
+    1. 类名（`Chrome_WidgetWin*` / `MozillaWindowClass`）或进程名看起来像浏览器；
+    2. 显式排除控制台/终端/解释器（它们的标题里也常带项目名，例如承载后端的终端）；
+    3. 排除自身进程与 explorer.exe。
 
-    排序：先浏览器 → 再未最小化 → 最后取面积最大的（主窗口而非小面板）。
+    ⚠️ 旧实现把「像不像浏览器」只当成**排序键**，没有任何过滤：于是当浏览器窗口
+    一个都没匹配上（标签页被切走、标题变了）时，`matched[0]` 会退而求其次返回
+    任意同名窗口——实测就是承载后端的终端窗口，表现是「点『界面』把后端控制台
+    弹到了前台」。现在改为宁可返回 None（由调用方提示用户），也不乱切窗口。
+
+    排序：未最小化优先 → 面积最大（主窗口而非小面板）。
     """
     hint = (page_title or "").strip().lower()
     if not hint:
@@ -330,20 +350,20 @@ def find_webui_window(page_title: str, exclude_pids: set[int] | None = None) -> 
         if pid.value in exclude:
             return True
         exe = _process_exe(pid.value)
-        if exe == "explorer.exe":
-            return True
         cls = _class_name(hwnd)
-        is_browser = exe in _BROWSER_EXES or any(cls.startswith(c) for c in _BROWSER_CLASSES)
-        rect = get_window_rect(hwnd)
+        if exe in _NON_BROWSER_EXES or any(cls.startswith(c) for c in _NON_BROWSER_CLASSES):
+            return True
+        if not (exe in _BROWSER_EXES or any(cls.startswith(c) for c in _BROWSER_CLASSES)):
+            return True  # 不像浏览器：直接丢弃，不再当作后备候选
         matched.append(
             {
                 "hwnd": hwnd,
                 "title": title,
-                "rect": rect,
+                "rect": get_window_rect(hwnd),
                 "minimized": bool(user32.IsIconic(hwnd)),
                 "exe": exe,
                 "class": cls,
-                "browser": is_browser,
+                "browser": True,
             }
         )
         return True
@@ -356,7 +376,6 @@ def find_webui_window(page_title: str, exclude_pids: set[int] | None = None) -> 
         return None
     matched.sort(
         key=lambda w: (
-            not w["browser"],
             w["minimized"],
             -(w["rect"]["width"] * w["rect"]["height"]),
         )

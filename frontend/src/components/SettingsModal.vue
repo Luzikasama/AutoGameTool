@@ -44,7 +44,10 @@ function onFile(e: Event) {
       draft.value = url
       draftName.value = file.name
       resetCrop()
-      nextTick(() => measure())
+      nextTick(() => {
+        measure()
+        observeBody()
+      })
     }
     im.onerror = () => message.error('图片解码失败')
     im.src = url
@@ -75,14 +78,33 @@ function targetAspect() {
 const frame = () => ({ w: frameW.value, h: frameH.value })
 const src = () => ({ w: imgW.value, h: imgH.value })
 
-/** 量出取景框尺寸：在可用宽高内按窗口比例取最大矩形 */
+/** 量出取景框尺寸：在弹窗**内容盒**内按窗口比例取最大的矩形。
+ *
+ *  这里必须用「内容盒」而不是 `clientWidth`：`clientWidth` 是**含 padding** 的宽度，
+ *  拿它当可用宽度会让取景框比弹窗里的标题/说明/按钮宽出去一圈（padding 那 ~24px），
+ *  看起来就是「图片/取景框超出了选择框」——实测弹窗宽 720 时取景框做到了 718，
+ *  而正文内容盒只有 ~670。
+ *
+ *  高度同时受两条约束：既不超过窗口的 46%，也要保证「取景框 + 标题/说明/按钮」
+ *  整块能装进窗口（否则弹窗自己被截断）。
+ */
 function measure() {
   const el = document.getElementById('agt-crop-frame')
   if (!el || !imgW.value) return
-  const availW = (el.parentElement?.clientWidth || 660) - 2
-  const maxH = Math.max(160, Math.round(window.innerHeight * 0.46))
+  const body = el.parentElement
+  let availW = 660
+  if (body) {
+    const cs = getComputedStyle(body)
+    const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
+    availW = body.clientWidth - padX
+  }
+  availW = Math.max(200, availW - 2)
+  const maxH = Math.max(
+    140,
+    Math.min(Math.round(window.innerHeight * 0.46), window.innerHeight - 300),
+  )
   const ar = targetAspect()
-  let w = Math.max(200, availW)
+  let w = availW
   let h = w / ar
   if (h > maxH) {
     h = maxH
@@ -91,6 +113,31 @@ function measure() {
   frameW.value = Math.round(w)
   frameH.value = Math.round(h)
   pan.value = clampPan(frame(), src(), zoom.value, pan.value)
+}
+
+/** 监听弹窗内容盒尺寸变化（比只听 window.resize 可靠：
+ *  弹窗打开动画、侧边栏折叠、面板拖拽都会改变它，而不一定触发 window resize） */
+let bodyObserver: ResizeObserver | null = null
+
+function observeBody() {
+  try {
+    const body = document.getElementById('agt-crop-frame')?.parentElement
+    if (!body || typeof ResizeObserver === 'undefined') return
+    bodyObserver?.disconnect()
+    bodyObserver = new ResizeObserver(() => measure())
+    bodyObserver.observe(body)
+  } catch {
+    /* 不支持就退回只监听 window.resize */
+  }
+}
+
+function stopObserveBody() {
+  try {
+    bodyObserver?.disconnect()
+  } catch {
+    /* 忽略 */
+  }
+  bodyObserver = null
 }
 
 /** 图片在取景框里的位置与尺寸（CSS 像素） */
@@ -134,6 +181,7 @@ function onUp() {
 }
 
 function cancelCrop() {
+  stopObserveBody()
   draft.value = ''
   draftName.value = ''
 }
@@ -193,6 +241,7 @@ watch(show, (v) => {
 })
 window.addEventListener('resize', measure)
 onBeforeUnmount(() => {
+  stopObserveBody()
   window.removeEventListener('resize', measure)
   window.removeEventListener('mousemove', onMove)
   window.removeEventListener('mouseup', onUp)
