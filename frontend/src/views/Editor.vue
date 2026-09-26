@@ -242,6 +242,135 @@ function refreshSelection() {
   selIds.value = nodes.value.filter((n: any) => n.selected).map((n) => n.id)
 }
 
+// ---------- 撤销 / 重做 ----------
+// 实现方式是**快照式历史**，而不是在每个修改点手动入栈。
+// 原因：画布上会改 nodes/edges 的地方远不止我们自己的那几个函数——Vue Flow
+// 自己就会改（Delete 键删节点/连线、拖动坐标），属性面板里还有一堆直接
+// v-model 到 params 的输入框。逐个包起来必然漏，漏掉的那部分就会表现为
+// 「撤销时灵时不灵」。改成「深度监听 + 防抖 + 按内容去重」后，所有改动路径
+// 都被同一套机制覆盖，也不需要去猜哪些操作算“一步”。
+const HISTORY_MAX = 60
+const HISTORY_DEBOUNCE_MS = 350
+
+interface Snapshot {
+  json: string
+  nodes: any[]
+  edges: any[]
+  selectedId: string | null
+}
+
+const history = ref<Snapshot[]>([])
+const hIndex = ref(-1)
+const canUndo = computed(() => hIndex.value > 0)
+const canRedo = computed(() => hIndex.value < history.value.length - 1)
+// 应用快照期间不要记录历史（否则撤销本身会被记成一步，撤销就再也回不去）
+let restoring = false
+let histTimer: ReturnType<typeof setTimeout> | null = null
+
+function cloneData<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v ?? null)) as T
+}
+
+/** 只保留流程语义字段。
+ *  Vue Flow 会往节点上挂 dimensions / selected / dragging / handleBounds 等
+ *  运行时属性，若不剔除，随便点一下选中就会产生"看起来变了"的假快照，
+ *  历史很快被这些噪音填满，真正要撤销的改动反而被挤出去。 */
+function snapshotOf(): Snapshot {
+  const ns = nodes.value.map((n: any) => ({
+    id: n.id,
+    type: n.type ?? 'step',
+    position: { x: Math.round(n.position?.x ?? 0), y: Math.round(n.position?.y ?? 0) },
+    data: cloneData(n.data),
+  }))
+  const es = edges.value.map((e: any) => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    sourceHandle: e.sourceHandle ?? null,
+  }))
+  return { json: JSON.stringify({ ns, es }), nodes: ns, edges: es, selectedId: selectedId.value }
+}
+
+function pushHistory(force = false) {
+  if (restoring) return
+  const snap = snapshotOf()
+  const top = history.value[hIndex.value]
+  if (!force && top && top.json === snap.json) return
+  // 撤销之后又做了新改动 → 丢弃原来的「未来」分支
+  if (hIndex.value < history.value.length - 1) history.value = history.value.slice(0, hIndex.value + 1)
+  history.value.push(snap)
+  if (history.value.length > HISTORY_MAX) history.value.shift()
+  hIndex.value = history.value.length - 1
+}
+
+/** 重置历史（新建 / 加载脚本时调用）：撤销不应该跨脚本跳回上一个流程。 */
+function resetHistory() {
+  history.value = []
+  hIndex.value = -1
+  pushHistory(true)
+}
+
+function applySnapshot(snap: Snapshot) {
+  if (!snap) return
+  restoring = true
+  nodes.value = snap.nodes.map((n) => ({ ...n, position: { ...n.position }, data: cloneData(n.data) }))
+  edges.value = snap.edges.map((e) => ({ ...e }))
+  selectedId.value = snap.nodes.some((n) => n.id === snap.selectedId) ? snap.selectedId : null
+  // id 计数器必须跟上：否则撤销后再新增节点会和历史里的节点撞 id
+  nodeSeq = snap.nodes.reduce((m, n) => Math.max(m, Number(String(n.id).replace(/^n/, '')) || 0), 0)
+  nextTick(() => {
+    restoring = false
+    refreshSelection()
+    loadFlowToEngine()
+  })
+}
+
+function undo() {
+  if (!canUndo.value) {
+    message.info('没有可撤销的改动了')
+    return
+  }
+  hIndex.value -= 1
+  applySnapshot(history.value[hIndex.value])
+}
+
+function redo() {
+  if (!canRedo.value) {
+    message.info('没有可重做的改动了')
+    return
+  }
+  hIndex.value += 1
+  applySnapshot(history.value[hIndex.value])
+}
+
+// 深度监听 + 防抖：拖动节点、连续输入参数会被合并成一步，而不是几十步
+watch(
+  [nodes, edges],
+  () => {
+    if (restoring) return
+    if (histTimer) clearTimeout(histTimer)
+    histTimer = setTimeout(() => pushHistory(), HISTORY_DEBOUNCE_MS)
+  },
+  { deep: true },
+)
+
+// Ctrl+Z 撤销、Ctrl+Y（或 Ctrl+Shift+Z）重做。
+// 输入框内不拦截：那里让浏览器做原生的文本撤销更符合直觉。
+function onHistoryKey(e: KeyboardEvent) {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return
+  const t = e.target as HTMLElement | null
+  const tag = (t?.tagName || '').toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || t?.isContentEditable) return
+  const k = e.key.toLowerCase()
+  if (k === 'z' && !e.shiftKey) {
+    e.preventDefault()
+    undo()
+  } else if (k === 'y' || (k === 'z' && e.shiftKey)) {
+    e.preventDefault()
+    redo()
+  }
+}
+
 // ---------- 模板 / 坐标拾取 ----------
 async function refreshTemplates() {
   try {
@@ -527,6 +656,8 @@ function onLoadFile(e: Event) {
       )
       selectedId.value = null
       message.success(hadWindow ? '脚本已加载（默认全局绑定，未恢复原窗口）' : '脚本已加载')
+      // 历史从「刚加载完」这一刻重新开始：撤销不应该跨脚本跳回上一个流程
+      resetHistory()
     } catch (err: any) {
       message.error('加载失败：' + err.message)
     }
@@ -641,7 +772,7 @@ async function stop() {
   }
 }
 
-// 快捷键触发：与点击“运行/停止”完全一致
+// 快捷键触发：与点击“运行/停止”完全一致（仅用于兼容旧版引擎）
 function toggleScript() {
   if (store.running) {
     store.addLog({ level: 'warn', message: '收到快捷键：停止脚本', ts: Date.now() / 1000 })
@@ -650,6 +781,15 @@ function toggleScript() {
     store.addLog({ level: 'info', message: '收到快捷键：启动脚本', ts: Date.now() / 1000 })
     run()
   }
+}
+
+// 引擎侧的「启动」请求。
+// 新版引擎把启停方向的决定权收回自己手里（它才知道 executor 的真实状态）：
+// 要停止就直接在引擎侧停掉，要启动才发这条请求——因为只有页面知道画布上最新的流程。
+// 所以这里不再自行判断方向，避免两边 running 有偏差时点「停止」反而又启动一次。
+function requestRun() {
+  if (store.running) return
+  run()
 }
 
 // ---------- 键鼠录制 ----------
@@ -952,7 +1092,8 @@ function connectWs() {
       else if (msg.type === 'overlay') overlayEnabled.value = !!msg.enabled
       else if (msg.type === 'repeat') store.repeat = Number(msg.value) || 1
       else if (msg.type === 'picked') onPicked(msg.x, msg.y)
-      else if (msg.type === 'hotkey') toggleScript()
+      else if (msg.type === 'run_request') requestRun()
+      else if (msg.type === 'hotkey') toggleScript() // 兼容旧版引擎的启停广播
       else if (msg.type === 'recording') macroRecording.value = !!msg.recording
       else if (msg.type === 'recorded') onRecorded(msg.events || [])
     } catch {
@@ -1066,6 +1207,9 @@ onMounted(() => {
   syncTimer = setInterval(() => loadFlowToEngine(), 1000)
   // 定时同步真实运行状态：任何状态广播丢失都能在一秒内自愈，按钮不再卡死
   stateTimer = setInterval(syncRunState, 1000)
+  // 撤销/重做的历史起点 + 快捷键
+  resetHistory()
+  window.addEventListener('keydown', onHistoryKey)
 })
 onBeforeUnmount(() => {
   destroyed = true
@@ -1073,6 +1217,8 @@ onBeforeUnmount(() => {
   ws?.close()
   if (syncTimer) clearInterval(syncTimer)
   if (stateTimer) clearInterval(stateTimer)
+  if (histTimer) clearTimeout(histTimer)
+  window.removeEventListener('keydown', onHistoryKey)
 })
 </script>
 
@@ -1082,6 +1228,18 @@ onBeforeUnmount(() => {
       <n-button quaternary @click="router.push('/')">← 返回</n-button>
       <div class="brand">🎮 AutoGameTool</div>
       <n-input v-model:value="store.flowName" class="name-input" placeholder="脚本名称" />
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <n-button size="small" :disabled="!canUndo" @click="undo">↶ 撤销</n-button>
+        </template>
+        撤销上一步改动（Ctrl+Z）
+      </n-tooltip>
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <n-button size="small" :disabled="!canRedo" @click="redo">↷ 重做</n-button>
+        </template>
+        重做（Ctrl+Y 或 Ctrl+Shift+Z）
+      </n-tooltip>
       <div class="spacer" />
       <span v-if="engineVersion" class="ver-badge" title="引擎版本（界面右上角可确认是否为最新版）">
         v{{ engineVersion }}

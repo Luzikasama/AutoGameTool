@@ -1,5 +1,8 @@
 """悬浮框：置顶小窗显示运行进度，并提供启停 / 录制 / 循环次数 / 回到界面 四个快捷操作。
 
+「回到界面」是标题栏右上角的矢量图标（点它把 WebUI 浏览器窗口切回前台），
+其余三个是底部操作行上的按钮。
+
 为什么由引擎而不是网页来画：浏览器无法创建真正置顶于其它程序（尤其游戏）之上的窗口。
 这里用 tkinter 在独立线程里开一个无边框、置顶、可拖拽、**不抢焦点**的小窗。
 
@@ -117,15 +120,25 @@ class Overlay:
         self._push(("text", None))
 
     def set_run_state(self, running: bool) -> None:
-        self._running = bool(running)
+        # 值没变就不重绘：状态看门狗每秒调用一次，靠这里保证它是「免费」的
+        running = bool(running)
+        if running == self._running:
+            return
+        self._running = running
         self._push(("state", None))
 
     def set_recording(self, recording: bool) -> None:
-        self._recording = bool(recording)
+        recording = bool(recording)
+        if recording == self._recording:
+            return
+        self._recording = recording
         self._push(("state", None))
 
     def set_repeat(self, repeat: int) -> None:
-        self._repeat = int(repeat)
+        repeat = int(repeat)
+        if repeat == self._repeat:
+            return
+        self._repeat = repeat
         self._push(("state", None))
 
     def state(self) -> dict:
@@ -218,8 +231,12 @@ class Overlay:
         title = tk.Label(head, text="● AutoGameTool", bg=_BG, fg=_ACCENT,
                          font=(_FONT, 8, "bold"), anchor="w")
         title.pack(side="left")
+        # 「回到界面」放右上角，用矢量图标而不是文字按钮（见 _mk_back_icon）。
+        # pack 顺序决定位置：先 pack 的在最右，因此 ✕ 仍在最外侧。
         close = tk.Label(head, text="✕", bg=_BG, fg=_FG_SUB, font=(_FONT, 9), cursor="hand2")
         close.pack(side="right")
+        back = self._mk_back_icon(tk, head)
+        back.pack(side="right", padx=(0, 6))
         close.bind("<Button-1>", self._on_close_click)
 
         # ---- 进度 ----
@@ -240,8 +257,6 @@ class Overlay:
         self._btn_rec = self._mkbtn(tk, tools, "● 录制", lambda: self._act("toggle_record"))
         self._btn_rec.pack(side="left", padx=(4, 0))
 
-        ui_btn = self._mkbtn(tk, tools, "界面", lambda: self._act("focus_ui"))
-        ui_btn.pack(side="right")
         self._btn_plus = self._mkbtn(tk, tools, "＋", lambda: self._act("repeat_up"))
         self._btn_plus.pack(side="right", padx=(3, 0))
         self._lbl_repeat = tk.Label(tools, text="1", bg=_BG, fg=_FG_MAIN,
@@ -293,6 +308,43 @@ class Overlay:
             relief="flat", bd=0, highlightthickness=0,
             padx=7, pady=2, font=(_FONT, 8), cursor="hand2", takefocus=0,
         )
+
+    def _mk_back_icon(self, tk, parent):
+        """「回到界面」图标：右上角，点它把 WebUI 浏览器窗口切回前台。
+
+        用 Canvas 矢量绘制而不是图片：打包体积不变、任意 DPI 下都清晰，
+        也免去给 exe 再塞一个图标资源的麻烦。
+        造型是编辑器里常见的「弹回主界面」标志——一个左上角开口的方框、
+        一支从缺口指向左上角的箭头，右下角一块实心方块。
+
+        尺寸/间距是调过的：18px 时三部分会糊成一团，20px + 1.4px 线宽
+        才能在 100% 缩放下看清是「箭头 + 方框 + 方块」。
+        """
+        cv = tk.Canvas(parent, width=20, height=20, bg=_BG,
+                       highlightthickness=0, bd=0, cursor="hand2", takefocus=0)
+        line = {"fill": _FG_MAIN, "width": 1.4, "capstyle": "round", "joinstyle": "round"}
+        items = [
+            # 左上角开口的方框（缺口留给箭头穿出）
+            cv.create_line(11.5, 3.5, 17.5, 3.5, 17.5, 14, 7.5, 14, 7.5, 8, **line),
+            # 箭头：杆 + 箭头尖
+            cv.create_line(8, 8.5, 2.5, 3, **line),
+            cv.create_line(2.5, 7, 2.5, 3, 6.5, 3, **line),
+            # 右下角的实心方块（与方框留出约 1.5px 间隙，不糊在一起）
+            cv.create_rectangle(11, 8.5, 16, 12.5, fill=_FG_MAIN, outline=""),
+        ]
+
+        def paint(color: str) -> None:
+            for item in items:
+                try:
+                    cv.itemconfig(item, fill=color)
+                except Exception:
+                    pass
+
+        # 悬停变主题色：没有文字标签，靠颜色变化给出「这里可以点」的反馈
+        cv.bind("<Button-1>", lambda _e: self._act("focus_ui"))
+        cv.bind("<Enter>", lambda _e: (paint(_ACCENT), self._ensure_topmost()))
+        cv.bind("<Leave>", lambda _e: paint(_FG_MAIN))
+        return cv
 
     def _resolve_hwnd(self, root) -> int:
         for getter in (lambda: root.frame(), lambda: root.winfo_id()):

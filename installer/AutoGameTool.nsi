@@ -26,7 +26,7 @@ Unicode true
 ; ---------------------------------------------------------------- 基本信息
 !define APP_NAME      "AutoGameTool"
 !define APP_NAME_CN   "AutoGameTool 游戏自动化脚本工具"
-!define APP_VERSION   "0.6.2"
+!define APP_VERSION   "0.7.0"
 !define APP_PUBLISHER "AutoGameTool"
 !define APP_EXE       "AutoGameTool.exe"
 !define APP_ICON      "${PROJECT_ROOT}\assets\AutoGameTool.ico"
@@ -49,7 +49,7 @@ Icon "${APP_ICON}"
 UninstallIcon "${APP_ICON}"
 
 ; ------------------------------------------------------- 文件属性（右键详情）
-VIProductVersion "0.6.2.0"
+VIProductVersion "0.7.0.0"
 VIAddVersionKey /LANG=2052 "ProductName"     "${APP_NAME}"
 VIAddVersionKey /LANG=2052 "FileDescription" "${APP_NAME} 安装程序"
 VIAddVersionKey /LANG=2052 "FileVersion"     "${APP_VERSION}"

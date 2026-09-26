@@ -348,9 +348,22 @@ class Executor:
                 return
             remaining = total_ms
             while remaining > 0:
-                await self.log("debug", f"正在延时… 剩余 {remaining}ms")
+                if self.stopped:
+                    await self.log("warn", f"延时被中断（剩余 {remaining}ms）")
+                    return
                 chunk = min(1000, remaining)
-                await asyncio.sleep(chunk / 1000)
+                await self.log("debug", f"正在延时… 剩余 {remaining}ms")
+                # 每个 1 秒的分段再拆成 250ms 小睡并检查停止标志。
+                # 挂机脚本里的单个延时动辄几十秒，若整段睡死，"停止"要等它走完才生效，
+                # 表现得就像「点了停止没反应」（悬浮框与 WebUI 的停止按钮都会被拖住）。
+                left = chunk
+                while left > 0:
+                    if self.stopped:
+                        await self.log("warn", f"延时被中断（剩余 {remaining - (chunk - left)}ms）")
+                        return
+                    take = min(250, left)
+                    await asyncio.sleep(take / 1000)
+                    left -= take
                 remaining -= chunk
         elif stype == "find_image":
             await self._do_find(params, input_mode, hwnd)

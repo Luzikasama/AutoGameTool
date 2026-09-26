@@ -110,6 +110,19 @@ _repeat_value = 1
 # 页面标题（frontend/index.html 的 <title>），用于定位 WebUI 所在窗口
 _WEBUI_TITLE_HINT = "AutoGameTool"
 
+# 上一次广播出去的运行状态（None = 还没广播过），用于去重
+_last_run_state: bool | None = None
+
+# 关闭 WebUI 后同步关闭后端的宽限期。
+# 必须留宽限：刷新页面(F5)、前端热更新、短暂网络抖动都会先断开 WebSocket 再立刻重连，
+# 若一断开就退出，「刷新一下」会变成「把后端也关了」。
+_CLOSE_GRACE_SEC = 6.0
+# 是否曾经有页面连上过。从未连过（NO_BROWSER 无人值守、冒烟测试）时永不自动退出
+_ever_connected = False
+_close_task: "asyncio.Task | None" = None
+# 由 __main__ 注入：拿到 uvicorn Server 才能请求优雅退出（走完 lifespan 清理钩子）
+_server = None
+
 
 def _overlay_closed() -> None:
     """悬浮框上点 ✕：同步开关到前端并持久化。
@@ -124,16 +137,84 @@ def _overlay_closed() -> None:
     )
 
 
-async def _toggle_run() -> None:
+async def _sync_run_state(force: bool = False) -> bool:
+    """把「真实运行状态」统一推给悬浮框与所有页面。
+
+    这是启停状态的**唯一事实来源**：任何会改动 executor.running 的路径
+    （/run、/run/stop、全局快捷键、悬浮框按钮、流程自然结束）都收敛到这里。
+    前端本来就有 /run/state 轮询自愈，悬浮框却没有，于是两边一旦分叉就再也回不来：
+    新版给悬浮框同等的自愈能力（配合 _state_watchdog 每秒兜底）。
+    """
+    global _last_run_state
+    running = executor.reconcile()
+    try:
+        overlay.set_run_state(running)
+    except Exception:
+        pass
+    if force or running != _last_run_state:
+        _last_run_state = running
+        await manager.broadcast(
+            {"type": "state", "state": "running" if running else "idle", "ts": time.time()}
+        )
+    return running
+
+
+async def _state_watchdog() -> None:
+    """每秒兜底同步一次运行状态。
+
+    任何一条漏掉状态同步的代码路径，都会在 1 秒内被这里纠正，
+    因此「WebUI 显示运行中、悬浮框还显示停止」这类分叉不会长期存在。
+    """
+    while True:
+        try:
+            await _sync_run_state()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
+
+
+async def _await_stop(timeout: float = 2.0) -> None:
+    """等正在收尾的流程真正结束（最多 timeout 秒）。
+
+    停止是协作式的：stop() 只置标志，流程要跑到下一个检查点才会退出。
+    不等它的话，接口会在「还在收尾」时就返回 running=true，前端按钮继续亮着
+    「停止」——那几百毫秒正是用户会反复点「停止」的窗口。
+    shield 保证超时只放弃等待，绝不取消正在收尾的任务。
+    """
+    task = executor.task
+    if task is None or task.done():
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except Exception:
+        pass
+
+
+async def _toggle_run(source: str = "快捷键") -> None:
     """启停流程：全局快捷键与悬浮框按钮共用这一条链路。
 
-    有前端连接时通知前端执行（前端调用 /run，保证跑的是画布上最新的流程）；
-    否则退化为引擎侧 toggle（使用最近一次 /flow/load 的流程）。
+    关键设计：**「停止」一律在引擎侧直接执行，绝不委托给前端**。
+    旧实现无论启停都只广播一个 hotkey、由前端按自己的 store.running 决定方向，
+    一旦两边状态有偏差（流程异常结束、前端还没轮询到），
+    「停止」就会变成"再启动一次"或被 409 挡掉——表现正是"反复点停止没反应"。
+    启动则必须交给前端发起 /run，因为要用画布上最新的流程。
+
+    source 只用于日志：出问题时能一眼看出这次动作是快捷键还是悬浮框发起的。
     """
-    if manager.connections:
-        await manager.broadcast({"type": "hotkey", "ts": time.time()})
+    if executor.reconcile():
+        await executor.log("warn", f"{source}：停止脚本")
+        executor.stop()
+        await _await_stop()
+        executor.reconcile()
+        await _sync_run_state()
     else:
-        await executor.toggle()
+        await executor.log("info", f"{source}：启动脚本")
+        if manager.connections:
+            await manager.broadcast({"type": "run_request", "ts": time.time()})
+        else:
+            await executor.toggle()
 
 
 def _toggle_record() -> None:
@@ -219,7 +300,7 @@ async def _focus_webui() -> None:
 
 async def _do_overlay_action(name: str) -> None:
     if name == "toggle_run":
-        await _toggle_run()
+        await _toggle_run("悬浮框")
     elif name == "toggle_record":
         _toggle_record()
     elif name in ("repeat_up", "repeat_down"):
@@ -245,7 +326,7 @@ def _setup_hotkey() -> None:
 
     def _cb() -> None:
         if _loop:
-            _loop.call_soon_threadsafe(lambda: _spawn(_toggle_run()))
+            _loop.call_soon_threadsafe(lambda: _spawn(_toggle_run("全局快捷键")))
 
     hotkey_manager = HotkeyManager(_cb)
     print(
@@ -284,7 +365,10 @@ async def lifespan(_: FastAPI):
     _setup_hotkey()
     # 悬浮框：按上次的开关状态启动（不可用时内部自动降级，不影响其它功能）
     overlay.start(enabled=bool(appconfig.get("overlay", False)))
+    # 运行状态看门狗：悬浮框没有前端的 /run/state 轮询，靠它自愈
+    watchdog = _spawn(_state_watchdog())
     yield
+    watchdog.cancel()
     overlay.stop()
     executor.stop()
     if hotkey_manager:
@@ -295,7 +379,7 @@ async def lifespan(_: FastAPI):
         recorder.stop_all()
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.6.2", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.7.0", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -363,7 +447,7 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.6.2"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.7.0"}
 
 
 @app.get("/debug/kb")
@@ -531,15 +615,20 @@ async def run(req: RunRequest):
         executor.running = True
         _sync_repeat(req.flow)
         executor.task = _spawn(executor.run(req.flow))
+    # 立即把状态推给悬浮框：不等 executor.run() 被调度到，悬浮框按钮马上变「停止」
+    await _sync_run_state()
     return {"ok": True}
 
 
 @app.post("/run/stop")
 async def stop():
     executor.stop()
+    # 等流程真正收尾再返回，前端按钮就会在"确实已停止"的那一刻翻转
+    await _await_stop()
     # stop() 会在「没有实际任务在跑」时直接复位 running；这里再 reconcile 兜底，
     # 保证返回的是真实状态，前端按钮不会卡在「停止」
     executor.reconcile()
+    await _sync_run_state()
     return {"ok": True, "running": executor.running}
 
 
@@ -549,9 +638,10 @@ async def run_state():
 
     reconcile() 兜底任何让 executor.run() 的 finally 未能执行的异常路径：
     任务已结束却仍标记运行中时自动复位，前端 1 秒轮询即可自愈。
+    悬浮框侧由 _sync_run_state 一并纠正（它没有自己的轮询）。
     """
-    executor.reconcile()
-    return {"running": executor.running}
+    running = await _sync_run_state()
+    return {"running": running}
 
 
 @app.get("/config/hotkey")
@@ -616,20 +706,86 @@ async def record_stop():
     return {"ok": True}
 
 
+# ------------------------------------------------------------ 关闭页面即关闭后端
+def _keep_alive_on_close() -> bool:
+    """是否需要「关掉页面也不退后端」（无人值守挂机场景的逃生开关）。"""
+    return os.environ.get("AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _cancel_close_timer() -> None:
+    global _close_task
+    if _close_task is not None and not _close_task.done():
+        _close_task.cancel()
+    _close_task = None
+
+
+async def _close_when_no_page() -> None:
+    """最后一个页面断开、且宽限期内没有重连 → 停止流程并退出后端。"""
+    try:
+        await asyncio.sleep(_CLOSE_GRACE_SEC)
+    except asyncio.CancelledError:
+        return
+    if manager.connections:
+        return  # 宽限期内连回来了（刷新页面 / 前端热更新）
+    print("[AutoGameTool] WebUI 已关闭，正在停止流程并退出后端…", flush=True)
+    try:
+        executor.stop()
+        # 给正在跑的流程一点时间走完 finally（复位 running、释放钩子）再退出
+        await asyncio.sleep(0.4)
+    except Exception:
+        pass
+    _request_shutdown()
+
+
+def _schedule_close_check() -> None:
+    global _close_task
+    if not _ever_connected or _keep_alive_on_close():
+        return
+    _cancel_close_timer()
+    _close_task = _spawn(_close_when_no_page())
+
+
+def _request_shutdown() -> None:
+    """请求进程退出。
+
+    优先让 uvicorn 优雅退出（会走 lifespan 里的清理：关悬浮框、注销钩子），
+    只有拿不到 Server 实例时才兜底强退。
+    """
+    srv = _server
+    if srv is not None:
+        srv.should_exit = True
+        return
+    os._exit(0)
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    global _ever_connected
     # WebSocket 同样校验令牌（网页可跨域发起 WS 连接，不校验则日志/事件全部泄露）
     if not _DEV_MODE and ws.query_params.get("token", "") != _ENGINE_TOKEN:
         await ws.close(code=4401)
         return
     await manager.connect(ws)
+    _ever_connected = True
+    # 有页面连上就取消退出倒计时（含刷新页面时的重连）
+    _cancel_close_timer()
     try:
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
-        manager.disconnect(ws)
+        pass
     except Exception:
+        pass
+    finally:
         manager.disconnect(ws)
+        # 最后一个页面断开 → 启动「关闭后端」宽限计时
+        if not manager.connections:
+            _schedule_close_check()
 
 
 # ---- 前端静态资源（打包后由引擎同源提供）----
@@ -680,8 +836,11 @@ if __name__ == "__main__":
     else:
         threading.Thread(target=_open_browser, daemon=True).start()
 
+    # 用 Config/Server 而不是 uvicorn.run：需要持有 Server 实例，
+    # 才能在「用户关闭 WebUI 页面」时请求优雅退出（见 _request_shutdown）
+    _server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8765))
     try:
-        uvicorn.run(app, host="127.0.0.1", port=8765)
+        _server.run()
     except OSError as e:
         print(f"[AutoGameTool] 引擎启动失败：{e}（端口 8765 可能被其他程序占用）", flush=True)
         sys.exit(1)

@@ -4,6 +4,9 @@ from pynput import keyboard
 import appconfig
 import keybus
 
+# 纯修饰键：它们不用于「解除已触发锁」，否则按住 alt 连按 f1 会重复触发
+_MODIFIERS = {"ctrl", "alt", "shift", "win"}
+
 
 def _norm(key) -> str:
     if isinstance(key, keyboard.Key):
@@ -55,7 +58,15 @@ class HotkeyManager:
             self.callback()
 
     def _on_release(self, key):
-        self.pressed.discard(_norm(key))
+        k = _norm(key)
+        self.pressed.discard(k)
+        # 组合键里的**非修饰键**一抬起就解除「已触发」锁。
+        # 旧实现只在「所有键都松开」时解锁，于是按住 alt 连按两次 f1 只会触发第一次
+        # （第二次按下时 alt 仍按着，_fired 还是 True）——手感就是「快捷键时灵时不灵」。
+        # 这样改仍保留原有保护：长按 f1 时系统重复发的是 keydown（没有 keyup），
+        # 不会重复触发。
+        if k in self.keys and k not in _MODIFIERS:
+            self._fired = False
         if not self.pressed:
             self._fired = False
 
