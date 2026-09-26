@@ -660,6 +660,39 @@ engine\.venv\Scripts\python.exe tools\test_webui_close.py
 
 > 注意：该脚本会写注册表与「开始菜单 / 桌面」，需要相应权限；它不会删除 `%APPDATA%\AutoGameTool`（模板与配置）。
 
+### 9.10 发布凭据约定（重要，必须遵守）
+
+本项目对「谁能碰 GitHub 凭据」有硬性约定，**任何自动化流程（包括 AI 助手）都必须遵守**：
+
+| 规则 | 说明 |
+|---|---|
+| **只允许** `gh` CLI 或 Git Credential Manager 完成 GitHub 操作 | `git push` 交给 GCM 自己处理，凭据全程不出现在任何输出里 |
+| **禁止**执行 `gh auth token`、`git credential fill` | 这两条是"把令牌打印出来"的入口 |
+| **禁止**读取或输出 GitHub 令牌 | 包括打印前缀、长度、片段 |
+| **禁止**把令牌写入文件 / 命令行参数 / 环境变量 / curl 配置 / 日志 / 代码 | 任何一种都可能在报错时被回显 |
+| **如果 `gh` 完成不了** | **不要**自行提取凭据、也**不要**改用 curl 绕过 → **停下来告知维护者**，由人工决定 |
+
+前置条件：`gh` 必须已安装并认证过。
+
+```powershell
+winget install --id GitHub.cli -e     # 安装
+gh auth login                         # 由人工执行一次（浏览器授权）
+gh auth status                        # 确认状态（只显示账号与 scope，不显示令牌）
+```
+
+发布 Release 用 `gh` 完成，不需要任何人工取令牌的步骤：
+
+```powershell
+gh release create v0.7.2 .\AutoGameTool-Setup.exe --title "v0.7.2 —— ..." --notes-file .\notes.md
+gh release upload v0.7.2 .\AutoGameTool-Setup.exe --clobber   # 补传/覆盖已有资产
+```
+
+> **为什么写死这条**（真实事故，v0.6.0）：为了上传 Release 资产，当时用 `git credential fill`
+> 取出了 OAuth 令牌并写进一个 curl 配置文件；curl 解析该文件失败时，把令牌值当成"未知选项"
+> **原样打印到了错误输出**，于是令牌落在了会话记录里（该令牌已撤销并轮换，仓库与历史经核查
+> 从未包含它）。结论是：**只要"必须由人手动取令牌"这个需求存在，这类事故就会重演**——
+> 所以这里不是"小心一点"，而是直接禁止那条路径。
+
 ---
 
 ## 10. 关键设计说明
