@@ -44,6 +44,11 @@ _*.log
 # ---------- 日志 ----------
 *.log
 
+# ---------- 本机协作约定（agent 指令文件，只放本地，不进公开仓库）----------
+# DSH 的 agent-instructions 会自动加载这些文件；公开仓库只保留项目信息（README）。
+AGENTS.local.md
+CLAUDE.local.md
+
 # ---------- 发行产物 ----------
 # 二进制产物体积大（v0.6.0 实测 exe / 安装包各约 71 MB），放进 git 会永久留在历史里，
 # 因此统一不入库，改为在 GitHub Releases 中发布（见 README「打包与发布」）。
