@@ -36,6 +36,11 @@ try {
     & (Join-Path $bin "vue-tsc.CMD") --noEmit
     if ($LASTEXITCODE -ne 0) { throw "前端类型检查失败（exit $LASTEXITCODE）" }
 
+    # 静态检查：<n-xxx> 用到了却没 import 的话，组件会被静默丢掉、按钮直接消失，
+    # 而 vue-tsc / vite 都不会报错（v0.7.1 真踩过），所以必须在构建期拦住。
+    & node (Join-Path $root "tools\check_ui_imports.mjs") "src"
+    if ($LASTEXITCODE -ne 0) { throw "UI 组件导入检查失败（exit $LASTEXITCODE）" }
+
     & (Join-Path $bin "vite.CMD") build
     if ($LASTEXITCODE -ne 0) { throw "前端构建失败（exit $LASTEXITCODE）" }
 } finally {

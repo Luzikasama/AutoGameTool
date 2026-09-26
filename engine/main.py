@@ -112,6 +112,7 @@ _WEBUI_TITLE_HINT = "AutoGameTool"
 
 # 上一次广播出去的运行状态（None = 还没广播过），用于去重
 _last_run_state: bool | None = None
+_last_paused: bool | None = None
 
 # 关闭 WebUI 后同步关闭后端的宽限期。
 # 必须留宽限：刷新页面(F5)、前端热更新、短暂网络抖动都会先断开 WebSocket 再立刻重连，
@@ -141,20 +142,28 @@ async def _sync_run_state(force: bool = False) -> bool:
     """把「真实运行状态」统一推给悬浮框与所有页面。
 
     这是启停状态的**唯一事实来源**：任何会改动 executor.running 的路径
-    （/run、/run/stop、全局快捷键、悬浮框按钮、流程自然结束）都收敛到这里。
+    （/run、/run/stop、/run/pause、全局快捷键、悬浮框按钮、流程自然结束）都收敛到这里。
     前端本来就有 /run/state 轮询自愈，悬浮框却没有，于是两边一旦分叉就再也回不来：
     新版给悬浮框同等的自愈能力（配合 _state_watchdog 每秒兜底）。
     """
-    global _last_run_state
+    global _last_run_state, _last_paused
     running = executor.reconcile()
+    paused = bool(executor.paused) if running else False
     try:
         overlay.set_run_state(running)
+        overlay.set_paused(paused)
     except Exception:
         pass
-    if force or running != _last_run_state:
+    if force or running != _last_run_state or paused != _last_paused:
         _last_run_state = running
+        _last_paused = paused
         await manager.broadcast(
-            {"type": "state", "state": "running" if running else "idle", "ts": time.time()}
+            {
+                "type": "state",
+                "state": "running" if running else "idle",
+                "paused": paused,
+                "ts": time.time(),
+            }
         )
     return running
 
@@ -301,6 +310,19 @@ async def _focus_webui() -> None:
 async def _do_overlay_action(name: str) -> None:
     if name == "toggle_run":
         await _toggle_run("悬浮框")
+    elif name == "toggle_pause":
+        # 暂停/继续：与界面上的暂停按钮走同一套引擎侧状态
+        executor.reconcile()
+        if not executor.running:
+            await _sync_run_state()
+            return
+        if executor.paused:
+            executor.resume()
+            await executor.log("info", "悬浮框：继续脚本")
+        else:
+            executor.pause()
+            await executor.log("warn", "悬浮框：暂停脚本（在下一个检查点生效）")
+        await _sync_run_state()
     elif name == "toggle_record":
         _toggle_record()
     elif name in ("repeat_up", "repeat_down"):
@@ -379,7 +401,7 @@ async def lifespan(_: FastAPI):
         recorder.stop_all()
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.7.0", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.7.1", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -447,7 +469,7 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.7.0"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.7.1"}
 
 
 @app.get("/debug/kb")
@@ -613,6 +635,7 @@ async def run(req: RunRequest):
         # 先置 running 再派生任务：/run/state 在任务起跑前就能反映真实状态，
         # 避免前端轮询在「POST 已返回、任务未起跑」的缝隙里读到假 idle 造成按钮闪烁
         executor.running = True
+        executor.paused = False  # 新一轮不带上一轮遗留的暂停状态
         _sync_repeat(req.flow)
         executor.task = _spawn(executor.run(req.flow))
     # 立即把状态推给悬浮框：不等 executor.run() 被调度到，悬浮框按钮马上变「停止」
@@ -629,7 +652,30 @@ async def stop():
     # 保证返回的是真实状态，前端按钮不会卡在「停止」
     executor.reconcile()
     await _sync_run_state()
-    return {"ok": True, "running": executor.running}
+    return {"ok": True, "running": executor.running, "paused": executor.paused}
+
+
+@app.post("/run/pause")
+async def pause():
+    """暂停：流程在下一个检查点停下，/run/resume 后从原地继续（与 /run/stop 不同）。"""
+    executor.reconcile()
+    if not executor.running:
+        # 没在跑就没有可暂停的流程；明确回传真实状态，前端不会点亮「继续」
+        await _sync_run_state()
+        return {"ok": True, "running": False, "paused": False}
+    executor.pause()
+    await _sync_run_state()
+    await executor.log("warn", "已暂停（在下一个检查点生效）")
+    return {"ok": True, "running": executor.running, "paused": executor.paused}
+
+
+@app.post("/run/resume")
+async def resume():
+    executor.resume()
+    await _sync_run_state()
+    if executor.running:
+        await executor.log("info", "已继续")
+    return {"ok": True, "running": executor.running, "paused": executor.paused}
 
 
 @app.get("/run/state")
@@ -641,7 +687,7 @@ async def run_state():
     悬浮框侧由 _sync_run_state 一并纠正（它没有自己的轮询）。
     """
     running = await _sync_run_state()
-    return {"running": running}
+    return {"running": running, "paused": bool(executor.paused) if running else False}
 
 
 @app.get("/config/hotkey")

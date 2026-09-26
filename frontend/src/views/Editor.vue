@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import { VueFlow, type Connection } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import {
@@ -8,6 +7,7 @@ import {
   NInput,
   NInputNumber,
   NModal,
+  NPopconfirm,
   NRadioButton,
   NRadioGroup,
   NSelect,
@@ -18,6 +18,7 @@ import {
 } from 'naive-ui'
 import StepNode from '../components/StepNode.vue'
 import ScreenCapture from '../components/ScreenCapture.vue'
+import SettingsModal from '../components/SettingsModal.vue'
 import { engine, engineWsUrl } from '../api/client'
 import { useProjectStore } from '../stores/project'
 import { STEP_META, type FlowFile, type StepType, type WindowInfo } from '../types'
@@ -37,7 +38,8 @@ import {
 
 const store = useProjectStore()
 const message = useMessage()
-const router = useRouter()
+// 设定面板（目前是自定义背景）
+const settingsVisible = ref(false)
 
 const nodeTypes: any = { step: markRaw(StepNode) }
 const stepTypes = Object.entries(STEP_META) as Array<[StepType, { label: string; icon: string; color: string }]>
@@ -767,8 +769,21 @@ async function stop() {
     const r = await engine.stop()
     // 以引擎返回的真实状态为准：若流程早已结束（假运行），立即解除按钮卡死
     store.running = !!r.running
+    store.paused = !!r.paused
   } catch (e: any) {
     message.error('停止失败：' + e.message)
+  }
+}
+
+// 暂停 / 继续：暂停只是让流程停在下一个检查点，继续后从原地接着跑（不是重新开始）
+async function togglePause() {
+  try {
+    const r = store.paused ? await engine.resume() : await engine.pause()
+    store.running = !!r.running
+    store.paused = !!r.paused
+    if (store.paused) message.info('已暂停（在当前节点结束后生效）')
+  } catch (e: any) {
+    message.error('切换暂停失败：' + e.message)
   }
 }
 
@@ -790,6 +805,25 @@ function toggleScript() {
 function requestRun() {
   if (store.running) return
   run()
+}
+
+// ---------- 新建脚本 ----------
+// 入口在顶栏右上角「保存」左边。刻意**不清空撤销历史**：
+// 万一误点，一次 Ctrl+Z 就能把原来的流程找回来。
+function newFlow() {
+  nodes.value = []
+  edges.value = []
+  selectedId.value = null
+  selIds.value = []
+  fileScreen.value = null
+  fileWindowRect.value = null
+  selectedWinHwnd.value = 0
+  store.boundWindow = null
+  store.flowName = '未命名脚本'
+  store.repeat = 1
+  store.clearLogs()
+  loadFlowToEngine(true)
+  message.success('已新建空白脚本（误操作可按 Ctrl+Z 恢复）')
 }
 
 // ---------- 键鼠录制 ----------
@@ -1046,6 +1080,7 @@ async function syncRunState() {
   try {
     const r = await engine.runState()
     store.running = !!r.running
+    store.paused = !!r.paused
   } catch {
     /* 引擎不可达时下个周期再试 */
   }
@@ -1088,7 +1123,10 @@ function connectWs() {
     try {
       const msg = JSON.parse(ev.data)
       if (msg.type === 'log') store.addLog(msg)
-      else if (msg.type === 'state') store.running = msg.state === 'running'
+      else if (msg.type === 'state') {
+        store.running = msg.state === 'running'
+        if (typeof msg.paused === 'boolean') store.paused = msg.paused
+      }
       else if (msg.type === 'overlay') overlayEnabled.value = !!msg.enabled
       else if (msg.type === 'repeat') store.repeat = Number(msg.value) || 1
       else if (msg.type === 'picked') onPicked(msg.x, msg.y)
@@ -1102,6 +1140,7 @@ function connectWs() {
   }
   ws.onclose = () => {
     store.running = false
+    store.paused = false
     if (destroyed) return
     // 自动重连：断线期间日志/状态会丢，重连后立即同步真实状态
     wsFailCount += 1
@@ -1225,7 +1264,6 @@ onBeforeUnmount(() => {
 <template>
   <div class="editor">
     <header class="topbar">
-      <n-button quaternary @click="router.push('/')">← 返回</n-button>
       <div class="brand">🎮 AutoGameTool</div>
       <n-input v-model:value="store.flowName" class="name-input" placeholder="脚本名称" />
       <n-tooltip trigger="hover">
@@ -1244,11 +1282,33 @@ onBeforeUnmount(() => {
       <span v-if="engineVersion" class="ver-badge" title="引擎版本（界面右上角可确认是否为最新版）">
         v{{ engineVersion }}
       </span>
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <n-button size="small" @click="settingsVisible = true">⚙ 设定</n-button>
+        </template>
+        设定：自定义背景（本地图片、按屏幕比例截取、可调透明度）
+      </n-tooltip>
+      <n-popconfirm @positive-click="newFlow">
+        <template #trigger>
+          <n-button size="small">＋ 新建</n-button>
+        </template>
+        新建会清空当前画布与脚本名（未保存的改动会丢）。误点了可以按 Ctrl+Z 恢复。确定新建？
+      </n-popconfirm>
       <n-button size="small" @click="saveFlow">💾 保存</n-button>
       <n-button size="small" @click="triggerLoad">📂 加载</n-button>
       <input ref="fileInput" type="file" accept=".agflow,application/json" style="display: none" @change="onLoadFile" />
       <n-button v-if="!store.running" type="primary" @click="run">▶ 运行</n-button>
-      <n-button v-else type="error" @click="stop">■ 停止</n-button>
+      <template v-else>
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button :type="store.paused ? 'warning' : 'default'" @click="togglePause">
+              {{ store.paused ? '▶ 继续' : '⏸ 暂停' }}
+            </n-button>
+          </template>
+          {{ store.paused ? '从暂停处继续执行' : '在当前节点结束后暂停，继续时从原地接着跑' }}
+        </n-tooltip>
+        <n-button type="error" @click="stop">■ 停止</n-button>
+      </template>
     </header>
 
     <div class="settings-bar">
@@ -1625,6 +1685,9 @@ onBeforeUnmount(() => {
     <n-modal v-model:show="matchVisible" preset="card" title="识别结果" style="width: min(760px, 92vw)">
       <img :src="matchImage" alt="match result" style="max-width: 100%; border-radius: 8px" />
     </n-modal>
+
+    <!-- 设定：自定义背景（选图 → 按屏幕比例截取 → 调透明度） -->
+    <SettingsModal v-model:show="settingsVisible" />
 
     <n-modal v-model:show="hotkeyVisible" preset="card" title="全局快捷键设置" style="width: 420px">
       <div class="hotkey-body">

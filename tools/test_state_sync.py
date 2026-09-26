@@ -189,8 +189,53 @@ def main() -> int:
 
         print("== 悬浮框状态接口字段完整性 ==")
         st = api("/overlay/state")
-        for k in ("enabled", "available", "visible", "running", "recording", "repeat", "step"):
+        for k in ("enabled", "available", "visible", "running", "paused", "recording", "repeat", "step"):
             check(f"/overlay/state 含 {k}", k in st, list(st))
+
+        print("== 暂停 / 继续：必须真的冻住流程，且从原地continue ==")
+        # 用一个总时长 5 秒的延时：若暂停无效，它会在 5 秒左右结束
+        short = dict(FLOW)
+        short["nodes"] = [{"id": "n1", "type": "delay", "params": {"ms": 5000}, "once": False}]
+        api("/flow/load", "POST", {"flow": short})
+        api("/run", "POST", {"flow": short})
+
+        r = api("/run/pause", "POST")
+        check("pause 返回 running=true", r.get("running") is True, r)
+        check("pause 返回 paused=true", r.get("paused") is True, r)
+        web, ov = states()
+        check("暂停时 /run/state 与悬浮框都标记 paused",
+              api("/run/state").get("paused") is True and api("/overlay/state").get("paused") is True,
+              f"web={web} overlay={ov}")
+        check("暂停时仍算「运行中」（不能退化成空闲）", web is True and ov is True, f"web={web} overlay={ov}")
+
+        # 等超过原延时总长：暂停有效的话流程必须还在
+        time.sleep(6.5)
+        web, ov = states()
+        check("暂停 6.5 秒后流程仍未结束（延时被冻住）", web is True and ov is True, f"web={web} overlay={ov}")
+
+        r = api("/run/resume", "POST")
+        check("resume 返回 paused=false", r.get("paused") is False, r)
+        # 恢复后应当把剩余时间睡完并正常结束
+        pair, took = wait_both_idle(12.0)
+        check("继续后流程正常跑完", pair is not None, pair)
+        if pair is not None:
+            check("继续后两边状态一致", pair[0] == pair[1], pair)
+
+        print("== 暂停中停止：必须能挣脱暂停 ==")
+        api("/flow/load", "POST", {"flow": short})
+        api("/run", "POST", {"flow": short})
+        api("/run/pause", "POST")
+        time.sleep(0.4)
+        api("/run/stop", "POST")
+        pair, took = wait_both_idle(8.0)
+        check("暂停中也能停止", pair is not None, pair)
+        check("停止后 paused 也复位",
+              api("/run/state").get("paused") is False and api("/overlay/state").get("paused") is False)
+
+        print("== 空闲时暂停：不应产生「已暂停」的假状态 ==")
+        r = api("/run/pause", "POST")
+        check("空闲 pause 返回 paused=false", r.get("paused") is False, r)
+        check("空闲 pause 不影响 running", r.get("running") is False, r)
     finally:
         stop_engine(proc)
         log.close()

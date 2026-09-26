@@ -44,6 +44,7 @@ _BTN_DISABLED = "#475569"
 _RUN_BG = "#7f1d1d"      # 运行中：停止按钮
 _IDLE_BG = "#14532d"     # 空闲：启动按钮
 _REC_BG = "#7c2d12"      # 录制中
+_PAUSE_BG = "#78350f"    # 已暂停：继续按钮
 
 # --- Win32 常量 ---
 _GWL_EXSTYLE = -20
@@ -78,6 +79,7 @@ class Overlay:
         self._total = 0
         self._repeat = 1
         self._running = False
+        self._paused = False
         self._recording = False
         self._step = "等待运行"
 
@@ -86,6 +88,7 @@ class Overlay:
         self._hwnd = 0
         self._geom = ""
         self._btn_run = None
+        self._btn_pause = None
         self._btn_rec = None
         self._btn_minus = None
         self._btn_plus = None
@@ -134,6 +137,13 @@ class Overlay:
         self._recording = recording
         self._push(("state", None))
 
+    def set_paused(self, paused: bool) -> None:
+        paused = bool(paused)
+        if paused == self._paused:
+            return
+        self._paused = paused
+        self._push(("state", None))
+
     def set_repeat(self, repeat: int) -> None:
         repeat = int(repeat)
         if repeat == self._repeat:
@@ -150,6 +160,7 @@ class Overlay:
             "total": self._total,
             "repeat": self._repeat or self._total,
             "running": self._running,
+            "paused": self._paused,
             "recording": self._recording,
             "step": self._step,
             "error": self._error,
@@ -254,6 +265,8 @@ class Overlay:
 
         self._btn_run = self._mkbtn(tk, tools, "▶ 启动", lambda: self._act("toggle_run"), _IDLE_BG)
         self._btn_run.pack(side="left")
+        self._btn_pause = self._mkbtn(tk, tools, "⏸ 暂停", lambda: self._act("toggle_pause"))
+        self._btn_pause.pack(side="left", padx=(4, 0))
         self._btn_rec = self._mkbtn(tk, tools, "● 录制", lambda: self._act("toggle_record"))
         self._btn_rec.pack(side="left", padx=(4, 0))
 
@@ -468,7 +481,10 @@ class Overlay:
         if self._progress is None:
             return
         total = self._total or self._repeat
-        if self._running and total:
+        if self._paused:
+            # 暂停要一眼可见：否则用户看到"第 2/3 轮"不动，会以为程序卡死了
+            text = f"⏸ 已暂停 · 第 {self._loop}/{total} 轮" if total else "⏸ 已暂停"
+        elif self._running and total:
             text = f"第 {self._loop}/{total} 轮"
         elif total:
             text = f"共 {total} 轮 · 待运行"
@@ -483,6 +499,11 @@ class Overlay:
             self._btn_run.config(
                 text="■ 停止" if self._running else "▶ 启动",
                 bg=_RUN_BG if self._running else _IDLE_BG,
+            )
+            self._btn_pause.config(
+                text="▶ 继续" if self._paused else "⏸ 暂停",
+                bg=_PAUSE_BG if self._paused else _BTN_BG,
+                state="normal" if self._running else "disabled",
             )
             self._btn_rec.config(
                 text="■ 停录" if self._recording else "● 录制",
@@ -560,6 +581,10 @@ def set_run_state(running: bool) -> None:
 
 def set_recording(recording: bool) -> None:
     instance().set_recording(recording)
+
+
+def set_paused(paused: bool) -> None:
+    instance().set_paused(paused)
 
 
 def set_repeat(repeat: int) -> None:

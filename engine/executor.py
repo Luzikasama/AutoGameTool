@@ -58,16 +58,39 @@ class Executor:
         self.broadcast = broadcast
         self.stopped = False
         self.running = False
+        # 暂停：与停止不同，暂停只是让流程停在检查点上，resume() 后从原地继续
+        self.paused = False
         self.current_flow: dict | None = None
         # 当前执行任务的强引用，供 stop()/reconcile() 判断「是否真有流程在跑」
         self.task: "asyncio.Task | None" = None
 
     def stop(self) -> None:
         self.stopped = True
+        # 停止时一并清掉暂停：否则「暂停中停止」会让暂停等待循环一直挂着
+        self.paused = False
         # 没有真正在跑的任务（例如任务已异常退出但状态残留）时直接复位，
         # 否则前端的「停止」按钮会一直卡住，点也点不回来
         if self.task is None or self.task.done():
             self.running = False
+
+    def pause(self) -> None:
+        """暂停：流程会在下一个检查点停下（节点边界 / 延时片段内）。"""
+        if self.running:
+            self.paused = True
+
+    def resume(self) -> None:
+        self.paused = False
+
+    async def _wait_if_paused(self) -> None:
+        """暂停等待点。
+
+        只放在「节点边界」与「延时的小睡之间」两处：
+        - 这两处都不是"做到一半"的状态，恢复后从原地继续即可，不会重复已完成的动作
+        - 刻意不放进找图/判断的轮询里：那里的超时是按 time.time() 算的，
+          在里面停住会把暂停时长也算进超时，恢复后立刻误判超时
+        """
+        while self.paused and not self.stopped:
+            await asyncio.sleep(0.1)
 
     def reconcile(self) -> bool:
         """把 running 与实际任务状态对齐，返回修正后的 running。
@@ -77,6 +100,8 @@ class Executor:
         """
         if self.running and (self.task is None or self.task.done()):
             self.running = False
+        if not self.running:
+            self.paused = False  # 没在跑就谈不上暂停，避免展示出"已暂停但空闲"的矛盾状态
         return self.running
 
     async def log(self, level: str, msg: str, step: str | None = None) -> None:
@@ -90,7 +115,9 @@ class Executor:
             overlay.set_run_state(state == "running")
         except Exception:
             pass
-        await self.broadcast({"type": "state", "state": state, "ts": time.time()})
+        await self.broadcast(
+            {"type": "state", "state": state, "paused": bool(self.paused), "ts": time.time()}
+        )
 
     @staticmethod
     def _ov(loop: int, total: int, step: str) -> None:
@@ -182,6 +209,7 @@ class Executor:
         # finally 不会执行，running 会永久卡在 True——前端右上角一直显示「停止」
         # 且点击无效（因为 /run/stop 原样回传 running）。
         self.stopped = False
+        self.paused = False  # 新一轮开跑必须是"非暂停"，否则会卡在上一轮遗留的暂停里
         self.running = True
         try:
             await self._state("running")
@@ -241,6 +269,11 @@ class Executor:
                 visited = 0
                 max_steps = max(1000, len(node_map) * 100)  # 单轮步数上限，防无终止环空转
                 while current and not self.stopped:
+                    # 暂停检查点：在节点边界等待。放在这里（而不是从节点内部硬中断）
+                    # 是因为它天然不会重复执行已完成的动作，恢复后正好从当前节点继续。
+                    await self._wait_if_paused()
+                    if self.stopped:
+                        break
                     visited += 1
                     if visited > max_steps:
                         await self.log("error", f"单轮执行超过 {max_steps} 步（疑似无终止条件的环），已停止")
@@ -358,6 +391,11 @@ class Executor:
                 # 表现得就像「点了停止没反应」（悬浮框与 WebUI 的停止按钮都会被拖住）。
                 left = chunk
                 while left > 0:
+                    if self.stopped:
+                        await self.log("warn", f"延时被中断（剩余 {remaining - (chunk - left)}ms）")
+                        return
+                    # 暂停检查点：暂停时余下的延时不再流逝，恢复后继续把剩余时间睡完
+                    await self._wait_if_paused()
                     if self.stopped:
                         await self.log("warn", f"延时被中断（剩余 {remaining - (chunk - left)}ms）")
                         return

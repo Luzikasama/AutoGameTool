@@ -87,8 +87,10 @@ export const engine = {
     apiPost('/input/text', { text, mode, window: win }),
   run: (flow: unknown) => apiPost('/run', { flow }),
   loadFlow: (flow: unknown) => apiPost('/flow/load', { flow }),
-  stop: () => apiPost<{ ok: boolean; running: boolean }>('/run/stop'),
-  runState: () => apiGet<{ running: boolean }>('/run/state'),
+  stop: () => apiPost<{ ok: boolean; running: boolean; paused: boolean }>('/run/stop'),
+  pause: () => apiPost<{ ok: boolean; running: boolean; paused: boolean }>('/run/pause'),
+  resume: () => apiPost<{ ok: boolean; running: boolean; paused: boolean }>('/run/resume'),
+  runState: () => apiGet<{ running: boolean; paused: boolean }>('/run/state'),
   overlayState: () =>
     apiGet<{
       enabled: boolean
@@ -96,6 +98,10 @@ export const engine = {
       visible: boolean
       loop: number
       total: number
+      running: boolean
+      paused: boolean
+      recording: boolean
+      repeat: number
       step: string
       error: string
     }>('/overlay/state'),

@@ -28,6 +28,35 @@ body,
   height: 100vh;
   width: 100%;
   overflow: hidden;
+  position: relative;
+}
+
+/* ---------- 自定义背景（设定里可选本地图片） ----------
+   图片铺在最底层；面板/画布各自再压一层半透明暗色，保证文字与连线始终可读。
+   没有背景时这些规则都不生效，外观与之前完全一致。 */
+.app-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+.app-shell > :not(.app-bg) {
+  position: relative;
+  z-index: 1;
+}
+/* 画布：背景透出来会被节点连线干扰，压得比其他区域更暗一些 */
+.app-shell.has-bg .canvas {
+  background: rgba(14, 17, 22, 0.66);
+}
+.app-shell.has-bg .topbar,
+.app-shell.has-bg .settings-bar,
+.app-shell.has-bg .palette,
+.app-shell.has-bg .inspector,
+.app-shell.has-bg .log-wrap {
+  background: rgba(22, 26, 34, 0.82);
 }
 
 body {

@@ -9,6 +9,8 @@ export const useProjectStore = defineStore('project', () => {
   const boundWindow = ref<{ hwnd: number; title: string } | null>(null)
   const logs = ref<LogEntry[]>([])
   const running = ref(false)
+  // 暂停：与停止不同，暂停保留执行位置，继续后从原地接着跑
+  const paused = ref(false)
 
   function addLog(e: LogEntry) {
     logs.value.push(e)
@@ -19,5 +21,5 @@ export const useProjectStore = defineStore('project', () => {
     logs.value = []
   }
 
-  return { flowName, repeat, inputMode, boundWindow, logs, running, addLog, clearLogs }
+  return { flowName, repeat, inputMode, boundWindow, logs, running, paused, addLog, clearLogs }
 })

@@ -128,9 +128,60 @@ print("== 模块级 API 完整性 ==")
 # 历史教训：overlay 模块缺过 update()，导致每次流程都在起跑处异常退出
 for fn in (
     "instance", "configure", "start", "stop", "set_enabled", "update",
-    "set_run_state", "set_recording", "set_repeat", "hit_test", "state",
+    "set_run_state", "set_paused", "set_recording", "set_repeat", "hit_test", "state",
 ):
     check(f"overlay.{fn} 可调用", callable(getattr(overlay_mod, fn, None)))
+
+print("== Executor 的暂停状态机（纯逻辑）==")
+from executor import Executor  # noqa: E402
+
+
+class _FakeTask:
+    def __init__(self, done=False):
+        self._done = done
+
+    def done(self):
+        return self._done
+
+
+async def _noop_broadcast(_msg):
+    return None
+
+
+ex = Executor(lambda m: None)
+
+# 空闲时暂停：应该无效（没有流程可暂停，不能显示成"已暂停"）
+ex.pause()
+check("空闲时 pause() 不生效", ex.paused is False, ex.paused)
+
+# 运行中暂停：生效
+ex.running = True
+ex.task = _FakeTask(done=False)
+ex.pause()
+check("运行中 pause() 生效", ex.paused is True, ex.paused)
+ex.resume()
+check("resume() 清除暂停", ex.paused is False)
+
+# 暂停中停止：停止必须能挣脱暂停，否则会一直挂在暂停等待循环里
+ex.pause()
+ex.stop()
+check("stop() 会清掉暂停", ex.paused is False and ex.stopped is True)
+
+# 任务已结束时 reconcile：running 复位，暂停也一并清掉（避免"空闲但显示已暂停"）
+ex.running = True
+ex.paused = True
+ex.stopped = False
+ex.task = _FakeTask(done=True)
+ex.reconcile()
+check("任务结束后 reconcile 复位 running", ex.running is False, ex.running)
+check("任务结束后 reconcile 清掉暂停", ex.paused is False, ex.paused)
+
+# 在跑的流程 reconcile 不能打扰它
+ex.running = True
+ex.paused = True
+ex.task = _FakeTask(done=False)
+ex.reconcile()
+check("运行中 reconcile 保留 running/paused", ex.running is True and ex.paused is True)
 
 print("")
 print("结果: PASS=" + str(_pass) + "  FAIL=" + str(_fail))
