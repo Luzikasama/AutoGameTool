@@ -1,13 +1,14 @@
 <script setup lang="ts">
 /**
- * 设定面板：目前是「自定义背景」。
+ * 设定面板：外观（浅色 / 深色 / 跟随系统）+ 自定义背景。
  *
  * 选图 → 截取（按当前窗口比例）→ 透明度，三步都在这里完成。
- * 图片只存本机浏览器（localStorage），不上传引擎、不写进 .agflow。
+ * 图片与外观偏好只存本机浏览器（localStorage），不上传引擎、不写进 .agflow。
  */
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { NButton, NModal, NSlider, useMessage } from 'naive-ui'
+import { NButton, NModal, NRadioButton, NRadioGroup, NSlider, useMessage } from 'naive-ui'
 import { useUiStore } from '../stores/ui'
+import { APPEARANCE_OPTIONS, appearanceLabel } from '../lib/appearance'
 import { clampPan, drawRect, outputSize } from '../lib/bgCrop'
 
 const show = defineModel<boolean>('show', { default: false })
@@ -285,6 +286,24 @@ onBeforeUnmount(() => {
     <!-- ============ 设置视图 ============ -->
     <template v-else>
       <div class="sect">
+        <div class="sect-title">🎨 外观</div>
+        <p class="hint">
+          深色是原来的外观；「跟随系统」会跟着 Windows 的浅色/深色设置走（默认）。
+          这个偏好只保存在本机浏览器里，不影响脚本文件。
+        </p>
+        <div class="row">
+          <n-radio-group :value="ui.appearance" size="small" @update:value="ui.setAppearance">
+            <n-radio-button v-for="o in APPEARANCE_OPTIONS" :key="o.value" :value="o.value">
+              {{ o.label }}
+            </n-radio-button>
+          </n-radio-group>
+          <span v-if="ui.appearance === 'system'" class="lbl">
+            当前：{{ appearanceLabel(ui.appearance, ui.systemDark) }}
+          </span>
+        </div>
+      </div>
+
+      <div class="sect">
         <div class="sect-title">🖼 自定义背景</div>
         <p class="hint">
           选一张本地图片，截取成屏幕比例后作为整个界面的背景。图片只保存在<b>本机浏览器</b>里，
@@ -390,6 +409,13 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 16px;
+}
+
+/* 设置视图里各分节之间留出分隔（外观 / 背景 / …） */
+.sect + .sect {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
 }
 
 /* ---- 取景框 ---- */

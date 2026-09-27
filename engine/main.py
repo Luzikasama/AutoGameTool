@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import appconfig
+import hotkey
 import overlay
 import vision
 from executor import Executor, validate_flow
@@ -109,6 +110,10 @@ class HotkeyRequest(BaseModel):
     hotkey: list[str]
 
 
+class HotkeysRequest(BaseModel):
+    bindings: list[dict]
+
+
 class OverlayRequest(BaseModel):
     enabled: bool
 
@@ -120,7 +125,7 @@ recorder: Recorder | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 
 
-_REPEAT_MIN, _REPEAT_MAX = 1, 9999
+_REPEAT_MIN, _REPEAT_MAX = 1, 99999
 _repeat_value = 1
 # 页面标题（frontend/index.html 的 <title>），用于定位 WebUI 所在窗口
 _WEBUI_TITLE_HINT = "AutoGameTool"
@@ -384,13 +389,29 @@ def _setup_hotkey() -> None:
     _loop = asyncio.get_running_loop()
     enginelog.install_loop_handler(_loop)
 
-    def _cb() -> None:
+    def _cb_toggle_run() -> None:
         if _loop:
             _loop.call_soon_threadsafe(lambda: _spawn(_toggle_run("全局快捷键")))
 
-    hotkey_manager = HotkeyManager(_cb)
+    def _cb_record() -> None:
+        # 与悬浮框/界面上的录制按钮走同一条路：切状态 + 广播
+        if recorder:
+            recorder.toggle()
+
+    def _cb_pick() -> None:
+        # 只是「进入等待左键单击」；拾取本身仍靠真实鼠标事件（见 picker.py）
+        if picker:
+            picker.arm()
+
+    hotkey_manager = HotkeyManager(
+        {"toggle_run": _cb_toggle_run, "record": _cb_record, "pick": _cb_pick}
+    )
     print(
-        f"[AutoGameTool] 全局快捷键已注册: 启停={'+'.join(hotkey_manager.get())} 录制=alt+9",
+        "[AutoGameTool] 全局快捷键: "
+        + "；".join(
+            f"{b['label']}={'+'.join(b['keys']) if b['enabled'] else '未启用'}"
+            for b in hotkey_manager.get_bindings()
+        ),
         flush=True,
     )
 
@@ -416,7 +437,7 @@ def _setup_hotkey() -> None:
                 lambda: _spawn(manager.broadcast({"type": "recorded", "events": events, "ts": time.time()}))
             )
 
-    recorder = Recorder(_record_state, _on_recorded)
+    recorder = Recorder(_record_state, _on_recorded, hotkey=hotkey_manager.keys_of("record"))
 
 
 @asynccontextmanager
@@ -448,7 +469,7 @@ async def lifespan(_: FastAPI):
     enginelog.info("清理完成，引擎退出")
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.7.3", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.8.0", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -519,7 +540,7 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.7.3"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.8.0"}
 
 
 @app.get("/debug/kb")
@@ -752,8 +773,41 @@ async def set_hotkey(req: HotkeyRequest):
             hotkey_manager.set(req.hotkey)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if recorder:
+            recorder.set_hotkey(hotkey_manager.keys_of("record"))
         return {"hotkey": hotkey_manager.get()}
     return {"hotkey": req.hotkey}
+
+
+@app.get("/config/hotkeys")
+async def get_hotkeys():
+    """全部全局快捷键（含标签、当前键、是否启用），界面据此渲染设置列表。
+
+    同时返回默认值：界面上的「恢复默认」直接用引擎这一份，避免前端再抄一遍默认表
+    （抄一份就迟早会和引擎不一致）。
+    """
+    return {
+        "bindings": hotkey_manager.get_bindings() if hotkey_manager else hotkey.DEFAULT_BINDINGS,
+        "defaults": [{**b, "keys": list(b["keys"])} for b in hotkey.DEFAULT_BINDINGS],
+    }
+
+
+@app.post("/config/hotkeys")
+async def set_hotkeys(req: HotkeysRequest):
+    if not hotkey_manager:
+        raise HTTPException(503, "引擎尚未就绪，请稍后重试")
+    try:
+        bindings = hotkey_manager.set_bindings(req.bindings)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if recorder:
+        # 录制结果收尾时要把「按录制快捷键本身产生的按键」剔掉，改键后同步过去
+        recorder.set_hotkey(hotkey_manager.keys_of("record"))
+    enginelog.info(
+        "全局快捷键已更新：%s",
+        "；".join(f"{b['label']}={'+'.join(b['keys']) if b['enabled'] else '（未启用）'}" for b in bindings),
+    )
+    return {"bindings": bindings}
 
 
 @app.get("/overlay/state")
@@ -868,6 +922,19 @@ async def ws_endpoint(ws: WebSocket):
     if not _DEV_MODE and ws.query_params.get("token", "") != _ENGINE_TOKEN:
         enginelog.warn("WebSocket 令牌校验失败，已拒绝连接")
         await ws.close(code=4401)
+        return
+    # 只允许一个 WebUI：多开页面会让「谁在控制流程」变得含糊（两边都显示运行状态、
+    # 各自同步流程到引擎，互相覆盖），何况后端本来就只有一份。
+    # 4409 = 已有页面占用；前端收到它会显示提示并自动重试，所以刷新页面(F5)依然能用
+    # （刷新时旧连接会先断开，重试通常第一次就成功）。
+    if manager.connections:
+        enginelog.warn("已有编辑器窗口在运行（只允许一个 WebUI），已拒绝新的连接")
+        await ws.accept()
+        try:
+            await ws.send_json({"type": "busy", "ts": time.time()})
+        except Exception:
+            pass
+        await ws.close(code=4409)
         return
     await manager.connect(ws)
     _ever_connected = True

@@ -1,3 +1,7 @@
+/* ---------- 外观 token ----------
+   深色是默认外观；浅色只覆盖这里的变量（外加 Naive 的浅色主题），
+   组件样式一律只用这些变量，避免再出现「浅色下某块还是黑的」这种半吊子主题。
+   还有几个语义色（连线、悬停、玻璃层、徽标）也一并 token 化。 */
 :root {
   --bg: #0e1116;
   --bg-soft: #161a22;
@@ -10,6 +14,47 @@
   --danger: #ef4444;
   --ok: #22c55e;
   --warn: #f59e0b;
+  /* 画布连线 / 控件悬停 */
+  --edge: #3a4252;
+  --hover: #232936;
+  --ctl-hover: #2a3140;
+  /* 自定义背景图之上的玻璃层 */
+  --glass-canvas: rgba(14, 17, 22, 0.66);
+  --glass-panel: rgba(22, 26, 34, 0.82);
+  /* 顶栏「关于」徽标 */
+  --badge-text: #94a3b8;
+  --badge-border: #334155;
+  /* 滚动条 */
+  --scroll-thumb: #2a303c;
+  --scroll-thumb-hover: #3a4252;
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  /* 深色下用黑底垫模板预览图，浅色下黑底太扎眼 */
+  --preview-bg: #000;
+}
+
+:root[data-theme='light'] {
+  --bg: #f4f5f8;
+  --bg-soft: #ffffff;
+  --bg-panel: #f7f8fc;
+  --border: #d9dce5;
+  --text: #1f2430;
+  --text-dim: #5f6779;
+  --accent: #6b5ae0;
+  --accent-soft: rgba(107, 90, 224, 0.12);
+  --danger: #d93b3b;
+  --ok: #17a34a;
+  --warn: #b45309;
+  --edge: #b7bdcd;
+  --hover: #eceef5;
+  --ctl-hover: #e7e9f2;
+  --glass-canvas: rgba(255, 255, 255, 0.6);
+  --glass-panel: rgba(255, 255, 255, 0.78);
+  --badge-text: #5f6779;
+  --badge-border: #c8cdda;
+  --scroll-thumb: #c8cdda;
+  --scroll-thumb-hover: #aeb5c6;
+  --shadow: 0 4px 16px rgba(24, 28, 40, 0.16);
+  --preview-bg: #eceef4;
 }
 
 * {
@@ -47,16 +92,16 @@ body,
   position: relative;
   z-index: 1;
 }
-/* 有背景时：面板压一层半透明暗色（保证文字可读），画布压得更暗一些 */
+/* 有背景时：面板压一层半透明底色（保证文字可读），画布压得更透一些 */
 .app-shell.has-bg .canvas {
-  background: rgba(14, 17, 22, 0.66);
+  background: var(--glass-canvas);
 }
 .app-shell.has-bg .topbar,
 .app-shell.has-bg .settings-bar,
 .app-shell.has-bg .palette,
 .app-shell.has-bg .inspector,
 .app-shell.has-bg .logpanel {
-  background: rgba(22, 26, 34, 0.82);
+  background: var(--glass-panel);
 }
 
 body {
@@ -72,11 +117,11 @@ body {
   height: 9px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a303c;
+  background: var(--scroll-thumb);
   border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a4252;
+  background: var(--scroll-thumb-hover);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
@@ -88,7 +133,7 @@ body {
   font-size: 13px;
 }
 .vue-flow__edge-path {
-  stroke: #3a4252;
+  stroke: var(--edge);
   stroke-width: 4;
 }
 .vue-flow__edge.selected .vue-flow__edge-path,
@@ -111,7 +156,7 @@ body {
   color: var(--text);
 }
 .vue-flow__controls button:hover {
-  background: #232936;
+  background: var(--hover);
 }
 .vue-flow__minimap {
   border-radius: 8px;

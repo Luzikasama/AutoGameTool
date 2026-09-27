@@ -1,7 +1,11 @@
-"""键鼠录制：alt+9 开始/停止，录制事件打包为一个宏步骤。
+"""键鼠录制：录制事件打包为一个宏步骤。
 
 基于常驻键盘/鼠标事件总线：录制时只切换标志并注册/注销回调，
 绝不创建或销毁监听器（反复创建/销毁 Windows 钩子会导致键盘全局失灵）。
+
+触发键（默认 alt+F2，可在界面里改）由 `hotkey.HotkeyManager` 统一匹配；
+本模块只用 `hotkey` 记住**当前录制快捷键是哪几个键**，好在停止时把「按快捷键
+本身产生的那几下按键」从录制结果里剔掉（否则每段录制都会自带 alt+f2）。
 """
 import time
 
@@ -10,42 +14,34 @@ from pynput import mouse
 import keybus
 import mousebus
 import overlay
-from hotkey import _norm
+from hotkey import _norm, normalize_key
 
 
 class Recorder:
-    def __init__(self, on_state, on_stop, hotkey=("alt", "9")) -> None:
+    def __init__(self, on_state, on_stop, hotkey=("alt", "f2")) -> None:
         self.on_state = on_state  # (recording: bool) -> None
         self.on_stop = on_stop  # (events: list) -> None
-        self.hotkey = set(hotkey)
+        self.hotkey = set(normalize_key(k) for k in hotkey)
         self.recording = False
         self.events: list[dict] = []
         self._start_time = 0.0
-        self._pressed: set[str] = set()
-        self._fired = False
         # 已被过滤的按下键（用于把配对的抬起也一起丢掉，避免留下孤立 mouseup）
         self._suppressed: set[str] = set()
-        # 键盘回调常驻（用于 alt+9 热键）
+        # 键盘回调常驻（录制按键；快捷键匹配不在这里）
         keybus.register(on_press=self._on_press, on_release=self._on_release)
 
-    # ---- 键盘：热键检测 + 录制 ----
+    def set_hotkey(self, keys) -> None:
+        """快捷键改键后同步过来（只影响录制结果的收尾清理）。"""
+        self.hotkey = set(normalize_key(k) for k in (keys or []))
+
+    # ---- 键盘：录制 ----
     def _on_press(self, key):
-        k = _norm(key)
-        self._pressed.add(k)
-        if self.hotkey.issubset(self._pressed) and not self._fired:
-            self._fired = True
-            self.toggle()
-            return
         if self.recording:
-            self.events.append({"t": self._ts(), "type": "keydown", "key": k})
+            self.events.append({"t": self._ts(), "type": "keydown", "key": _norm(key)})
 
     def _on_release(self, key):
-        k = _norm(key)
-        self._pressed.discard(k)
-        if not self._pressed:
-            self._fired = False
         if self.recording:
-            self.events.append({"t": self._ts(), "type": "keyup", "key": k})
+            self.events.append({"t": self._ts(), "type": "keyup", "key": _norm(key)})
 
     # ---- 鼠标 ----
     # 刻意不录制鼠标轨迹（mousemove）：回放时 mouse_down 本身就会把光标移到点击坐标，
@@ -103,13 +99,36 @@ class Recorder:
         mousebus.unregister(on_click=self._on_click, on_scroll=self._on_scroll)
         events = list(self.events)
         self.events = []
-        # 去掉因按开始/停止快捷键产生的残留事件
-        while events and events[0].get("type") == "keyup" and events[0].get("key") in self.hotkey:
-            events.pop(0)
-        while events and events[-1].get("type") == "keydown" and events[-1].get("key") in self.hotkey:
-            events.pop()
+        events = self._strip_hotkey_events(events)
         self.on_state(False)
         self.on_stop(events)
+
+    def _strip_hotkey_events(self, events: list) -> list:
+        """剔掉因按「录制快捷键本身」而产生的按键事件。
+
+        开始那一下落在开头（快捷键匹配先触发录制，紧接着同一次按键才被录进来），
+        停止那一下的 keydown 落在结尾（keyup 在录制结束之后，不会被录到）。
+        必须「凑齐整组快捷键」才剔：否则用户录制时开头就按住 alt（比如 alt+点击）
+        的那一下会被误删——它与快捷键共用 alt 这个键名。
+        """
+        starts = 0
+        for ev in events:
+            if ev.get("type") in ("keydown", "keyup") and ev.get("key") in self.hotkey:
+                starts += 1
+            else:
+                break
+        if self.hotkey and self.hotkey.issubset({e.get("key") for e in events[:starts]}):
+            events = events[starts:]
+
+        ends = 0
+        for ev in reversed(events):
+            if ev.get("type") == "keydown" and ev.get("key") in self.hotkey:
+                ends += 1
+            else:
+                break
+        if self.hotkey and self.hotkey.issubset({e.get("key") for e in events[len(events) - ends:]}):
+            events = events[: len(events) - ends]
+        return events
 
     def _ts(self) -> int:
         return int((time.time() - self._start_time) * 1000)

@@ -1,17 +1,21 @@
 """引擎状态逻辑回归测试（无需 GUI、无需起服务、不装键盘钩子）
 
-覆盖两处「出过问题、又很容易再写错」的状态逻辑：
+覆盖几处「出过问题、又很容易再写错」的状态逻辑：
 
-1. HotkeyManager 的「已触发」锁
+1. HotkeyManager 的「已触发」锁（每条绑定各有一把锁）
    - 按住 alt 连按两次 f1 → 必须触发两次（旧实现只触发第一次，手感就是"快捷键时灵时不灵"）
    - 长按 f1（系统重复 keydown、没有 keyup）→ 必须只触发一次
-2. Overlay 状态去重
+   - 两条绑定互不干扰、停用的绑定不触发
+2. 快捷键绑定表：默认值、旧配置迁移、改键/启停的校验（重复组合、启用却没键）
+3. Overlay 状态去重
    - 状态看门狗每秒调用一次 set_run_state，值没变时不能产生多余推送，
      否则悬浮框每秒重绘一次
 
 用法：
     engine\\.venv\\Scripts\\python.exe tools\\test_engine_state.py
 """
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,11 +26,20 @@ try:
 except Exception:
     pass
 
-_ENGINE = Path(__file__).resolve().parent.parent / "engine"
+_ROOT = Path(__file__).resolve().parent.parent
+_ENGINE = _ROOT / "engine"
 sys.path.insert(0, str(_ENGINE))
+
+# 配置读写要隔离：绑定表测试会写 config.json，绝不能碰用户真实的
+# %APPDATA%\AutoGameTool（跟其它端到端脚本一个规矩）
+_APPDATA = _ROOT / ".tmp" / "state-appdata"
+_APPDATA.mkdir(parents=True, exist_ok=True)
+os.environ["APPDATA"] = str(_APPDATA)
 
 from pynput import keyboard  # noqa: E402
 
+import appconfig  # noqa: E402
+import hotkey as hotkey_mod  # noqa: E402
 import overlay as overlay_mod  # noqa: E402
 from hotkey import HotkeyManager  # noqa: E402
 from overlay import Overlay  # noqa: E402
@@ -45,15 +58,15 @@ def check(name: str, cond: bool, extra: object = "") -> None:
         print("  FAIL  " + name + (("  -> " + str(extra)) if extra != "" else ""))
 
 
-def make_hotkey(keys=("alt", "f1")) -> HotkeyManager:
+def make_hotkey(keys=("alt", "f1"), binding_id="toggle_run", enabled=True) -> HotkeyManager:
     """绕过 __init__ 构造实例：__init__ 会 register() 真的去装 Windows 键盘钩子，
     测试里不需要（也绝不该）碰系统钩子。"""
     h = object.__new__(HotkeyManager)
-    h.keys = list(keys)
+    h.bindings = [{"id": binding_id, "label": "测试绑定", "keys": list(keys), "enabled": enabled}]
     h.pressed = set()
-    h._fired = False
+    h._fired = set()
     h.calls = 0
-    h.callback = lambda: setattr(h, "calls", h.calls + 1)
+    h.handlers = {binding_id: lambda: setattr(h, "calls", h.calls + 1)}
     return h
 
 
@@ -69,7 +82,7 @@ h._on_press(F1)            # 第二次按 f1
 check("触发两次", h.calls == 2, h.calls)
 h._on_release(F1)
 h._on_release(ALT)
-check("全部松开后锁复位", h._fired is False)
+check("全部松开后锁复位", h._fired == set())
 
 print("== 快捷键 2：长按 f1（系统重复 keydown）只触发一次 ==")
 h = make_hotkey()
@@ -102,10 +115,176 @@ h._on_press(ALT)
 h._on_press(F1)
 h._on_release(ALT)
 h._on_release(F1)
-check("锁已复位", h._fired is False)
+check("锁已复位", h._fired == set())
 h._on_press(ALT)
 h._on_press(F1)
 check("可再次触发", h.calls == 2, h.calls)
+
+print("== 快捷键 6：停用的绑定不触发、也不占锁 ==")
+h = make_hotkey(enabled=False)
+h._on_press(ALT)
+h._on_press(F1)
+check("停用的绑定按了也不触发", h.calls == 0, h.calls)
+check("停用时锁不被占用", h._fired == set(), h._fired)
+
+print("== 快捷键 7：两条绑定各按各的锁 ==")
+h = object.__new__(HotkeyManager)
+h.bindings = [
+    {"id": "toggle_run", "label": "启停", "keys": ["alt", "f1"], "enabled": True},
+    {"id": "record", "label": "录制", "keys": ["alt", "f2"], "enabled": True},
+]
+h.pressed = set()
+h._fired = set()
+h.hit = []
+h.handlers = {"toggle_run": lambda: h.hit.append("toggle_run"), "record": lambda: h.hit.append("record")}
+h._on_press(ALT)
+h._on_press(F1)
+h._on_release(F1)
+h._on_press(keyboard.Key.f2)     # 同一个 alt 按住，换成 f2 → 触发另一条
+check("两条绑定都能触发", h.hit == ["toggle_run", "record"], h.hit)
+h._on_press(F1)                  # f2 还没松，f1 再按一次 → 只有启停那条能再触发
+check("各自独立计锁", h.hit == ["toggle_run", "record", "toggle_run"], h.hit)
+
+print("== 快捷键 8：键名别名与规整 ==")
+check("arrowup → up", hotkey_mod.normalize_key("ArrowUp") == "up", hotkey_mod.normalize_key("ArrowUp"))
+check("control → ctrl", hotkey_mod.normalize_key("Control") == "ctrl")
+check("escape → esc", hotkey_mod.normalize_key("Escape") == "esc")
+check("去空格 / 小写 / 去重",
+      hotkey_mod.clean_keys([" ALT ", "", "f1", "F1"]) == ["alt", "f1"],
+      hotkey_mod.clean_keys([" ALT ", "", "f1", "F1"]))
+
+print("== 快捷键绑定表：默认值 / 旧配置迁移 / 校验 ==")
+_cfg = appconfig.config_path()
+if _cfg.exists():
+    _cfg.unlink()
+
+defaults = hotkey_mod.load_bindings()
+check("默认三条：alt+F1 / alt+F2 / alt+F3",
+      [b["keys"] for b in defaults] == [["alt", "f1"], ["alt", "f2"], ["alt", "f3"]],
+      [b["keys"] for b in defaults])
+check("默认全部启用", all(b["enabled"] for b in defaults))
+check("默认绑定 id 固定（改键靠它对齐）",
+      [b["id"] for b in defaults] == ["toggle_run", "record", "pick"], [b["id"] for b in defaults])
+
+# 旧配置（v0.7.x 只存过一条 hotkey）必须迁移过来，而不是被丢掉重置成默认
+appconfig.update(hotkey=["ctrl", "F9"])
+migrated = hotkey_mod.load_bindings()
+check("旧 hotkey 迁移到启停", migrated[0]["keys"] == ["ctrl", "f9"], migrated[0]["keys"])
+check("迁移后写进新字段（下次启动不走兼容分支）",
+      isinstance(appconfig.get("hotkeys"), list), appconfig.get("hotkeys"))
+appconfig.update(hotkey=["alt", "f1"])
+
+h = object.__new__(HotkeyManager)
+h.bindings = hotkey_mod.load_bindings()
+h.pressed = set()
+h._fired = set()
+h.handlers = {}
+changed = h.set_bindings([
+    {"id": "toggle_run", "keys": ["ctrl", "F8"]},
+    {"id": "record", "keys": ["alt", "f2"], "enabled": False},
+])
+check("改键生效（含别名规整）", changed[0]["keys"] == ["ctrl", "f8"], changed[0]["keys"])
+check("可以单独停用某条", changed[1]["enabled"] is False)
+check("未提交的绑定保持原值", changed[2]["keys"] == ["alt", "f3"], changed[2]["keys"])
+check("落盘只写稳定字段",
+      set(json.loads(_cfg.read_text(encoding="utf-8"))["hotkeys"][0]) == {"id", "keys", "enabled"})
+check("改键后锁被清空（旧按键不残留）", h._fired == set())
+
+try:
+    h.set_bindings([
+        {"id": "toggle_run", "keys": ["ctrl", "f8"], "enabled": True},
+        {"id": "record", "keys": ["ctrl", "f8"], "enabled": True},
+    ])
+    check("重复组合被拒绝", False, "没有报错")
+except ValueError as e:
+    check("重复组合被拒绝", "相同" in str(e), str(e))
+
+try:
+    h.set_bindings([{"id": "toggle_run", "keys": [], "enabled": True}])
+    check("启用却没有键被拒绝", False, "没有报错")
+except ValueError as e:
+    check("启用却没有键被拒绝", "快捷键" in str(e), str(e))
+
+cleared = h.set_bindings([{"id": "record", "keys": [], "enabled": False}])
+check("停用的绑定允许留空键", cleared[1]["keys"] == [] and cleared[1]["enabled"] is False, cleared[1])
+try:
+    h.set_bindings([{"id": "record", "keys": [], "enabled": True}])
+    check("清空后想启用会被要求先设键", False, "没有报错")
+except ValueError as e:
+    check("清空后想启用会被要求先设键", "快捷键" in str(e), str(e))
+
+check("兼容接口 get/set 只动启停那一条",
+      (h.set(["alt", "f1"]), h.get())[1] == ["alt", "f1"], h.get())
+
+print("== 录制结果：按录制快捷键本身产生的事件要被剔掉 ==")
+# 快捷键现在由 HotkeyManager 统一匹配（录制器自己不再看键盘），于是「按下快捷键」
+# 的那几下按键会被顺带录进宏里；如果不在收尾时剔掉，每段录制都会自带一个 alt+f2，
+# 回放时又会去切换录制状态。这里把收尾清理的规则钉死。
+from recorder import Recorder  # noqa: E402
+
+
+def make_recorder(hotkey=("alt", "f2")) -> Recorder:
+    r = object.__new__(Recorder)
+    r.hotkey = set(hotkey)
+    r.recording = True
+    r.events = []
+    r._start_time = 0.0
+    r._suppressed = set()
+    r.states = []
+    r.out = None
+    r.on_state = lambda v: r.states.append(v)
+    r.on_stop = lambda ev: setattr(r, "out", ev)
+    return r
+
+
+r = make_recorder()
+r.events = [
+    {"t": 0, "type": "keydown", "key": "alt"},     # 按下 alt+f2 开始录制
+    {"t": 5, "type": "keydown", "key": "f2"},
+    {"t": 20, "type": "keyup", "key": "f2"},
+    {"t": 30, "type": "keyup", "key": "alt"},
+    {"t": 400, "type": "mousedown", "x": 10, "y": 10, "button": "left"},
+    {"t": 430, "type": "mouseup", "x": 10, "y": 10, "button": "left"},
+    {"t": 900, "type": "keydown", "key": "alt"},   # 按下 alt+f2 停止录制
+    {"t": 905, "type": "keydown", "key": "f2"},
+]
+r.stop()
+check("开头的快捷键按下/抬起被剔掉", r.out and r.out[0]["type"] == "mousedown", r.out)
+check("结尾的快捷键按下被剔掉", r.out and r.out[-1]["type"] == "mouseup", r.out)
+check("中间的真实操作保留", len(r.out) == 2, r.out)
+check("停录会推送状态", r.states == [False], r.states)
+
+# 录制中段合法的 alt 组合（例如 alt+点击）不能被误删——它们共用 alt 这个键名
+r2 = make_recorder()
+r2.events = [
+    {"t": 0, "type": "mousedown", "x": 1, "y": 1, "button": "left"},
+    {"t": 50, "type": "keydown", "key": "alt"},
+    {"t": 60, "type": "keydown", "key": "a"},
+    {"t": 70, "type": "keyup", "key": "a"},
+    {"t": 80, "type": "keyup", "key": "alt"},
+]
+r2.stop()
+check("录制中段的 alt 组合完整保留", len(r2.out) == 5, r2.out)
+
+# 用户就是想录「按住 alt + 点击」：开头那一下 alt 不是快捷键（没凑齐整组）→ 必须保留
+r3 = make_recorder()
+r3.events = [
+    {"t": 0, "type": "keydown", "key": "alt"},
+    {"t": 30, "type": "mousedown", "x": 5, "y": 5, "button": "left"},
+    {"t": 60, "type": "mouseup", "x": 5, "y": 5, "button": "left"},
+    {"t": 90, "type": "keyup", "key": "alt"},
+]
+r3.stop()
+check("开头只按了 alt（不是整组快捷键）不误删", len(r3.out) == 4, r3.out)
+
+# 快捷键停用（键集合为空）时不做任何删减
+r4 = make_recorder(hotkey=())
+r4.events = [
+    {"t": 0, "type": "keydown", "key": "alt"},
+    {"t": 10, "type": "keydown", "key": "f2"},
+]
+r4.stop()
+check("快捷键停用时原样返回", len(r4.out) == 2, r4.out)
 
 print("== 悬浮框状态去重 ==")
 ov = Overlay()            # 只创建队列与字段，不碰 Tk
@@ -254,7 +433,7 @@ check("合法值生效", engine_main._set_repeat_to(42) == 42)
 check("同步到引擎侧流程阴影值", engine_main.executor.current_flow.get("repeat") == 42)
 check("同步到悬浮框状态", overlay_mod.state().get("repeat") == 42)
 check("下界夹取：0 -> 1", engine_main._set_repeat_to(0) == 1)
-check("上界夹取：99999 -> 9999", engine_main._set_repeat_to(99999) == 9999)
+check("上界夹取：999999 -> 99999", engine_main._set_repeat_to(999999) == 99999)
 before = engine_main._set_repeat_to(7)
 check("非法输入保持原值", engine_main._set_repeat_to("abc") == before, before)
 check("± 与直接输入共用同一套逻辑", engine_main._change_repeat(1) == 8)

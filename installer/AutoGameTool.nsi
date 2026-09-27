@@ -26,7 +26,7 @@ Unicode true
 ; ---------------------------------------------------------------- 基本信息
 !define APP_NAME      "AutoGameTool"
 !define APP_NAME_CN   "AutoGameTool 游戏自动化脚本工具"
-!define APP_VERSION   "0.7.3"
+!define APP_VERSION   "0.8.0"
 !define APP_PUBLISHER "AutoGameTool"
 !define APP_EXE       "AutoGameTool.exe"
 !define APP_ICON      "${PROJECT_ROOT}\assets\AutoGameTool.ico"
@@ -49,7 +49,7 @@ Icon "${APP_ICON}"
 UninstallIcon "${APP_ICON}"
 
 ; ------------------------------------------------------- 文件属性（右键详情）
-VIProductVersion "0.7.3.0"
+VIProductVersion "0.8.0.0"
 VIAddVersionKey /LANG=2052 "ProductName"     "${APP_NAME}"
 VIAddVersionKey /LANG=2052 "FileDescription" "${APP_NAME} 安装程序"
 VIAddVersionKey /LANG=2052 "FileVersion"     "${APP_VERSION}"
@@ -80,7 +80,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright"  "Copyright (C) 2026 ${APP_PUBLISHER
 
 ; 完成页
 !define MUI_FINISHPAGE_TITLE "${APP_NAME} 安装完成"
-!define MUI_FINISHPAGE_TEXT "${APP_NAME} 已成功安装到：$\r$\n$INSTDIR$\r$\n$\r$\n程序启动后会自动打开浏览器进入可视化编辑器。$\r$\n默认快捷键：alt+f1 启动/停止脚本 · F8 坐标拾取 · alt+9 键鼠录制。$\r$\n$\r$\n提示：程序同一时刻只能运行一个实例。"
+!define MUI_FINISHPAGE_TEXT "${APP_NAME} 已成功安装到：$\r$\n$INSTDIR$\r$\n$\r$\n程序启动后会自动打开浏览器进入可视化编辑器。$\r$\n默认快捷键：alt+F1 启动/停止脚本 · alt+F2 键鼠录制 · alt+F3 坐标拾取（都可在界面「快捷键」里改键或停用）。$\r$\n$\r$\n提示：程序同一时刻只能运行一个实例，编辑器也只允许一个窗口。"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "立即启动 ${APP_NAME}"
 !define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\${README_FILE}"

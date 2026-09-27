@@ -1,16 +1,23 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import {
+  DEFAULT_APPEARANCE,
+  normalizeAppearance,
+  resolveTheme,
+  type Appearance,
+} from '../lib/appearance'
 
 /**
- * 界面外观（目前只有自定义背景）。
+ * 界面外观（主题 + 自定义背景）。
  *
  * 为什么存 localStorage 而不是引擎配置：
- *  - 背景是**这台电脑这个浏览器**的显示偏好，跟脚本内容无关，写进 .agflow 会让
+ *  - 背景与主题是**这台电脑这个浏览器**的显示偏好，跟脚本内容无关，写进 .agflow 会让
  *    "换台机器打开同一个脚本"也跟着变样
  *  - 图片是 base64，几十到几百 KB，走 HTTP 每次启动都传一遍不划算
  * 所以：不上传引擎、不写进工程文件，只在本机浏览器里留着。
  */
 const KEY = 'agt.bg'
+const APPEARANCE_KEY = 'agt.appearance'
 
 export const useUiStore = defineStore('ui', () => {
   // data URL（已在裁剪步骤里按屏幕比例裁好）
@@ -19,6 +26,53 @@ export const useUiStore = defineStore('ui', () => {
   const bgOpacity = ref(0.5)
   /** 最近一次持久化失败的提示（配额不足等），供设置面板展示 */
   const bgWarn = ref('')
+
+  // ---------- 外观 ----------
+  const appearance = ref<Appearance>(DEFAULT_APPEARANCE)
+  const systemDark = ref(true)
+  /** 真正生效的主题：'light' | 'dark'（「跟随系统」已经解析掉） */
+  const theme = computed(() => resolveTheme(appearance.value, systemDark.value))
+
+  const mq =
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-color-scheme: dark)')
+      : null
+
+  function applyTheme() {
+    systemDark.value = mq ? mq.matches : true
+    const el = typeof document !== 'undefined' ? document.documentElement : null
+    if (el) el.dataset.theme = resolveTheme(appearance.value, systemDark.value)
+  }
+
+  function setAppearance(v: unknown) {
+    appearance.value = normalizeAppearance(v)
+    applyTheme()
+    try {
+      localStorage.setItem(APPEARANCE_KEY, appearance.value)
+    } catch {
+      /* 存不下就只在本次会话生效，不影响使用 */
+    }
+  }
+
+  function loadAppearance() {
+    try {
+      appearance.value = normalizeAppearance(localStorage.getItem(APPEARANCE_KEY))
+    } catch {
+      appearance.value = DEFAULT_APPEARANCE
+    }
+    applyTheme()
+  }
+
+  // 系统主题变化时（「跟随系统」才会跟着变）立刻重算
+  if (mq) {
+    const onChange = () => {
+      systemDark.value = mq.matches
+      applyTheme()
+    }
+    // Safari < 14 只有 addListener
+    if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onChange)
+    else if (typeof (mq as any).addListener === 'function') (mq as any).addListener(onChange)
+  }
 
   function load() {
     try {
@@ -78,6 +132,19 @@ export const useUiStore = defineStore('ui', () => {
   }
 
   load()
+  loadAppearance()
 
-  return { bgImage, bgOpacity, bgWarn, setBackground, applyImage, setOpacity, clearBackground }
+  return {
+    bgImage,
+    bgOpacity,
+    bgWarn,
+    setBackground,
+    applyImage,
+    setOpacity,
+    clearBackground,
+    appearance,
+    systemDark,
+    theme,
+    setAppearance,
+  }
 })

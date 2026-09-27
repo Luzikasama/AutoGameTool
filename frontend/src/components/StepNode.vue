@@ -71,7 +71,7 @@ const summary = computed(() => {
   border: 1.5px solid var(--border);
   border-radius: 10px;
   min-width: 150px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
   transition: border-color 0.15s;
 }
 .step-icon {
@@ -105,7 +105,7 @@ const summary = computed(() => {
 .once-badge {
   font-size: 10px;
   font-weight: 600;
-  color: #f59e0b;
+  color: var(--warn);
   background: rgba(245, 158, 11, 0.15);
   border: 1px solid rgba(245, 158, 11, 0.4);
   border-radius: 4px;
@@ -118,10 +118,10 @@ const summary = computed(() => {
   font-size: 10px;
 }
 .branch-yes {
-  color: #22c55e;
+  color: var(--ok);
 }
 .branch-no {
-  color: #ef4444;
+  color: var(--danger);
 }
 .handle-yes {
   background: #22c55e !important;

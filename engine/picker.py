@@ -1,29 +1,24 @@
-"""坐标拾取：F8 触发，监听真实鼠标左键，捕获屏幕坐标。
+"""坐标拾取：快捷键触发后，监听真实鼠标左键，捕获屏幕坐标。
 
-基于常驻键盘/鼠标事件总线，不创建、不销毁任何监听器。
+基于常驻鼠标事件总线，不创建、不销毁任何监听器。
+触发键本身由 `hotkey.HotkeyManager` 统一匹配（默认 alt+F3，可在界面里改），
+本模块只提供 `arm()`：进入「等一次左键单击」的状态。
 """
 from pynput import mouse
 
-import keybus
 import mousebus
-
-
-def _norm_key(key) -> str:
-    if hasattr(key, "name"):
-        return key.name or ""
-    return str(key).lower()
 
 
 class CoordinatePicker:
     def __init__(self, on_picked) -> None:
         self.on_picked = on_picked
-        self._enabled = False  # 允许 F8 触发
+        self._enabled = False  # 允许快捷键触发（由「拾取」按钮/接口打开）
         self._armed = False  # 已进入拾取，等待左键单击
-        keybus.register(on_press=self._on_key)
         mousebus.register(on_click=self._on_click)
 
-    def _on_key(self, key):
-        if _norm_key(key) == "f8" and self._enabled:
+    def arm(self) -> None:
+        """快捷键按下：进入拾取等待（未启用时什么都不做）。"""
+        if self._enabled:
             self._armed = True
 
     def _on_click(self, x, y, button, pressed):
@@ -43,5 +38,4 @@ class CoordinatePicker:
         self._armed = False
 
     def stop(self) -> None:
-        keybus.unregister(on_press=self._on_key)
         mousebus.unregister(on_click=self._on_click)

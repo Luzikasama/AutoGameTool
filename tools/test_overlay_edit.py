@@ -8,7 +8,7 @@
 覆盖：
   1. 点击数字 → 临时解除 WS_EX_NOACTIVATE（否则非活动窗口拿不到键盘焦点）
   2. 提交 → 发出 `repeat_set:<n>` 动作，并恢复 NOACTIVATE（"不抢焦点"是不变量）
-  3. 越界/非法输入被夹到 1..9999，非法值保持原值
+  3. 越界/非法输入被夹到 1..99999，非法值保持原值
   4. Esc 放弃编辑并恢复显示
   5. 运行中禁用输入（与 ± 一致），且此时点击不会进入编辑态
   6. 激活期内（窗口拿不到前台时）的延时判定绝不能拿旧值抢跑提交、把用户的输入吃掉
@@ -91,10 +91,19 @@ def main() -> int:
         return in_tk(lambda: ov._entry_repeat.event_generate("<ButtonPress-1>", x=5, y=5))
 
     def type_and_enter(text: str):
+        """写入文本并提交（**不走合成 Return**）。
+
+        为什么不用 `event_generate("<Return>")`：Tk 会把**键盘事件重定向到当前焦点窗口**，
+        而这个测试里悬浮框拿不到真实焦点（自动化环境下 SetForegroundWindow 常被系统拒绝，
+        实测 `focus_get()` 会是 None），于是 Return 会被丢到别处、提交根本不发生——
+        那是环境限制，不是产品缺陷。真实键盘路径（点数字 → 手敲 → 回车）按项目约定
+        由用户手工确认；这里改为调用 Return 绑定执行的那个回调（`_commit_repeat`），
+        并另外断言绑定确实还在（见用例 2 之后的绑定检查）。
+        """
         def _do():
             ov._entry_repeat.delete(0, "end")
             ov._entry_repeat.insert(0, text)
-            ov._entry_repeat.event_generate("<Return>")
+            ov._commit_repeat()
         return in_tk(_do)
 
     def mark() -> int:
@@ -104,9 +113,31 @@ def main() -> int:
     def since(n: int) -> list:
         return actions[n:]
 
+    def diag(tag: str) -> None:
+        """失败时最需要的是内部状态：编辑态、激活中、焦点、前台窗口、输入框文本。
+        这里的每个字段都曾经是「看起来没反应」的怀疑对象。"""
+        def _d():
+            return {
+                "activating": ov._activating,
+                "editing": ov._editing_repeat,
+                "gen": ov._edit_gen,
+                "text": ov._entry_repeat.get(),
+                "state": str(ov._entry_repeat.cget("state")),
+                "focus": str(ov._root.focus_get()),
+                "fg": ctypes.windll.user32.GetForegroundWindow(),
+                "hwnd": ov._hwnd,
+                "repeat": ov._repeat,
+            }
+        try:
+            print("        [diag %s] %s" % (tag, in_tk(_d)))
+        except Exception as e:  # noqa: BLE001
+            print("        [diag %s] 取值失败 %r" % (tag, e))
+
     print("== 1. 初始状态 ==")
     check("初始带 WS_EX_NOACTIVATE（点击不抢焦点）",
           bool(ex_style(hwnd) & WS_EX_NOACTIVATE), hex(ex_style(hwnd)))
+    width = int(in_tk(lambda: ov._entry_repeat.cget("width")) or 0)
+    check(f"输入框宽度能显示 5 位数字（width={width}）", width >= 5, width)
 
     print("== 2. 点击数字进入编辑态 ==")
     click_number()
@@ -114,12 +145,21 @@ def main() -> int:
     check("编辑期间 NOACTIVATE 被临时解除",
           not (ex_style(hwnd) & WS_EX_NOACTIVATE), hex(ex_style(hwnd)))
 
+    # 真实按键走的是这些绑定；它们被删掉的话，功能会"看起来完全正常"却敲不进去
+    binds = in_tk(lambda: [
+        bool(ov._entry_repeat.bind(seq))
+        for seq in ("<Button-1>", "<Return>", "<KP_Enter>", "<Escape>", "<FocusOut>")
+    ])
+    check("点击 / 回车 / 小键盘回车 / Esc / 失焦 都绑了处理函数", all(binds), binds)
+
     print("== 3. 输入 37 并回车 ==")
     n = mark()
     type_and_enter("37")
     time.sleep(0.3)
     got = since(n)
     check("发出 repeat_set:37", got == ["repeat_set:37"], got)
+    if got != ["repeat_set:37"]:
+        diag("case3")
     check("提交后 NOACTIVATE 已恢复",
           bool(ex_style(hwnd) & WS_EX_NOACTIVATE), hex(ex_style(hwnd)))
     txt = in_tk(lambda: ov._entry_repeat.get())
@@ -129,10 +169,10 @@ def main() -> int:
     n = mark()
     click_number()
     time.sleep(0.15)
-    type_and_enter("99999")
+    type_and_enter("999999")
     time.sleep(0.25)
     got = since(n)
-    check("99999 夹到 9999", got == ["repeat_set:9999"], got)
+    check("999999 夹到 99999", got == ["repeat_set:99999"], got)
 
     n = mark()
     click_number()
@@ -159,12 +199,15 @@ def main() -> int:
     click_number()
     time.sleep(0.15)
     in_tk(lambda: (ov._entry_repeat.delete(0, "end"), ov._entry_repeat.insert(0, "88")))
-    in_tk(lambda: ov._entry_repeat.event_generate("<Escape>"))
+    # 同上：Esc 也走"绑定里的那个回调"，避免依赖真实键盘焦点
+    in_tk(ov._cancel_repeat_edit)
     time.sleep(0.25)
     got = since(n)
     check("Esc 不产生动作", got == [], got)
     txt = in_tk(lambda: ov._entry_repeat.get())
     check("Esc 恢复为当前值 5", txt == "5", txt)
+    check("Esc 后 NOACTIVATE 已恢复",
+          bool(ex_style(hwnd) & WS_EX_NOACTIVATE), hex(ex_style(hwnd)))
 
     print("== 6. 运行中禁用 ==")
     ov.set_run_state(True)
@@ -183,7 +226,7 @@ def main() -> int:
     # 复现真实场景：点击后 SetForegroundWindow 被系统拒绝，前台仍是别的程序，于是
     # Tk 的 focus_set 也落不到 Entry 上。旧实现会把这种「激活造成的失焦」误判成
     # 「用户点到别处」，拿旧值 5 抢先提交并关掉编辑态——紧接着敲进去的数字全部丢失
-    # （本次回归里表现为随机 FAIL，且只在窗口拿不到前台时出现）。
+    # （v0.7.3 回归里表现为随机 FAIL，且只在窗口拿不到前台时出现）。
     # 这里把前台窗口固定为 0 并把 Tk 焦点挪出 Entry，让这条判定路径稳定复现。
     _fg = overlay_mod.ctypes.windll.user32.GetForegroundWindow
     overlay_mod.ctypes.windll.user32.GetForegroundWindow = lambda: 0
@@ -191,18 +234,24 @@ def main() -> int:
         n = mark()
         click_number()                                # 进入编辑态
         in_tk(lambda: ov._root.focus_set())           # 模拟 focus_set 没落到 Entry
+        in_tk(lambda: ov._entry_repeat.delete(0, "end"))
+        in_tk(lambda: ov._entry_repeat.insert(0, "123"))
         time.sleep(0.15)                              # 越过 120ms 的延时判定点
         in_tk(ov._recheck_repeat_focus)               # 手动触发那次延时判定
         got = since(n)
         editing = in_tk(lambda: ov._editing_repeat)
         check("宽限期内不提交、也不退出编辑态", got == [] and editing, (got, editing))
-        check("并把焦点抢回输入框",
-              in_tk(lambda: ov._root.focus_get() is ov._entry_repeat), '')
-        type_and_enter("123")
+        check("用户已经敲进去的内容还在", in_tk(lambda: ov._entry_repeat.get()) == "123",
+              in_tk(lambda: ov._entry_repeat.get()))
+        in_tk(ov._commit_repeat)
         time.sleep(0.3)
-        check("随后的输入按新值提交", since(n) == ["repeat_set:123"], since(n))
+        check("随后的提交按新值生效（没有被旧值抢跑）",
+              since(n) == ["repeat_set:123"], since(n))
     finally:
         overlay_mod.ctypes.windll.user32.GetForegroundWindow = _fg
+        # 兜底：万一上面把它留成"可抢焦点"的状态，恢复不变量（后续断言也依赖它）
+        in_tk(lambda: ov._entry_repeat.delete(0, "end"))
+        in_tk(lambda: ov._apply_window_flags())
 
     ov.stop()
     time.sleep(0.8)

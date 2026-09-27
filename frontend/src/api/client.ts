@@ -1,5 +1,13 @@
 import type { WindowInfo } from '../types'
 
+/** 一条全局快捷键绑定（标签由引擎给出，前端只负责显示与改键） */
+export interface HotkeyBinding {
+  id: string
+  label: string
+  keys: string[]
+  enabled: boolean
+}
+
 const ENGINE_PORT = '8765'
 // 打包后前端由引擎同源提供（端口=8765）时用相对路径；开发时（vite 1420）指向引擎端口
 const BASE = window.location.port === ENGINE_PORT ? '' : `http://127.0.0.1:${ENGINE_PORT}`
@@ -109,6 +117,10 @@ export const engine = {
     apiPost<{ enabled: boolean; available: boolean; error: string }>('/overlay/enable', { enabled }),
   getHotkey: () => apiGet<{ hotkey: string[] }>('/config/hotkey'),
   setHotkey: (hotkey: string[]) => apiPost('/config/hotkey', { hotkey }),
+  getHotkeys: () =>
+    apiGet<{ bindings: HotkeyBinding[]; defaults: HotkeyBinding[] }>('/config/hotkeys'),
+  setHotkeys: (bindings: HotkeyBinding[]) =>
+    apiPost<{ bindings: HotkeyBinding[] }>('/config/hotkeys', { bindings }),
   startPick: () => apiPost('/pick/start'),
   cancelPick: () => apiPost('/pick/cancel'),
   recordStart: () => apiPost<{ ok: boolean; recording: boolean }>('/record/start'),

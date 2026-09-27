@@ -19,7 +19,7 @@ import {
 import StepNode from '../components/StepNode.vue'
 import ScreenCapture from '../components/ScreenCapture.vue'
 import SettingsModal from '../components/SettingsModal.vue'
-import { engine, engineWsUrl } from '../api/client'
+import { engine, engineWsUrl, type HotkeyBinding } from '../api/client'
 import { useProjectStore } from '../stores/project'
 import { STEP_META, type FlowFile, type StepType, type WindowInfo } from '../types'
 import {
@@ -74,11 +74,12 @@ const keyRecording = ref(false)
 // 键鼠录制
 const macroRecording = ref(false)
 
-// 快捷键
+// 快捷键：全部命令都能改键 + 单独启用/停用（标签由引擎给出）
 const hotkeyVisible = ref(false)
-const hotkeyText = ref('alt+f1')
-const recording = ref(false)
-const recordParts = ref<string[]>([])
+const bindings = ref<HotkeyBinding[]>([])
+const hotkeyDefaults = ref<HotkeyBinding[]>([])
+/** 正在录制按键的那条绑定 id；空串表示没在录 */
+const recordingId = ref('')
 
 // 缩放/平移实例
 let vf: any = null
@@ -127,9 +128,6 @@ const selectedNode = computed(() => nodes.value.find((n) => n.id === selectedId.
 
 // 画布上所有「键鼠录制」步骤（工具栏的拆分入口据此决定可用状态）
 const macroNodes = computed(() => nodes.value.filter((n) => n.data.stepType === 'macro'))
-
-// 引擎版本：显示在顶栏。排查「界面没看到某个功能」时，一眼就能确认页面/进程是不是新版
-const engineVersion = ref('')
 
 const winOptions = computed(() => [
   { label: '🌐 不绑定（全局）', value: 0 },
@@ -669,60 +667,105 @@ function onLoadFile(e: Event) {
 }
 
 // ---------- 快捷键 ----------
-function joinHotkey(keys: string[]) {
-  return keys.join(' + ')
+const KEY_ALIAS: Record<string, string> = {
+  arrowup: 'up',
+  arrowdown: 'down',
+  arrowleft: 'left',
+  arrowright: 'right',
+  escape: 'esc',
+  return: 'enter',
+  del: 'delete',
+  control: 'ctrl',
+  meta: 'win',
 }
 
-async function loadHotkey() {
+/** 显示用的按键文本：alt + f1 */
+function keysText(keys: string[]) {
+  return (keys || []).join(' + ') || '（未设置）'
+}
+
+/** 界面上某条快捷键的显示文本（录制按钮上要用） */
+function hotkeyLabel(id: string): string {
+  const b = bindings.value.find((x) => x.id === id)
+  if (!b) return ''
+  return b.enabled ? keysText(b.keys) : '未启用'
+}
+
+async function loadHotkeys() {
   try {
-    const r = await engine.getHotkey()
-    hotkeyText.value = joinHotkey(r.hotkey)
+    const r = await engine.getHotkeys()
+    bindings.value = r.bindings || []
+    hotkeyDefaults.value = r.defaults || []
   } catch {
-    /* ignore */
+    /* 引擎不可达时留空（下次打开面板再取） */
   }
 }
 
-async function saveHotkey() {
-  const keys = hotkeyText.value
-    .split(/[+\s]+/)
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean)
-  if (keys.length === 0) {
-    message.warning('请输入快捷键，例如 alt+f1')
-    return
-  }
+async function openHotkeys() {
+  hotkeyVisible.value = true
+  if (!bindings.value.length) await loadHotkeys()
+}
+
+async function saveHotkeys() {
   try {
-    await engine.setHotkey(keys)
-    message.success('快捷键已保存：' + joinHotkey(keys))
+    const r = await engine.setHotkeys(bindings.value)
+    bindings.value = r.bindings || []
+    message.success('快捷键已保存')
   } catch (e: any) {
     message.error('保存快捷键失败：' + e.message)
   }
 }
 
-function startRecord() {
-  recording.value = true
-  recordParts.value = []
+function restoreHotkeyDefaults() {
+  bindings.value = hotkeyDefaults.value.map((b) => ({ ...b, keys: [...b.keys] }))
+  message.info('已填回默认快捷键，点「保存」后生效')
+}
+
+function startRecord(id: string) {
+  if (recordingId.value === id) {
+    finishRecord()
+    return
+  }
+  recordingId.value = id
   window.addEventListener('keydown', onRecordKey)
 }
 
+/** 录制一次按键组合。
+ *
+ *  直接看这次事件的修饰键状态，而不是像旧实现那样「按到修饰键先攒起来、等主键再收尾」：
+ *  后者在用户先松修饰键再按主键、或者一次按到位时都容易攒出错的组合。
+ */
 function onRecordKey(e: KeyboardEvent) {
   e.preventDefault()
   e.stopPropagation()
   const k = e.key.toLowerCase()
-  const modMap: Record<string, string> = { control: 'ctrl', alt: 'alt', shift: 'shift', meta: 'win' }
-  if (k === 'control' || k === 'alt' || k === 'shift' || k === 'meta') {
-    if (!recordParts.value.includes(modMap[k])) recordParts.value.push(modMap[k])
-    return
+  const mods: string[] = []
+  if (e.ctrlKey) mods.push('ctrl')
+  if (e.altKey) mods.push('alt')
+  if (e.shiftKey) mods.push('shift')
+  if (e.metaKey) mods.push('win')
+  // 只按下修饰键：等主键，不结束录制
+  if (['control', 'alt', 'shift', 'meta'].includes(k)) return
+  const main = k === ' ' ? 'space' : KEY_ALIAS[k] || k
+  const b = bindings.value.find((x) => x.id === recordingId.value)
+  if (b) {
+    b.keys = [...mods, main]
+    b.enabled = true
   }
-  const key = k === ' ' ? 'space' : k
-  if (!recordParts.value.includes(key)) recordParts.value.push(key)
-  hotkeyText.value = joinHotkey(recordParts.value)
   finishRecord()
 }
 
 function finishRecord() {
-  recording.value = false
+  recordingId.value = ''
   window.removeEventListener('keydown', onRecordKey)
+}
+
+// 「关于」：跳到 GitHub 发布页。必须用新标签页——本页是 WebUI 本身的连接，
+// 直接在当前页跳走会让引擎在宽限期后自动退出。
+const RELEASES_URL = 'https://github.com/Luzikasama/AutoGameTool/releases'
+
+function openAbout() {
+  window.open(RELEASES_URL, '_blank', 'noopener')
 }
 
 // ---------- 运行 ----------
@@ -1111,10 +1154,38 @@ async function toggleOverlay() {
   }
 }
 
+/** 被引擎拒绝（已有另一个编辑器窗口在运行）：只允许一个 WebUI */
+const webuiBusy = ref(false)
+/** 引擎版本：显示在「关于」的提示里，确认当前跑的是哪一版 */
+const engineVersion = ref('')
+
+/** 安排一次重连（会取消已有的定时器，避免手动重试与定时重试各开一条连接） */
+function retryWs(delay: number) {
+  if (wsRetry) clearTimeout(wsRetry)
+  wsRetry = setTimeout(connectWs, delay)
+}
+
+/** 「立即重试」按钮：取消定时器并马上连一次 */
+function retryNow() {
+  if (wsRetry) {
+    clearTimeout(wsRetry)
+    wsRetry = null
+  }
+  connectWs()
+}
+
 function connectWs() {
   if (destroyed) return
+  // 先收掉上一条（可能是 CONNECTING 状态的），否则手动重试会和定时重试撞在一起，
+  // 同一页面开出两条连接 → 其中一条必然被引擎以 4409 拒掉
+  try {
+    ws?.close()
+  } catch {
+    /* 已经关掉了 */
+  }
   ws = new WebSocket(engineWsUrl())
   ws.onopen = () => {
+    webuiBusy.value = false
     if (wsFailCount >= 3) message.success('已重新连接引擎')
     wsFailCount = 0
     syncRunState()
@@ -1134,21 +1205,29 @@ function connectWs() {
       else if (msg.type === 'hotkey') toggleScript() // 兼容旧版引擎的启停广播
       else if (msg.type === 'recording') macroRecording.value = !!msg.recording
       else if (msg.type === 'recorded') onRecorded(msg.events || [])
+      else if (msg.type === 'busy') webuiBusy.value = true
     } catch {
       /* ignore */
     }
   }
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     store.running = false
     store.paused = false
     if (destroyed) return
+    // 4409：引擎只允许一个 WebUI，而这个页面不是那一个。
+    // 不停重试是为了「刷新页面」——刷新时旧连接会先断开，通常第一次重试就能连上；
+    // 真正多开的那个页面则会一直看到提示，不会去干扰正在工作的那个窗口。
+    if (ev.code === 4409) {
+      webuiBusy.value = true
+      retryWs(1500)
+      return
+    }
     // 自动重连：断线期间日志/状态会丢，重连后立即同步真实状态
     wsFailCount += 1
     if (wsFailCount === 3) {
       message.warning('与引擎的连接已断开，正在自动重连…若引擎刚重启，请从程序重新打开页面')
     }
-    if (wsRetry) clearTimeout(wsRetry)
-    wsRetry = setTimeout(connectWs, 2000)
+    retryWs(2000)
   }
 }
 
@@ -1230,10 +1309,10 @@ onMounted(() => {
   connectWs()
   refreshTemplates()
   refreshWindows()
-  loadHotkey()
+  loadHotkeys()
   syncOverlay()
   loadFlowToEngine(true)
-  // 顶栏显示引擎版本：确认「当前跑的是哪一版」时不用再翻发布页
+  // 「关于」的提示里显示引擎版本：确认「当前跑的是哪一版」时不用再翻发布页
   engine
     .health()
     .then((h) => {
@@ -1266,29 +1345,51 @@ onBeforeUnmount(() => {
     <header class="topbar">
       <div class="brand">🎮 AutoGameTool</div>
       <n-input v-model:value="store.flowName" class="name-input" placeholder="脚本名称" />
-      <n-tooltip trigger="hover">
-        <template #trigger>
-          <n-button size="small" :disabled="!canUndo" @click="undo">↶ 撤销</n-button>
-        </template>
-        撤销上一步改动（Ctrl+Z）
-      </n-tooltip>
-      <n-tooltip trigger="hover">
-        <template #trigger>
-          <n-button size="small" :disabled="!canRedo" @click="redo">↷ 重做</n-button>
-        </template>
-        重做（Ctrl+Y 或 Ctrl+Shift+Z）
-      </n-tooltip>
+      <div class="setting">
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button size="small" @click="openHotkeys">⌨ 快捷键</n-button>
+          </template>
+          全局快捷键：每条都能改键、也能单独停用（默认 alt+F1 / alt+F2 / alt+F3）
+        </n-tooltip>
+      </div>
+      <div class="setting">
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button
+              size="small"
+              :type="overlayEnabled ? 'primary' : 'default'"
+              :disabled="!overlayAvailable"
+              @click="toggleOverlay"
+            >
+              🪟 悬浮框{{ overlayEnabled ? '已开' : '' }}
+            </n-button>
+          </template>
+          {{ overlayAvailable
+            ? '在游戏画面上方置顶显示循环进度与当前步骤（可拖拽，点 ✕ 收起）'
+            : '悬浮框不可用：当前运行环境缺少 tkinter' }}
+        </n-tooltip>
+      </div>
       <div class="spacer" />
-      <span v-if="engineVersion" class="ver-badge" title="引擎版本（界面右上角可确认是否为最新版）">
-        v{{ engineVersion }}
-      </span>
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <button class="ver-badge" type="button" @click="openAbout">
+            关于{{ engineVersion ? ` v${engineVersion}` : '' }}
+          </button>
+        </template>
+        当前引擎版本 {{ engineVersion || '未知' }} · 点击打开 GitHub 发布页（新标签页，不会断开当前页面）
+      </n-tooltip>
       <n-tooltip trigger="hover">
         <template #trigger>
           <n-button size="small" @click="settingsVisible = true">⚙ 设定</n-button>
         </template>
-        设定：自定义背景（本地图片、按屏幕比例截取、可调透明度）
+        设定：外观（浅色 / 深色 / 跟随系统）与自定义背景
       </n-tooltip>
-      <n-popconfirm @positive-click="newFlow">
+      <n-popconfirm
+        positive-text="确定"
+        negative-text="取消"
+        @positive-click="newFlow"
+      >
         <template #trigger>
           <n-button size="small">＋ 新建</n-button>
         </template>
@@ -1314,7 +1415,14 @@ onBeforeUnmount(() => {
     <div class="settings-bar">
       <div class="setting">
         <span class="setting-label">循环轮数</span>
-        <n-input-number v-model:value="store.repeat" :min="1" :max="9999" size="small" style="width: 82px" />
+        <!-- 宽度按 5 位数字留足（含千分位与右侧 +- 按钮），否则 10000 会被截断看不全 -->
+        <n-input-number
+          v-model:value="store.repeat"
+          :min="1"
+          :max="99999"
+          size="small"
+          style="width: 132px"
+        />
       </div>
       <div class="setting">
         <span class="setting-label">输入方式</span>
@@ -1338,26 +1446,15 @@ onBeforeUnmount(() => {
       <div class="setting">
         <n-tooltip trigger="hover">
           <template #trigger>
-            <n-button size="small" @click="hotkeyVisible = true">⌨ 快捷键</n-button>
+            <n-button size="small" :disabled="!canUndo" @click="undo">↶ 撤销</n-button>
           </template>
-          全局启停快捷键（默认 alt+f1）
+          撤销上一步改动（Ctrl+Z）
         </n-tooltip>
-      </div>
-      <div class="setting">
         <n-tooltip trigger="hover">
           <template #trigger>
-            <n-button
-              size="small"
-              :type="overlayEnabled ? 'primary' : 'default'"
-              :disabled="!overlayAvailable"
-              @click="toggleOverlay"
-            >
-              🪟 悬浮框{{ overlayEnabled ? '已开' : '' }}
-            </n-button>
+            <n-button size="small" :disabled="!canRedo" @click="redo">↷ 重做</n-button>
           </template>
-          {{ overlayAvailable
-            ? '在游戏画面上方置顶显示循环进度与当前步骤（可拖拽，点 ✕ 收起）'
-            : '悬浮框不可用：当前运行环境缺少 tkinter' }}
+          重做（Ctrl+Y 或 Ctrl+Shift+Z）
         </n-tooltip>
       </div>
       <div class="setting">
@@ -1366,7 +1463,8 @@ onBeforeUnmount(() => {
           :type="macroRecording ? 'error' : 'default'"
           @click="macroRecording ? stopRecording() : startRecording()"
         >
-          {{ macroRecording ? '⏹ 停止录制 (alt+9)' : '⏺ 开始录制 (alt+9)' }}
+          {{ macroRecording ? '⏹ 停止录制' : '⏺ 开始录制' }}
+          <template v-if="hotkeyLabel('record')">（{{ hotkeyLabel('record') }}）</template>
         </n-button>
       </div>
       <div class="setting">
@@ -1689,24 +1787,57 @@ onBeforeUnmount(() => {
     <!-- 设定：自定义背景（选图 → 按屏幕比例截取 → 调透明度） -->
     <SettingsModal v-model:show="settingsVisible" />
 
-    <n-modal v-model:show="hotkeyVisible" preset="card" title="全局快捷键设置" style="width: 420px">
+    <n-modal v-model:show="hotkeyVisible" preset="card" title="全局快捷键设置" style="width: 560px">
       <div class="hotkey-body">
-        <p class="hk-tip">设置运行/停止脚本的全局快捷键（不占用键鼠的模拟输入模式下尤其有用）。</p>
-        <div class="hk-row">
-          <n-input v-model:value="hotkeyText" placeholder="如 alt+f1" :disabled="recording" />
-          <n-button :type="recording ? 'error' : 'primary'" @click="recording ? finishRecord() : startRecord()">
-            {{ recording ? '按下组合键完成录制' : '录制' }}
-          </n-button>
+        <p class="hk-tip">
+          每条都能改键，也能单独停用。点右侧「录制」后按下想要的组合键即可
+          （支持 ctrl / alt / shift / win + 字母、数字、f1-f12）。
+        </p>
+        <div v-for="b in bindings" :key="b.id" class="hk-row">
+          <span class="hk-label">{{ b.label }}</span>
+          <button
+            class="hk-keys"
+            type="button"
+            :class="{ recording: recordingId === b.id, off: !b.enabled }"
+            @click="startRecord(b.id)"
+          >
+            {{ recordingId === b.id ? '请按下组合键…' : keysText(b.keys) }}
+          </button>
+          <n-switch
+            :value="b.enabled"
+            size="small"
+            @update:value="(v: boolean) => (b.enabled = v)"
+          />
+          <span class="hk-state">{{ b.enabled ? '启用' : '已停用' }}</span>
         </div>
-        <p class="hk-hint">支持 ctrl / alt / shift / win + 字母/数字/f1-f12，例如 alt+f1、ctrl+shift+a</p>
+        <p v-if="!bindings.length" class="hk-hint">读不到快捷键（引擎未就绪），稍后重新打开本面板。</p>
+        <p class="hk-hint">
+          同一组按键不能给两个功能用；保存时引擎会校验并提示冲突。
+          停用的功能仍可用界面上的按钮（例如「开始录制」）。
+        </p>
       </div>
       <template #footer>
-        <div style="display: flex; justify-content: flex-end; gap: 8px">
-          <n-button @click="hotkeyVisible = false">取消</n-button>
-          <n-button type="primary" @click="saveHotkey">保存</n-button>
+        <div style="display: flex; justify-content: space-between; gap: 8px">
+          <n-button quaternary @click="restoreHotkeyDefaults">恢复默认</n-button>
+          <div style="display: flex; gap: 8px">
+            <n-button @click="hotkeyVisible = false">取消</n-button>
+            <n-button type="primary" @click="saveHotkeys">保存</n-button>
+          </div>
         </div>
       </template>
     </n-modal>
+
+    <!-- 只允许一个 WebUI：本页被引擎拒绝时给出明确说明，并后台重试（刷新页面能自动接管） -->
+    <div v-if="webuiBusy" class="busy-mask">
+      <div class="busy-card">
+        <div class="busy-title">已在另一个窗口打开</div>
+        <p class="busy-text">
+          AutoGameTool 只允许一个编辑器窗口与一个后端。请使用已经打开的那个窗口；
+          如果那是旧标签页、你已经关掉它，本页会自动接管（正在重试…）。
+        </p>
+        <n-button size="small" type="primary" @click="retryNow">立即重试</n-button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -1734,14 +1865,21 @@ onBeforeUnmount(() => {
 .spacer {
   flex: 1;
 }
-/* 顶栏版本号：排查「界面里看不到某功能」时用来确认页面是不是最新版 */
+/* 顶栏「关于」：确认当前页面是哪一版的同时，点一下就跳到 GitHub 发布页 */
 .ver-badge {
   font-size: 12px;
-  color: #94a3b8;
-  border: 1px solid #334155;
+  color: var(--badge-text);
+  border: 1px solid var(--badge-border);
   border-radius: 10px;
   padding: 1px 8px;
   white-space: nowrap;
+  cursor: pointer;
+  background: transparent;
+  transition: 0.15s;
+}
+.ver-badge:hover {
+  color: var(--text);
+  border-color: var(--accent);
 }
 
 .settings-bar {
@@ -1846,7 +1984,7 @@ onBeforeUnmount(() => {
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow);
 }
 .ctl {
   width: 30px;
@@ -1861,7 +1999,7 @@ onBeforeUnmount(() => {
   transition: 0.15s;
 }
 .ctl:hover {
-  background: #2a3140;
+  background: var(--ctl-hover);
   border-color: var(--border);
 }
 .ctl svg {
@@ -1935,7 +2073,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border);
   border-radius: 6px;
   display: block;
-  background: #000;
+  background: var(--preview-bg);
 }
 .terminate-hint {
   margin: 0;
@@ -2014,14 +2152,82 @@ onBeforeUnmount(() => {
   margin: 0;
   color: var(--text-dim);
   font-size: 13px;
+  line-height: 1.6;
 }
 .hk-row {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
+}
+.hk-label {
+  width: 140px;
+  flex: none;
+  font-size: 13px;
+}
+/* 快捷键显示区就是「录制」按钮：点一下开始录，避免多一个按钮 */
+.hk-keys {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 13px;
+  cursor: pointer;
+  transition: 0.15s;
+}
+.hk-keys:hover {
+  border-color: var(--accent);
+}
+.hk-keys.recording {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.hk-keys.off {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+.hk-state {
+  width: 44px;
+  flex: none;
+  font-size: 12px;
+  color: var(--text-dim);
 }
 .hk-hint {
   margin: 0;
   color: var(--text-dim);
   font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 被「只允许一个 WebUI」拒绝时的遮罩：此时页面本来也没连上引擎，先挡住误操作 */
+.busy-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.busy-card {
+  width: min(420px, 88vw);
+  padding: 18px 20px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+.busy-title {
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.busy-text {
+  margin: 0 0 14px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.7;
 }
 </style>

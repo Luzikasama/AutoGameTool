@@ -27,6 +27,8 @@ frontend/dist/
 frontend/.vite/
 frontend/src-tauri/target/
 *.local
+# 源码运行时引擎从这里读界面（tools/test_ui_appearance.py 会临时复制一份并清理）
+engine/frontend_dist/
 
 # ---------- 打包 / 安装 / 测试的临时文件 ----------
 .tmp/

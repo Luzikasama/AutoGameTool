@@ -27,11 +27,13 @@ import time
 from ctypes import wintypes
 from typing import Callable
 
+import enginelog
+
 _POLL_MS = 120        # 队列消费间隔
 _MARGIN = 24
 # 循环轮数范围（与引擎侧 _REPEAT_MIN/_REPEAT_MAX 保持一致）
 _REPEAT_MIN = 1
-_REPEAT_MAX = 9999
+_REPEAT_MAX = 99999
 # 点开数字后的「激活宽限期」：这段时间里的失焦一律算激活造成的，只把焦点抢回来、不提交。
 # 必须大于 _POLL_MS / 延时判定的 120ms，否则 OS 激活的 FocusOut 会被当成"用户点到别处"，
 # 用上一次的残留文本提前提交（实测：点开数字后立刻打字会丢输入）。
@@ -319,8 +321,9 @@ class Overlay:
         # 注意：悬浮框平时带 WS_EX_NOACTIVATE，点击不抢焦点——那样 Entry 收不到键盘。
         # 所以只在用户点击这个数字时**临时**去掉该扩展样式并在提交/失焦后立刻恢复，
         # 见 _begin_repeat_edit / _end_repeat_edit。
+        # width=5：循环轮数上限是 99999（五位数），窄了会把最后一位挤出可视区
         self._entry_repeat = tk.Entry(
-            tools, width=4, justify="center", bg=_BTN_BG, fg=_FG_MAIN,
+            tools, width=5, justify="center", bg=_BTN_BG, fg=_FG_MAIN,
             insertbackground=_FG_MAIN, disabledbackground=_BTN_BG,
             disabledforeground=_BTN_DISABLED, relief="flat", bd=0,
             highlightthickness=1, highlightbackground=_BORDER, highlightcolor=_ACCENT,
@@ -519,6 +522,7 @@ class Overlay:
         # 激活过程中会有焦点变化（可能触发 FocusOut）；这段时间内的提交请求一律忽略，
         # 否则「第二次编辑」会在用户还没输入时就把上一次的残留文本提交掉。
         self._activating = True
+        cleared = False
         try:
             user32 = ctypes.windll.user32
             user32.GetWindowLongW.restype = ctypes.c_long
@@ -527,6 +531,7 @@ class Overlay:
             hwnd = wintypes.HWND(self._hwnd)
             cur = user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
             user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, cur & ~_WS_EX_NOACTIVATE)
+            cleared = True
             self._activate()
             # 只给 Entry 设焦点：不要再 focus_force() 顶层——那会把焦点从 Entry 上挪走，
             # 反过来触发 FocusOut 并当场结束编辑（实测：第二次点击必中此坑）。
@@ -535,8 +540,18 @@ class Overlay:
             self._edit_gen += 1
             self._edit_started = time.monotonic()
             self._entry_repeat.select_range(0, "end")
-        except Exception:
-            pass
+        except Exception as e:
+            # 中间任何一步失败都必须回滚：清掉了 NOACTIVATE 却没进编辑态，
+            # 悬浮框会一直处于"可以被点成前台"的状态，而且**此后点数字再也不会生效**
+            # （_editing_repeat 始终 False → 提交/取消全部早退）。这类半途状态很难重启，
+            # 所以这里既恢复样式，也把原因写进日志。
+            enginelog.warn("进入循环次数编辑失败，已回滚：%r", e)
+            # 同时打印：测试与源码运行（没走 enginelog.setup()）时也能看见，否则这类
+            # 被吞掉的异常只能靠"点了没反应"来猜
+            print(f"[overlay] 进入循环次数编辑失败，已回滚：{e!r}", flush=True)
+            self._editing_repeat = False
+            if cleared:
+                self._apply_window_flags()
         finally:
             self._activating = False
         return "break"  # 阻止继续传递给拖拽处理
