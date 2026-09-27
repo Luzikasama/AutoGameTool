@@ -10,6 +10,15 @@ except Exception:
     except Exception:
         pass
 
+# 日志要尽早接管：打包成无控制台后 stdout/stderr 都是 None，代码里原有的 print 会直接抛异常；
+# 而且放在重依赖导入之前，才能把「导入失败」这类启动期异常也记进日志文件。
+try:
+    import enginelog
+
+    _LOG_PATH = enginelog.setup()
+except Exception:  # 日志不可用时引擎照常运行
+    _LOG_PATH = None
+
 import asyncio
 import os
 import secrets
@@ -35,6 +44,12 @@ from picker import CoordinatePicker
 from recorder import Recorder
 from window import capture_window, find_webui_window, focus_window, get_window_rect, is_minimized, list_windows
 from ws_manager import manager
+
+# 把「推给前端的日志」同时落盘：这样页面关掉/WebSocket 断开之后，运行过程仍然可查
+try:
+    manager.on_broadcast = enginelog.note_broadcast if _LOG_PATH else None
+except Exception:  # 日志模块不可用（导入失败）时不影响引擎
+    manager.on_broadcast = None
 
 
 def get_frontend_dir() -> Path:
@@ -367,6 +382,7 @@ overlay.configure(on_close=_overlay_closed, on_action=_overlay_action)
 def _setup_hotkey() -> None:
     global hotkey_manager, picker, recorder, _loop
     _loop = asyncio.get_running_loop()
+    enginelog.install_loop_handler(_loop)
 
     def _cb() -> None:
         if _loop:
@@ -411,7 +427,15 @@ async def lifespan(_: FastAPI):
     overlay.start(enabled=bool(appconfig.get("overlay", False)))
     # 运行状态看门狗：悬浮框没有前端的 /run/state 轮询，靠它自愈
     watchdog = _spawn(_state_watchdog())
+    st = overlay.state()
+    enginelog.info(
+        "引擎就绪：监听 127.0.0.1:8765，悬浮框 enabled=%s available=%s%s",
+        st.get("enabled"), st.get("available"),
+        f" 错误={st.get('error')}" if st.get("error") else "",
+    )
     yield
+    # 走到这里说明是「优雅退出」；把清理过程记下来，便于区分正常退出与异常终止
+    enginelog.info("开始清理：停悬浮框 / 停流程 / 注销钩子")
     watchdog.cancel()
     overlay.stop()
     executor.stop()
@@ -421,9 +445,10 @@ async def lifespan(_: FastAPI):
         picker.stop()
     if recorder:
         recorder.stop_all()
+    enginelog.info("清理完成，引擎退出")
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.7.2", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.7.3", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -433,6 +458,9 @@ app = FastAPI(title="AutoGameTool Engine", version="0.7.2", lifespan=lifespan)
 # 3) 校验 Host 头，防 DNS rebinding。
 # 自动化测试可设 AUTOGAMETOOL_TOKEN 固定令牌。
 _ENGINE_TOKEN = os.environ.get("AUTOGAMETOOL_TOKEN", "").strip() or secrets.token_urlsafe(24)
+# 告诉日志层：这串字面量必须被抹掉。无论它以什么形式出现在日志里（URL 参数、请求头、
+# 或某处异常把请求原样回显），都会被替换成 *** ——不只是靠 "token=" 这个模式去猜。
+enginelog.register_secret(_ENGINE_TOKEN)
 _DEV_MODE = os.environ.get("AUTOGAMETOOL_DEV", "").strip().lower() in ("1", "true", "yes", "on")
 _ENTRY_URL = f"http://127.0.0.1:8765/?token={_ENGINE_TOKEN}"
 
@@ -491,7 +519,7 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.7.2"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.7.3"}
 
 
 @app.get("/debug/kb")
@@ -800,6 +828,7 @@ async def _close_when_no_page() -> None:
         return
     if manager.connections:
         return  # 宽限期内连回来了（刷新页面 / 前端热更新）
+    enginelog.log_exit(f"WebUI 页面全部断开且 {_CLOSE_GRACE_SEC:.0f} 秒内没有重连")
     print("[AutoGameTool] WebUI 已关闭，正在停止流程并退出后端…", flush=True)
     try:
         executor.stop()
@@ -828,6 +857,7 @@ def _request_shutdown() -> None:
     if srv is not None:
         srv.should_exit = True
         return
+    enginelog.warn("拿不到 uvicorn Server 实例，兜底强制退出")
     os._exit(0)
 
 
@@ -836,10 +866,12 @@ async def ws_endpoint(ws: WebSocket):
     global _ever_connected
     # WebSocket 同样校验令牌（网页可跨域发起 WS 连接，不校验则日志/事件全部泄露）
     if not _DEV_MODE and ws.query_params.get("token", "") != _ENGINE_TOKEN:
+        enginelog.warn("WebSocket 令牌校验失败，已拒绝连接")
         await ws.close(code=4401)
         return
     await manager.connect(ws)
     _ever_connected = True
+    enginelog.info("WebUI 已连接（当前 %d 个页面）", len(manager.connections))
     # 有页面连上就取消退出倒计时（含刷新页面时的重连）
     _cancel_close_timer()
     try:
@@ -851,8 +883,11 @@ async def ws_endpoint(ws: WebSocket):
         pass
     finally:
         manager.disconnect(ws)
+        enginelog.info("WebUI 已断开（剩余 %d 个页面）", len(manager.connections))
         # 最后一个页面断开 → 启动「关闭后端」宽限计时
         if not manager.connections:
+            enginelog.warn("已无 WebUI 页面连接；若 %.0f 秒内没有重连，将停止流程并退出后端"
+                           "（可用 AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1 关闭该行为）", _CLOSE_GRACE_SEC)
             _schedule_close_check()
 
 
@@ -876,6 +911,14 @@ if (_frontend_dir / "index.html").is_file():
         return FileResponse(_frontend_dir / "index.html")
 
 
+def _fatal_dialog(title: str, text: str) -> None:
+    """无控制台打包后，启动期致命错误必须用弹窗告知，否则用户只会看到"双击了没反应"。"""
+    try:
+        ctypes.windll.user32.MessageBoxW(None, text, title, 0x10)  # MB_ICONERROR
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     import ctypes
     import uvicorn
@@ -887,6 +930,7 @@ if __name__ == "__main__":
     _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     _single_mutex = _kernel32.CreateMutexW(None, False, "AutoGameTool_SingleInstance")
     if _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        enginelog.warn("检测到已有实例在运行，本次启动退出")
         print("[AutoGameTool] 检测到程序已在运行，本次启动退出（避免多开导致快捷键冲突）。", flush=True)
         threading.Thread(target=lambda: webbrowser.open(_ENTRY_URL), daemon=True).start()
         time.sleep(0.5)
@@ -896,19 +940,34 @@ if __name__ == "__main__":
         time.sleep(1.5)
         webbrowser.open(_ENTRY_URL)
 
+    # 控制台若存在，这里会显示带令牌的完整地址；落盘的那份会被 enginelog 掩成 token=***
     print(f"[AutoGameTool] 编辑器地址: {_ENTRY_URL}", flush=True)
+    enginelog.info("引擎启动：版本 %s，日志文件 %s", app.version, _LOG_PATH or "（不可用）")
 
     # 设置 AUTOGAMETOOL_NO_BROWSER=1 可禁止自动打开浏览器（自动化测试 / 无人值守场景）
     if os.environ.get("AUTOGAMETOOL_NO_BROWSER", "").strip().lower() in ("1", "true", "yes", "on"):
         print("[AutoGameTool] 已按 AUTOGAMETOOL_NO_BROWSER 跳过自动打开浏览器。", flush=True)
+        enginelog.info("已按 AUTOGAMETOOL_NO_BROWSER 跳过自动打开浏览器")
     else:
         threading.Thread(target=_open_browser, daemon=True).start()
 
     # 用 Config/Server 而不是 uvicorn.run：需要持有 Server 实例，
-    # 才能在「用户关闭 WebUI 页面」时请求优雅退出（见 _request_shutdown）
-    _server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8765))
+    # 才能在「用户关闭 WebUI 页面」时请求优雅退出（见 _request_shutdown）。
+    # access_log 关掉：前端每秒两个轮询请求，开着会以每秒两行把日志的轮转窗口冲掉，
+    # 反而看不到关键事件；WS 连接/断开与退出原因都另行显式记录。
+    _server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=8765, access_log=False)
+    )
     try:
         _server.run()
+        enginelog.log_exit("uvicorn 正常结束")
     except OSError as e:
-        print(f"[AutoGameTool] 引擎启动失败：{e}（端口 8765 可能被其他程序占用）", flush=True)
+        msg = f"引擎启动失败：{e}（端口 8765 可能被其他程序占用）"
+        enginelog.error("%s", msg)
+        print(f"[AutoGameTool] {msg}", flush=True)
+        _fatal_dialog("AutoGameTool 启动失败", msg)
         sys.exit(1)
+    except BaseException as e:  # 兜底：任何异常都要留下记录（无控制台时这是唯一的线索）
+        enginelog.error("引擎异常退出：%r", e, exc_info=True)
+        _fatal_dialog("AutoGameTool 异常退出", f"{type(e).__name__}: {e}\n\n详见日志：{_LOG_PATH}")
+        raise

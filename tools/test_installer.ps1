@@ -9,6 +9,9 @@
 #
 #  注意：安装/卸载会写注册表与「开始菜单 / 桌面」，需要有相应权限。
 #        用户数据目录 %APPDATA%\AutoGameTool 会被保留（与安装包行为一致）。
+#        本机若已安装（哪怕当初装到了自定义目录，安装包会沿用注册表里的 InstallDir），
+#        本脚本会先静默卸载旧版、再装到同一目录，最后默认卸载掉。只是想在装好的
+#        副本上跑冒烟测试的话，用： tools\smoke_test.ps1 -ExePath <安装目录>\AutoGameTool.exe
 # ============================================================
 [CmdletBinding()]
 param(
@@ -23,7 +26,15 @@ if (-not $SetupPath) { $SetupPath = Join-Path $root 'AutoGameTool-Setup.exe' }
 if (-not (Test-Path $SetupPath)) { Write-Host "未找到安装包：$SetupPath" -ForegroundColor Red; exit 1 }
 $SetupPath = (Resolve-Path $SetupPath).Path
 
-$installDir = Join-Path $env:LOCALAPPDATA 'AutoGameTool'
+# 安装位置：安装脚本里有 InstallDirRegKey，**只要注册表里记录过 InstallDir 就会沿用那个目录**
+# （升级就地覆盖，不会搬回 %LOCALAPPDATA%）。所以这里必须按实际会用的目录去校验，
+# 否则在「用户当初装到别处」的机器上，这个测试会一路报「文件缺失」却看不出真因。
+$appKey     = 'HKCU:\Software\AutoGameTool'
+$recordedDir = $null
+try { $recordedDir = (Get-ItemProperty -Path $appKey -Name 'InstallDir' -ErrorAction Stop).InstallDir } catch { }
+$installDir = if ($recordedDir) { $recordedDir } else { Join-Path $env:LOCALAPPDATA 'AutoGameTool' }
+$hasPrevInstall = [bool]$recordedDir
+
 $exe        = Join-Path $installDir 'AutoGameTool.exe'
 $readme     = Join-Path $installDir 'README.md'
 $uninst     = Join-Path $installDir 'Uninstall.exe'
@@ -31,8 +42,16 @@ $appDataDir = Join-Path $env:APPDATA 'AutoGameTool'
 $startMenu  = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\AutoGameTool'
 $desktopLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'AutoGameTool.lnk'
 $uninstKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AutoGameTool'
-$appKey     = 'HKCU:\Software\AutoGameTool'
 $appPaths   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\AutoGameTool.exe'
+
+# 期望版本从安装脚本里读，避免像以前那样写死成 '0.1.0' 而永远对不上
+$expectVersion = $null
+$nsi = Join-Path $root 'installer\AutoGameTool.nsi'
+if (Test-Path $nsi) {
+    $m = [regex]::Match((Get-Content $nsi -Raw), '!define\s+APP_VERSION\s+"([^"]+)"')
+    if ($m.Success) { $expectVersion = $m.Groups[1].Value }
+}
+if (-not $expectVersion) { Write-Host '未能从 installer\AutoGameTool.nsi 读到 APP_VERSION' -ForegroundColor Red; exit 1 }
 
 $results = New-Object System.Collections.Generic.List[object]
 function Add-Result([string]$Name, [bool]$Ok, [string]$Detail) {
@@ -57,7 +76,8 @@ function Wait-PathGone([string]$Path, [int]$TimeoutSec) {
 Write-Host "=== AutoGameTool 安装包端到端验证 ===" -ForegroundColor Cyan
 Write-Host "  安装包：$SetupPath"
 Write-Host ("  大小：{0:N1} MB" -f ((Get-Item $SetupPath).Length / 1MB))
-Write-Host "  目标目录：$installDir"
+Write-Host "  目标目录：$installDir  $(if ($hasPrevInstall) { '（沿用注册表里记录的安装位置）' } else { '（默认位置）' })"
+Write-Host "  期望版本：$expectVersion"
 Write-Host ""
 
 # ---------------------------------------------------------- 0. 环境准备
@@ -102,7 +122,7 @@ $il = Get-RegVal $uninstKey 'InstallLocation'
 $di = Get-RegVal $uninstKey 'DisplayIcon'
 $es = Get-RegVal $uninstKey 'EstimatedSize'
 Add-Result '卸载入口 DisplayName'   ($dn -like '*AutoGameTool*') "$dn"
-Add-Result '卸载入口 DisplayVersion' ($dv -eq '0.1.0')           "$dv"
+Add-Result '卸载入口 DisplayVersion' ($dv -eq $expectVersion)    "$dv（期望 $expectVersion）"
 Add-Result '卸载入口 UninstallString' ($us -like '*Uninstall.exe*') "$us"
 Add-Result '卸载入口 QuietUninstallString' ($qs -like '*/S*')     "$qs"
 Add-Result '卸载入口 InstallLocation' ($il -eq $installDir)       "$il"
@@ -115,7 +135,7 @@ Add-Result 'App Paths 注册'          ((Get-RegDefault $appPaths) -eq $exe) "$(
 Write-Host "=== 4. 冒烟测试（运行已安装的 exe）===" -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot 'smoke_test.ps1') -ExePath $exe
 $smokeOk = ($LASTEXITCODE -eq 0)
-Add-Result '冒烟测试' $smokeOk $(if ($smokeOk) { '10 项检查全部通过' } else { "退出码 $LASTEXITCODE" })
+Add-Result '冒烟测试' $smokeOk $(if ($smokeOk) { '已安装的 exe 全部检查通过' } else { "退出码 $LASTEXITCODE" })
 
 # ---------------------------------------------------------- 5. 卸载
 if ($KeepInstalled) {

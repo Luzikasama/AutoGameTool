@@ -11,6 +11,7 @@
   3. 越界/非法输入被夹到 1..9999，非法值保持原值
   4. Esc 放弃编辑并恢复显示
   5. 运行中禁用输入（与 ± 一致），且此时点击不会进入编辑态
+  6. 激活期内（窗口拿不到前台时）的延时判定绝不能拿旧值抢跑提交、把用户的输入吃掉
 
 用法：
     engine\\.venv\\Scripts\\python.exe tools\\test_overlay_edit.py
@@ -175,6 +176,33 @@ def main() -> int:
     check("运行中点击不会进入编辑态（NOACTIVATE 未被解除）",
           bool(ex_style(hwnd) & WS_EX_NOACTIVATE), hex(ex_style(hwnd)))
     ov.set_run_state(False)
+
+    print("== 7. 激活期内（刚点开数字的头几百毫秒）延时判定绝不能提交 ==")
+    ov.set_repeat(5)
+    time.sleep(0.25)
+    # 复现真实场景：点击后 SetForegroundWindow 被系统拒绝，前台仍是别的程序，于是
+    # Tk 的 focus_set 也落不到 Entry 上。旧实现会把这种「激活造成的失焦」误判成
+    # 「用户点到别处」，拿旧值 5 抢先提交并关掉编辑态——紧接着敲进去的数字全部丢失
+    # （本次回归里表现为随机 FAIL，且只在窗口拿不到前台时出现）。
+    # 这里把前台窗口固定为 0 并把 Tk 焦点挪出 Entry，让这条判定路径稳定复现。
+    _fg = overlay_mod.ctypes.windll.user32.GetForegroundWindow
+    overlay_mod.ctypes.windll.user32.GetForegroundWindow = lambda: 0
+    try:
+        n = mark()
+        click_number()                                # 进入编辑态
+        in_tk(lambda: ov._root.focus_set())           # 模拟 focus_set 没落到 Entry
+        time.sleep(0.15)                              # 越过 120ms 的延时判定点
+        in_tk(ov._recheck_repeat_focus)               # 手动触发那次延时判定
+        got = since(n)
+        editing = in_tk(lambda: ov._editing_repeat)
+        check("宽限期内不提交、也不退出编辑态", got == [] and editing, (got, editing))
+        check("并把焦点抢回输入框",
+              in_tk(lambda: ov._root.focus_get() is ov._entry_repeat), '')
+        type_and_enter("123")
+        time.sleep(0.3)
+        check("随后的输入按新值提交", since(n) == ["repeat_set:123"], since(n))
+    finally:
+        overlay_mod.ctypes.windll.user32.GetForegroundWindow = _fg
 
     ov.stop()
     time.sleep(0.8)

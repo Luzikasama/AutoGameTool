@@ -23,6 +23,7 @@ from __future__ import annotations
 import ctypes
 import queue
 import threading
+import time
 from ctypes import wintypes
 from typing import Callable
 
@@ -31,6 +32,10 @@ _MARGIN = 24
 # 循环轮数范围（与引擎侧 _REPEAT_MIN/_REPEAT_MAX 保持一致）
 _REPEAT_MIN = 1
 _REPEAT_MAX = 9999
+# 点开数字后的「激活宽限期」：这段时间里的失焦一律算激活造成的，只把焦点抢回来、不提交。
+# 必须大于 _POLL_MS / 延时判定的 120ms，否则 OS 激活的 FocusOut 会被当成"用户点到别处"，
+# 用上一次的残留文本提前提交（实测：点开数字后立刻打字会丢输入）。
+_EDIT_GRACE_SEC = 0.4
 _WIDTH = 300
 
 _BG = "#0f172a"
@@ -98,6 +103,9 @@ class Overlay:
         self._entry_repeat = None
         self._editing_repeat = False
         self._activating = False
+        # 编辑世代：每次点开数字 +1，用来丢弃上一次编辑遗留的延时判定（见 _recheck_repeat_focus）
+        self._edit_gen = 0
+        self._edit_started = 0.0
         self._progress = None
         self._step_lbl = None
         self._drag_from = (0, 0)
@@ -524,6 +532,8 @@ class Overlay:
             # 反过来触发 FocusOut 并当场结束编辑（实测：第二次点击必中此坑）。
             self._entry_repeat.focus_set()
             self._editing_repeat = True
+            self._edit_gen += 1
+            self._edit_started = time.monotonic()
             self._entry_repeat.select_range(0, "end")
         except Exception:
             pass
@@ -541,15 +551,24 @@ class Overlay:
         if self._activating or not self._editing_repeat:
             return
         try:
-            self._root.after(120, self._recheck_repeat_focus)
+            gen = self._edit_gen
+            self._root.after(120, lambda: self._recheck_repeat_focus(gen))
         except Exception:
             pass
 
-    def _recheck_repeat_focus(self) -> None:
+    def _recheck_repeat_focus(self, gen: int | None = None) -> None:
         if not self._editing_repeat:
             return
+        if gen is not None and gen != self._edit_gen:
+            return  # 上一次编辑遗留的判定，作废（否则会用它留下的旧文本提交）
         try:
             if self._root.focus_get() is self._entry_repeat:
+                return
+            # 刚点开数字的这段时间里失焦，一定是激活过程本身造成的：
+            # 此时窗口还没真正拿到前台，用 GetForegroundWindow 判据会误判成"用户点到别处"，
+            # 于是拿着上一次的残留文本当场提交并结束编辑（表现为刚点开就被踢出、输入丢失）。
+            if time.monotonic() - self._edit_started < _EDIT_GRACE_SEC:
+                self._entry_repeat.focus_set()
                 return
             # 判据：窗口已经不是前台 → 用户真的点到别处去了，按提交处理
             if ctypes.windll.user32.GetForegroundWindow() != self._hwnd:

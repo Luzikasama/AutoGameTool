@@ -232,6 +232,8 @@ AutoGameTool/
 │  ├─ test_state_sync.py      # 端到端：WebUI 与悬浮框启停状态一致、暂停真的冻住、停止真能停
 │  ├─ test_webui_close.py     # 端到端：关闭 WebUI 后后端自动退出（含宽限期保护）
 │  ├─ test_overlay_edit.py    # 悬浮框循环次数编辑（Tk 内部合成事件，不注入系统输入）
+│  ├─ test_engine_log.py      # 运行日志：落盘、轮转、令牌绝不落盘
+│  ├─ test_noconsole_log.ps1  # 打包产物核验：GUI 子系统（无控制台）+ 日志落盘 + 令牌掩码
 │  ├─ test_bg_crop.ps1        # 背景截取几何回归测试（编译 bgCrop.ts 后跑 23 条断言）
 │  ├─ test_bg_crop.js         # 上述断言本体
 │  ├─ check_ui_imports.mjs    # 静态检查：.vue 里用到的 <n-xxx> 是否都 import 了（构建期自动跑）
@@ -277,7 +279,8 @@ AutoGameTool/
    ├─ recorder.py             # alt+9 键鼠录制
    ├─ overlay.py              # ★ 悬浮框（tkinter 置顶小窗，显示循环进度与当前步骤）
    ├─ appconfig.py            # 用户配置读写（%APPDATA%\AutoGameTool\config.json）
-   └─ ws_manager.py           # WebSocket 广播
+   ├─ enginelog.py            # ★ 运行日志落盘（轮转 + 令牌掩码 + 接管 stdout/stderr）
+   └─ ws_manager.py           # WebSocket 广播（含「日志同时落盘」的钩子）
 ```
 
 > 运行时用户数据（模板、配置）位于 `%APPDATA%\AutoGameTool\`。
@@ -592,6 +595,8 @@ ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY
 .\tools\smoke_test.ps1 -ExePath "$env:LOCALAPPDATA\AutoGameTool\AutoGameTool.exe"  # 测安装后的 exe
 ```
 
+> 安装目录以注册表 `HKCU\Software\AutoGameTool\InstallDir` 为准：安装脚本里有 `InstallDirRegKey`，**装过一次之后就会沿用那个目录**（比如你当初装到了 `E:\Apps\AutoGameTool`，升级不会把它搬回 `%LOCALAPPDATA%`）。`.\tools\test_installer.ps1` 也是按这个规则解析安装位置的。
+
 脚本会启动 exe，逐项校验 `/health`、`/debug/kb`（键盘钩子是否存活）、`/windows/list`、`/vision/templates`、`/config/hotkey`、`POST /flow/load` 以及内嵌前端页面与 favicon，最后关闭进程并输出 PASS/FAIL（有失败项时返回 1，可直接用于 CI）。
 
 它顺带处理了两个常见的"假失败"：
@@ -629,12 +634,12 @@ engine\.venv\Scripts\python.exe tools\test_webui_close.py
 engine\.venv\Scripts\python.exe tools\test_overlay_edit.py
 ```
 
-四个脚本合计 **102 条断言**，覆盖的都是「改错了很难靠肉眼发现」的状态逻辑：
+四个脚本合计 **105 条断言**，覆盖的都是「改错了很难靠肉眼发现」的状态逻辑：
 
 - `test_engine_state.py`（50 条）：按住 `alt` 连按两次 `f1` 必须触发两次；长按 `f1` 只触发一次；悬浮框状态去重（值没变不重绘）；`overlay` 模块级 API 完整性；Executor 暂停状态机（空闲暂停无效、停止清暂停、任务结束后 `reconcile` 复位）；**WebUI 窗口定位只认浏览器**（造一个标题唯一的非浏览器窗口，断言它必须被拒绝——旧版会返回它）；循环轮数直接输入的夹取与同步
 - `test_state_sync.py`（32 条）：`/run` 之后 `/run/state` 与 `/overlay/state` 必须同时为「运行中」；`/run/stop` 后两边都回到「未运行」；长延时能被立刻中断；反复停止幂等；**暂停必须真的冻住流程**（暂停 6.5 秒后 5 秒的延时仍未结束）、继续后正常跑完、暂停中也能停止、空闲暂停不产生假状态
 - `test_webui_close.py`（7 条）：从未有页面连接过 → 永不退出；断开 → 宽限期后退出；断开后立刻重连（模拟 F5）→ **不退出**，最终断开才退出
-- `test_overlay_edit.py`（13 条）：点击数字进入编辑态（`WS_EX_NOACTIVATE` 被临时解除）；输入并回车发出 `repeat_set:<n>`、提交后恢复「不抢焦点」；越界夹到 1–9999、非法输入不产生动作；`Esc` 放弃并恢复显示；运行中禁用且点击不进入编辑态
+- `test_overlay_edit.py`（16 条）：点击数字进入编辑态（`WS_EX_NOACTIVATE` 被临时解除）；输入并回车发出 `repeat_set:<n>`、提交后恢复「不抢焦点」；越界夹到 1–9999、非法输入不产生动作；`Esc` 放弃并恢复显示；运行中禁用且点击不进入编辑态；**激活期内（窗口拿不到前台时）的延时判定绝不能抢跑提交**——把前台窗口固定为 0 并手动触发那次判定，断言编辑态与用户随后输入都不丢
 
 > 端到端脚本会真起一个引擎进程，并把 `APPDATA` 指向项目内 `.tmp\`，因此**不会碰你自己的 `%APPDATA%\AutoGameTool` 配置**（顺带保证测试期间悬浮框是关的、不弹窗）。它们需要 8765 端口空闲：先退出正在运行的 AutoGameTool。
 >
@@ -657,16 +662,33 @@ engine\.venv\Scripts\python.exe tools\test_overlay_edit.py
 
 脚本按真实用户路径跑一遍完整闭环，共 25 项断言：
 
-1. 静默安装（`/S`）到 `%LOCALAPPDATA%\AutoGameTool`
+1. 静默安装（`/S`）：安装位置为注册表记录的 `InstallDir`（首次安装即 `%LOCALAPPDATA%\AutoGameTool`）
 2. 校验主程序 / README / Uninstall.exe 是否落盘
 3. 校验开始菜单 3 个快捷方式与桌面快捷方式
-4. 校验注册表：`DisplayName`、`DisplayVersion`、`UninstallString`、`QuietUninstallString`、`InstallLocation`、`DisplayIcon`、`EstimatedSize`、`App Paths`
+4. 校验注册表：`DisplayName`、`DisplayVersion`（期望值从 `installer/AutoGameTool.nsi` 的 `APP_VERSION` 读出，不写死）、`UninstallString`、`QuietUninstallString`、`InstallLocation`、`DisplayIcon`、`EstimatedSize`、`App Paths`
 5. 对**已安装的 exe** 跑一遍 `smoke_test.ps1`
 6. 静默卸载，校验安装目录 / 快捷方式 / 注册表项均已清理，且**用户数据被保留**
 
 > 注意：该脚本会写注册表与「开始菜单 / 桌面」，需要相应权限；它不会删除 `%APPDATA%\AutoGameTool`（模板与配置）。
+>
+> 它**会先卸载本机已安装的副本再重装**（安装包自身的行为就是升级前先静默卸载旧版）。只想在已装好的副本上跑冒烟测试、不动安装的话，用 `.\tools\smoke_test.ps1 -ExePath <安装目录>\AutoGameTool.exe`。
 
-### 9.10 发布 Release
+### 9.10 打包产物核验（无控制台 + 日志落盘）
+
+```powershell
+.\tools\test_noconsole_log.ps1                    # 默认测根目录的 AutoGameTool.exe
+.\tools\test_noconsole_log.ps1 -ExePath <路径>     # 测别的副本
+```
+
+针对 v0.7.3 的两条硬要求，在**打包产物**上核验（10 项检查）：
+
+1. `AutoGameTool.exe` 是 **GUI 子系统**（PE 头 `Subsystem = 2`），不会分配控制台。同一段检测代码对 `engine\.venv\Scripts\python.exe` 读出 `3`（控制台）作为阳性对照——否则「没看到控制台窗口」可能只是检测本身失效
+2. 启动产物后枚举它的**全部顶层窗口**（`--onefile` 同时存在「父 bootloader」与「真正跑 Python 的子进程」两个同名进程，两个都要查），断言没有任何控制台类窗口（`ConsoleWindowClass` / `CASCADIA_HOSTING_WINDOW_CLASS` 等），并且确实看到了悬浮框的 `TkTopLevel`
+3. `%APPDATA%\AutoGameTool\engine.log` 被创建、含带版本号的启动记录，且日志里的 `token=` 已掩成 `***`、**不含启动时传入的真实令牌**
+
+> 脚本用固定令牌（`AUTOGAMETOOL_TOKEN`）启动产物，才能断言「真令牌没有落盘」；它不注入任何真实鼠标 / 键盘，只在开始时把已有的 `engine.log` 备份到 `.tmp\`。运行前需 8765 端口空闲。
+
+### 9.11 发布 Release
 
 安装包构建完成后，用 GitHub CLI 上传到 Releases：
 
@@ -1037,6 +1059,7 @@ v0.7.0 改成「引擎是唯一事实来源」：
 | 找不到「首页 / 新建脚本 / 编辑脚本」入口 | v0.7.2 起**首页已彻底移除**，界面只有一个：编辑器。`/` 与任何未匹配路径都进编辑器；新建脚本在右上角「保存」左边 |
 | 暂停点了没马上停 | 暂停在**检查点**生效（节点边界 / 延时的 250ms 小睡）。如果当前正在找图或回放宏，会等这个节点结束才停——这两类节点都有超时/时长上界。见 [10.16](#1016-暂停的语义与生效位置v071-起) |
 | 暂停后进度条不动，是卡死了吗 | 不是。悬浮框会显示 `⏸ 已暂停 · 第 n/m 轮`，日志也会记「已暂停」。点「▶ 继续」从原地接着跑 |
+| **后端突然不见了，怎么查原因** | 打开 `%APPDATA%\AutoGameTool\engine.log`（v0.7.3 起）。它会记下启动信息、全部运行日志、WebUI 连接/断开、以及**退出原因**。常见几行：`WebUI 已断开（剩余 0 个页面）` + `引擎退出：WebUI 页面全部断开且 6 秒内没有重连` = 页面断连触发了自动退出（想禁掉就设 `AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1`）；`清理完成，引擎退出` = 正常优雅退出；日志末尾停在某一步且没有退出记录 = 进程被外部终止（例如被结束进程）。共 4 个文件：`engine.log` 与 `engine.log.1~.3`（各 2MB 轮转） |
 | 背景图设置了但换台电脑就没了 | 有意为之：背景只存本机浏览器 `localStorage`，不上传引擎、不写进 `.agflow`。见 [10.17](#1017-自定义背景选图--按屏幕比例截取--透明度v071-起) |
 | 设了背景后文字看不清 | 把「设定 → 透明度」调低；画布与面板本身有一层暗色底，正常不会影响可读性 |
 | 背景图保存失败/重启后丢失 | 图片太大撞了 `localStorage` 约 5MB 的配额。设置面板会提示；换一张更小的图，或调低分辨率再选 |
@@ -1098,6 +1121,41 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 ---
 
 ## 14. 更新日志
+
+### v0.7.3 —— 2026-09-27
+
+后端意外退出后**查不到任何日志** —— 这一版把这件事补上：运行日志落盘 + 打包去掉控制台窗口。
+
+#### ✨ 新增
+
+- **运行日志落盘**：`%APPDATA%\AutoGameTool\engine.log`（UTF-8，2MB 轮转，保留 3 份备份）
+  - 记录内容：启动信息（版本、悬浮框可用性）、**推给前端的全部运行日志**（含步骤名与级别）、状态 / 悬浮框 / 轮数事件、WebUI 连接与断开、以及**退出原因**
+  - 前端那份日志是内存态，页面一关就没了；现在即使 WebSocket 断开、页面被关掉，运行过程仍可在文件里事后查看
+  - 刻意**不**记录键鼠录制的完整事件数组（`recorded`）：体积大，写进去只会把有用信息挤出轮转窗口
+  - 刻意**关掉 uvicorn 访问日志**：前端每秒两个轮询请求，开着会以每秒两行冲掉轮转窗口；WS 连接/断开与退出原因改为显式记录
+  - `print()` / 第三方库写 stdout、stderr 的内容也会被接管进日志；**子线程（Tk、钩子）的未捕获异常**与 asyncio 未处理异常都会记下来——这类异常默认是静默消失的
+  - 🔒 **日志里绝不出现访问令牌**：`token=xxx`、`Authorization: Bearer xxx`，以及引擎启动时登记的本地令牌字面量，全部掩成 `***`（引擎打印的编辑器地址、uvicorn 访问日志都带 `token=`，不掩就等于把令牌写进文件）
+  - 日志不可用时（目录不可写等）引擎照常运行，失败原因记录在 `enginelog.last_error()`
+- **关于运行日志怎么用**，见 [11. 常见问题](#11-常见问题与排错) 的「后端突然不见了，怎么查原因」
+
+#### 🔧 变更
+
+- **打包不再创建控制台窗口**（PyInstaller `--noconsole`）
+  - 理由一：那是个**可以被点掉的窗口**。流程回放是「真实输入 + 绝对坐标点击」，脚本完全可能点到自己的控制台 ✕ 上，把后端当场杀掉
+  - 理由二：挂机时它还会占屏幕、抢焦点
+  - 代价与配套：stdout/stderr 不再存在，**所有输出只进日志文件**（所以本版必须先有落盘日志）；启动期致命错误（如端口被占用）改为弹原生错误框，否则「双击了没反应」将无从判断
+
+#### 🐛 修复
+
+- **悬浮框「点开循环次数后立刻打字，输入会丢」**（本版回归测试里发现的竞态）
+  - 成因：点开数字时窗口要被临时激活，OS 激活本身会送来一次失焦。旧实现用「悬浮框是否还是前台窗口」来区分「激活造成的失焦」与「用户点到别处」，而**激活刚发生时悬浮框还没拿到前台**，于是被误判成后者：拿编辑框里上一次的残留数字抢先提交，并当场结束编辑态，用户紧接着敲进去的数字全部丢失
+  - 修复：进入编辑后的 400 毫秒内，失焦一律判定为激活造成——只把焦点抢回输入框，绝不提交；同时给每次编辑编号，丢弃上一次编辑遗留的延时判定（否则它会用旧文本提交）
+  - 只有在「点击数字后 400 毫秒仍然拿不到前台」这种极端情况下行为才有差别，真实点击路径不受影响
+
+#### 📝 文档
+
+- FAQ 新增「后端突然不见了，怎么查原因」；目录结构补 `engine/enginelog.py`、`tools/test_engine_log.py` 与 `tools/test_noconsole_log.ps1`（在打包产物上核验「无控制台 + 日志落盘 + 令牌掩码」）
+- 回归测试总量：拆分/打包 52 + 背景几何 23 + 引擎状态 50 + 启停/暂停 32 + 关闭页面 7 + 悬浮框编辑 16 + **运行日志 16** = **196 条断言**
 
 ### v0.7.2 —— 2026-09-26
 

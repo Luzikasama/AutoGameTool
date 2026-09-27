@@ -64,8 +64,14 @@ if (-not (Test-Path (Join-Path $dist "index.html"))) {
 
 Push-Location (Join-Path $root "engine")
 try {
+    # --noconsole（= --windowed）：不创建控制台窗口。两个理由：
+    #   1) 那是个可以被点掉的窗口 —— 流程回放是「真实输入 + 绝对坐标点击」，
+    #      脚本完全可能点到它自己的控制台 ✕ 上，把后端当场杀掉（v0.7.2 事故的可疑成因之一）；
+    #   2) 挂机时它还会抢屏幕/焦点。
+    # 代价：stdout/stderr 不再存在，**所有输出只进 %APPDATA%\AutoGameTool\engine.log**
+    #（engine/enginelog.py 会接管 sys.stdout/stderr，所以原有的 print 不会抛异常）。
     $pyiArgs = @(
-        "--noconfirm", "--clean", "--onefile", "--name", "AutoGameTool",
+        "--noconfirm", "--clean", "--onefile", "--noconsole", "--name", "AutoGameTool",
         "--add-data", "$dist;frontend_dist",
         "--hidden-import", "uvicorn.logging",
         "--hidden-import", "uvicorn.loops.auto",
