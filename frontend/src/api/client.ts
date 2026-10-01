@@ -68,6 +68,27 @@ export function engineWsUrl(): string {
   return `${proto}//${window.location.host}/ws${suffix}`
 }
 
+/**
+ * 页面主动告别（关闭标签页 / 跳转离开）。
+ *
+ * 为什么需要：引擎**不再因为「页面不见了」就退出**（否则浏览器把后台标签页挂起、
+ * 或标签页被系统丢弃时，挂机被中断、悬浮框一起消失——本机实测踩过）。
+ * 但「用户确实关了页面」仍然应该把后端一起关掉，所以由页面在 pagehide 时明确报一声。
+ * 用 sendBeacon：页面卸载过程中它仍能发出，且不会随页面销毁被取消。
+ */
+export function goodbyeBeacon(): void {
+  try {
+    const url = `${BASE}/goodbye${TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : ''}`
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(url, '')
+      return
+    }
+    fetch(url, { method: 'POST', keepalive: true }).catch(() => {})
+  } catch {
+    /* 告别失败不影响页面卸载 */
+  }
+}
+
 export const engine = {
   health: () => apiGet('/health'),
   listWindows: () => apiGet<{ windows: WindowInfo[] }>('/windows/list'),

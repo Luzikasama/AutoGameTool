@@ -1,16 +1,17 @@
-"""端到端测试：关闭 WebUI 页面后，后端应自动退出。
+"""端到端测试：页面离开后端会不会跟着退出（v0.8.1 起的新规则）。
 
-这是本次改动里「最容易误伤用户」的一条：
-万一判定写错，刷新一下页面（F5）就会把后端一起关掉。因此这里把三种时序都测一遍：
-
-  1. 从未有页面连过          → 永不退出（NO_BROWSER 无人值守 / 冒烟测试场景）
-  2. 连上再断开              → 宽限期后退出
-  3. 断开后立刻重连（模拟刷新）→ 不退出；最终断开后才退出
+规则（都是被真机事故逼出来的）：
+  1. 从未有页面连过            → 永不退出（NO_BROWSER 无人值守 / 冒烟测试场景）
+  2. 页面**静默掉线**          → **不退出**（浏览器挂起/丢弃标签页、崩溃都长这样，
+                                 挂机不能因此中断——实测踩过：6 秒后引擎自杀、悬浮框消失）
+  3. 断开后立刻重连（模拟 F5）  → 不退出
+  4. 页面**主动告别**（/goodbye）→ 宽限期后退出（用户确实关了页面）
+  5. 流程**正在运行**时告别     → 不退出（挂机优先）
+  6. AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1 → 恢复旧行为：静默掉线也退出
 
 实现要点：
   - 用同一个解释器跑 engine/main.py，不依赖打包产物（跑得快、失败信息全）
   - APPDATA 指向项目内 .tmp 目录：**绝不碰用户自己的 %APPDATA%\\AutoGameTool**
-    （顺带保证悬浮框是关闭的，测试期间不弹窗）
   - 引擎输出重定向到文件而不是管道：受限环境下管道容易出问题，文件更稳
 
 用法：
@@ -21,12 +22,14 @@
      engine\\.venv\\Scripts\\python.exe tools\\test_webui_close.py
 """
 import asyncio
+import json
 import os
 import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -44,7 +47,8 @@ PORT = 8765
 BASE = f"http://127.0.0.1:{PORT}"
 WS_URL = f"ws://127.0.0.1:{PORT}/ws"
 TOKEN = "e2e-close-test"
-GRACE = 6.0            # 与 engine/main.py 的 _CLOSE_GRACE_SEC 一致
+GRACE = 6.0            # 旧行为的宽限期（EXIT_ON_PAGE_LOSS=1 时使用）
+GOODBYE_GRACE = 5.0    # 页面主动告别后的宽限期（与 engine/main.py 的 _GOODBYE_GRACE_SEC 一致）
 TMP = ROOT / ".tmp"
 
 _pass = 0
@@ -61,12 +65,15 @@ def check(name: str, cond: bool, extra: object = "") -> None:
         print("  FAIL  " + name + (("  -> " + str(extra)) if extra != "" else ""))
 
 
-def engine_env() -> dict:
+def engine_env(extra: dict | None = None) -> dict:
     env = dict(os.environ)
     env["APPDATA"] = str(TMP / "e2e-appdata")
     env["AUTOGAMETOOL_NO_BROWSER"] = "1"
     env["AUTOGAMETOOL_TOKEN"] = TOKEN
-    env.pop("AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE", None)  # 确保测的是默认行为
+    env.pop("AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE", None)
+    env.pop("AUTOGAMETOOL_EXIT_ON_PAGE_LOSS", None)
+    if extra:
+        env.update(extra)
     return env
 
 
@@ -81,7 +88,7 @@ def port_free() -> bool:
         s.close()
 
 
-def start_engine(tag: str) -> tuple:
+def start_engine(tag: str, extra_env: dict | None = None) -> tuple:
     log_path = TMP / f"e2e-engine-{tag}.log"
     log = open(log_path, "w", encoding="utf-8")
     if TEST_EXE:
@@ -92,7 +99,7 @@ def start_engine(tag: str) -> tuple:
     else:
         cmd, cwd = [str(PY), "main.py"], str(ENGINE)
     proc = subprocess.Popen(
-        cmd, cwd=cwd, env=engine_env(),
+        cmd, cwd=cwd, env=engine_env(extra_env),
         stdout=log, stderr=subprocess.STDOUT,
     )
     for _ in range(80):
@@ -144,8 +151,65 @@ def wait_exit(proc, seconds: float) -> float:
     return -1.0
 
 
+def api(path: str) -> int:
+    req = urllib.request.Request(BASE + path + f"?token={TOKEN}", data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        return -1
+
+
+def api_no_token(path: str) -> int:
+    """不带令牌调用（用于确认这些接口确实要鉴权）。"""
+    req = urllib.request.Request(BASE + path, data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        return -1
+
+
+def log_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def engine_log_mark() -> int:
+    """产物日志（enginelog 写的那份）当前长度：断言只看本轮新增的部分。"""
+    p = TMP / "e2e-appdata" / "AutoGameTool" / "engine.log"
+    try:
+        return p.stat().st_size
+    except Exception:
+        return 0
+
+
+def engine_log_since(mark: int) -> str:
+    """读引擎日志（enginelog 落盘那份）从 mark 开始的内容。
+
+    为什么不用 stdout 那份：enginelog 把日志写进文件，stdout 只留 print 的内容。
+    必须共享读（FileShare.ReadWrite），否则日志开着时读会报"正由另一进程使用"。
+    """
+    p = TMP / "e2e-appdata" / "AutoGameTool" / "engine.log"
+    try:
+        fs = open(p, "rb")
+    except Exception:
+        return ""
+    try:
+        fs.seek(mark)
+        return fs.read().decode("utf-8", errors="replace")
+    finally:
+        fs.close()
+
+
 async def ws_hold(seconds: float) -> None:
-    """连上 WebSocket、保持一会儿、然后正常关闭（模拟关掉页面）。"""
+    """连上 WebSocket、保持一会儿、然后关闭（模拟标签页被挂起/丢弃后 socket 断掉）。"""
     import websockets
 
     async with websockets.connect(f"{WS_URL}?token={TOKEN}", open_timeout=6) as ws:
@@ -153,40 +217,21 @@ async def ws_hold(seconds: float) -> None:
         await asyncio.sleep(seconds)
 
 
-class RefreshScenario(threading.Thread):
-    """在独立线程里跑「断开 → 重连 → 保持 → 再断开」。
-
-    必须放到线程里：主线程要在「已重连、且已超过一个宽限期」的那一刻
-    检查进程是否还活着，不能等整个协程跑完（那时计时器已经重新开始了）。
-    """
-
-    def __init__(self) -> None:
-        super().__init__(daemon=True)
-        self.reconnected = threading.Event()
-        self.finished = threading.Event()
-        self.error: Exception | None = None
-
-    def run(self) -> None:
-        try:
-            asyncio.run(self._run())
-        except Exception as e:  # 传到主线程再断言，避免线程里静默失败
-            self.error = e
-        finally:
-            self.finished.set()
-
-    async def _run(self) -> None:
-        import websockets
-
-        ws = await websockets.connect(f"{WS_URL}?token={TOKEN}", open_timeout=6)
-        await ws.send("hello")
-        await ws.close()                       # 断开 → 引擎开始 6 秒倒计时
-        await asyncio.sleep(2.0)               # 在宽限期内重连（相当于按了 F5）
-        ws2 = await websockets.connect(f"{WS_URL}?token={TOKEN}", open_timeout=6)
-        await ws2.send("hello")
-        self.reconnected.set()
-        # 保持连接超过一个宽限期：主线程会在这段时间里确认进程没被误杀
-        await asyncio.sleep(GRACE + 3.0)
-        await ws2.close()                      # 最终断开 → 引擎应退出
+def start_long_flow() -> None:
+    """通过 HTTP 让引擎跑一个 30 秒的流程（模拟挂机中）。"""
+    flow = {
+        "name": "webui-close-test",
+        "repeat": 1,
+        "input_mode": "simulated",
+        "nodes": [{"id": "n1", "type": "delay", "params": {"ms": 30000}}],
+        "edges": [],
+    }
+    body = json.dumps({"flow": flow}).encode("utf-8")
+    req = urllib.request.Request(
+        BASE + "/run", data=body, method="POST",
+        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
+    )
+    urllib.request.urlopen(req, timeout=5).read()
 
 
 def main() -> int:
@@ -207,32 +252,76 @@ def main() -> int:
         stop_engine(proc)
         log.close()
 
-    print("== 用例 2：连上再断开 → 宽限期后退出 ==")
+    print("== 用例 2：页面静默掉线（挂起/丢弃/崩溃）→ 不再退出 ==")
+    mark = engine_log_mark()
     proc, log, log_path = start_engine("2")
     try:
         asyncio.run(ws_hold(1.0))
-        took = wait_exit(proc, GRACE + 14.0)
-        check("断开后自动退出", took >= 0, "超时未退出")
-        if took >= 0:
-            check(f"退出时机不早于宽限期({GRACE}s)", took >= GRACE - 1.0, f"{took:.1f}s")
+        took = wait_exit(proc, GRACE + 6.0)
+        check("静默掉线后进程仍存活（挂机不中断）", took < 0, f"{took:.1f}s 后退出")
+        txt = engine_log_since(mark)
+        check("日志写明「后端继续运行，等待页面重连」", "后端继续运行" in txt, txt[-300:])
+        try:
+            urllib.request.urlopen(BASE + "/health", timeout=3).read()
+            check("掉线后 /health 仍可访问", True)
+        except Exception as e:  # noqa: BLE001
+            check("掉线后 /health 仍可访问", False, e)
+        asyncio.run(ws_hold(1.0))
+        check("掉线后页面重连成功且进程存活", proc.poll() is None, f"exit={proc.poll()}")
     finally:
         stop_engine(proc)
         log.close()
 
-    print("== 用例 3：断开后立刻重连（模拟刷新页面）→ 不应退出，最终断开才退出 ==")
+    print("== 用例 3：断开后重连（模拟刷新页面）→ 不退出；主动告别 → 退出 ==")
+    mark = engine_log_mark()
     proc, log, log_path = start_engine("3")
     try:
-        th = RefreshScenario()
-        th.start()
-        got = th.reconnected.wait(timeout=15.0)
-        check("已成功重连", got, "重连超时")
-        # 重连后已经过了一个宽限期：此刻进程必须还活着
-        time.sleep(GRACE + 1.0)
-        check("重连后进程仍存活（刷新页面不会关掉后端）", proc.poll() is None, f"exit={proc.poll()}")
-        th.finished.wait(timeout=15.0)
-        check("场景线程无异常", th.error is None, th.error)
-        took = wait_exit(proc, GRACE + 14.0)
-        check("最终断开后自动退出", took >= 0, "超时未退出")
+        asyncio.run(ws_hold(0.5))
+        time.sleep(1.5)                      # 宽限期内重连
+        asyncio.run(ws_hold(GRACE + 2.0))    # 再保持超过一个旧宽限期
+        check("刷新式重连后进程存活", proc.poll() is None, f"exit={proc.poll()}")
+        check("告别接口需要令牌（无令牌 401）", api_no_token("/goodbye") == 401, api_no_token("/goodbye"))
+        code = api("/goodbye")
+        check("告别接口返回 200", code == 200, code)
+        took = wait_exit(proc, GOODBYE_GRACE + 14.0)
+        check("主动告别后自动退出", took >= 0, "超时未退出")
+        if took >= 0:
+            check(f"退出不早于告别宽限期({GOODBYE_GRACE}s)", took >= GOODBYE_GRACE - 1.5, f"{took:.1f}s")
+        txt = engine_log_since(mark)
+        check("日志记录了「页面主动关闭（收到告别信号）」",
+              "页面主动关闭（收到告别信号）" in txt, txt[-400:])
+    finally:
+        stop_engine(proc)
+        log.close()
+
+    print("== 用例 4：流程正在运行时告别 → 不退出（挂机优先） ==")
+    mark = engine_log_mark()
+    proc, log, log_path = start_engine("4")
+    try:
+        # 必须真的连过一次页面：否则「从未有页面连过 → 永不退出」这条规则先挡住了，
+        # 测不到「运行中不退后端」这个分支（第一版就踩了这个坑）
+        asyncio.run(ws_hold(0.5))
+        start_long_flow()
+        check("长流程已开始运行", proc.poll() is None, f"exit={proc.poll()}")
+        code = api("/goodbye")
+        check("运行中也能收到告别", code == 200, code)
+        time.sleep(GOODBYE_GRACE + 3.0)
+        check("运行中不退后端（悬浮框与挂机保留）", proc.poll() is None, f"exit={proc.poll()}")
+        txt = engine_log_since(mark)
+        check("日志写明「流程仍在运行，保持后端与悬浮框（不退出）」",
+              "流程仍在运行" in txt, txt[-400:])
+    finally:
+        stop_engine(proc)
+        log.close()
+
+    print("== 用例 5：AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1 → 恢复旧行为 ==")
+    proc, log, log_path = start_engine("5", {"AUTOGAMETOOL_EXIT_ON_PAGE_LOSS": "1"})
+    try:
+        asyncio.run(ws_hold(1.0))
+        took = wait_exit(proc, GRACE + 16.0)
+        check("显式要求旧行为时，静默掉线仍会退出", took >= 0, "超时未退出")
+        if took >= 0:
+            check(f"退出时机不早于宽限期({GRACE}s)", took >= GRACE - 1.0, f"{took:.1f}s")
     finally:
         stop_engine(proc)
         log.close()

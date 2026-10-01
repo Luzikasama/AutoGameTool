@@ -138,6 +138,9 @@ _last_paused: bool | None = None
 # 必须留宽限：刷新页面(F5)、前端热更新、短暂网络抖动都会先断开 WebSocket 再立刻重连，
 # 若一断开就退出，「刷新一下」会变成「把后端也关了」。
 _CLOSE_GRACE_SEC = 6.0
+# 页面**主动告别**时的宽限（收到 /goodbye 之后）。比刷新所需的时间长一点即可：
+# 刷新时新页面 2 秒内就连回来了，而用户真关页面时这点等待无感。
+_GOODBYE_GRACE_SEC = 5.0
 # 是否曾经有页面连上过。从未连过（NO_BROWSER 无人值守、冒烟测试）时永不自动退出
 _ever_connected = False
 _close_task: "asyncio.Task | None" = None
@@ -222,13 +225,17 @@ async def _await_stop(timeout: float = 2.0) -> None:
 
 
 async def _toggle_run(source: str = "快捷键") -> None:
-    """启停流程：全局快捷键与悬浮框按钮共用这一条链路。
+    """启停流程：全局快捷键、悬浮框按钮与界面按钮共用这一条链路。
 
     关键设计：**「停止」一律在引擎侧直接执行，绝不委托给前端**。
     旧实现无论启停都只广播一个 hotkey、由前端按自己的 store.running 决定方向，
     一旦两边状态有偏差（流程异常结束、前端还没轮询到），
     「停止」就会变成"再启动一次"或被 409 挡掉——表现正是"反复点停止没反应"。
-    启动则必须交给前端发起 /run，因为要用画布上最新的流程。
+
+    启动优先让前端发起 /run（要用画布上最新的流程），但**不再盲目依赖它**：
+    v0.8.1 起会等一小会儿看流程是否真的起来了，没起来就用引擎侧缓存的流程兜底。
+    缓存流程由前端每秒 `/flow/load` 同步，永远是最新的；这条兜底正是为了
+    「页面被系统挂起/丢弃时悬浮框启动按钮失灵」（实测踩到：连点 14 次毫无反应）。
 
     source 只用于日志：出问题时能一眼看出这次动作是快捷键还是悬浮框发起的。
     """
@@ -240,9 +247,21 @@ async def _toggle_run(source: str = "快捷键") -> None:
         await _sync_run_state()
     else:
         await executor.log("info", f"{source}：启动脚本")
+        started = False
         if manager.connections:
             await manager.broadcast({"type": "run_request", "ts": time.time()})
-        else:
+            # 最多等 1.2 秒：页面活着的话 /run 早就到了
+            for _ in range(6):
+                await asyncio.sleep(0.2)
+                if executor.running:
+                    started = True
+                    break
+            if not started:
+                msg = (f"{source}：编辑器页面没有响应启动请求（可能被系统挂起/丢弃），"
+                       "已改用引擎侧缓存的流程启动")
+                enginelog.warn(msg)
+                await executor.log("warn", msg)
+        if not started:
             await executor.toggle()
 
 
@@ -469,16 +488,45 @@ async def lifespan(_: FastAPI):
     enginelog.info("清理完成，引擎退出")
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.8.0", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.8.1", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
 # 而引擎具备操控键鼠、截屏的能力，因此：
-# 1) 所有 API 需要随机令牌（启动时生成，随浏览器 URL 传给前端）；
+# 1) 所有 API 需要随机令牌（随浏览器 URL 传给前端）；
 # 2) 打包运行与前端同源，不需要 CORS——仅开发模式(AUTOGAMETOOL_DEV=1)放开 vite 端口；
 # 3) 校验 Host 头，防 DNS rebinding。
 # 自动化测试可设 AUTOGAMETOOL_TOKEN 固定令牌。
-_ENGINE_TOKEN = os.environ.get("AUTOGAMETOOL_TOKEN", "").strip() or secrets.token_urlsafe(24)
+def _load_or_create_token() -> str:
+    """取本次运行的访问令牌：环境变量 > 已保存的 > 新生成并保存。
+
+    为什么要把令牌**存下来**（v0.8.1）：以前每次启动都是新令牌，于是「程序已在运行时
+    再双击一次」那条路径会用它自己那份**新令牌**打开浏览器页面，而真正在跑的引擎用的是
+    旧令牌 —— 页面永远连不上，日志里只会反复出现「WebSocket 令牌校验失败」（实测踩到）。
+    令牌只保护本机回环端口（防别的网页 CSRF），存在 %APPDATA%\\AutoGameTool 下与
+    config.json 同等权限，不额外扩大攻击面。
+    """
+    env_token = os.environ.get("AUTOGAMETOOL_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    token_file = appconfig.config_dir() / "engine.token"
+    try:
+        if token_file.is_file():
+            saved = token_file.read_text(encoding="utf-8").strip()
+            if len(saved) >= 16:
+                return saved
+    except Exception:
+        pass
+    token = secrets.token_urlsafe(24)
+    try:
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(token, encoding="utf-8")
+    except Exception:
+        pass  # 存不下就本次会话用它，不影响使用
+    return token
+
+
+_ENGINE_TOKEN = _load_or_create_token()
 # 告诉日志层：这串字面量必须被抹掉。无论它以什么形式出现在日志里（URL 参数、请求头、
 # 或某处异常把请求原样回显），都会被替换成 *** ——不只是靠 "token=" 这个模式去猜。
 enginelog.register_secret(_ENGINE_TOKEN)
@@ -489,7 +537,7 @@ _ALLOWED_HOSTS = {"127.0.0.1:8765", "localhost:8765", "[::1]:8765"}
 # 需要令牌保护的 API 前缀（新增 API 路由时必须加入此列表）
 _PROTECTED_PREFIXES = (
     "/debug", "/windows", "/screen", "/vision", "/input",
-    "/flow", "/run", "/config", "/pick", "/record", "/overlay",
+    "/flow", "/run", "/config", "/pick", "/record", "/overlay", "/goodbye",
     "/docs", "/openapi.json",
 )
 _MAX_BODY_BYTES = 64 * 1024 * 1024  # 请求体上限 64MB（防内存 DoS）
@@ -540,7 +588,7 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.8.0"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.8.1"}
 
 
 @app.get("/debug/kb")
@@ -858,8 +906,25 @@ async def record_stop():
 
 # ------------------------------------------------------------ 关闭页面即关闭后端
 def _keep_alive_on_close() -> bool:
-    """是否需要「关掉页面也不退后端」（无人值守挂机场景的逃生开关）。"""
+    """是否「无论如何都不退后端」（无人值守挂机的逃生开关）。"""
     return os.environ.get("AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _exit_on_page_loss() -> bool:
+    """静默掉线（页面被系统挂起/标签页被丢弃/浏览器崩溃）时是否照旧退出后端。
+
+    v0.8.1 起**默认不退出**：区分「用户主动关了页面」与「页面不见了」。
+    只有页面主动告别（前端在 pagehide 时发 /goodbye）才退；静默掉线一律继续跑，
+    这样挂机不会因为浏览器把后台标签页挂起而中断（实测踩过：日志里只有
+    「WebUI 已断开」，6 秒后引擎自己退出、悬浮框一起消失）。
+    需要旧行为时设 AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1。
+    """
+    return os.environ.get("AUTOGAMETOOL_EXIT_ON_PAGE_LOSS", "").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -874,15 +939,23 @@ def _cancel_close_timer() -> None:
     _close_task = None
 
 
-async def _close_when_no_page() -> None:
-    """最后一个页面断开、且宽限期内没有重连 → 停止流程并退出后端。"""
+async def _close_when_no_page(grace: float, reason: str) -> None:
+    """宽限期内没有页面重连 → 停止流程并退出后端。
+
+    grace 由调用方决定：页面主动告别用短宽限（用户确实关了页面），
+    静默掉线要么不退（默认）、要么用旧的长宽限（AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1）。
+    """
     try:
-        await asyncio.sleep(_CLOSE_GRACE_SEC)
+        await asyncio.sleep(grace)
     except asyncio.CancelledError:
         return
     if manager.connections:
         return  # 宽限期内连回来了（刷新页面 / 前端热更新）
-    enginelog.log_exit(f"WebUI 页面全部断开且 {_CLOSE_GRACE_SEC:.0f} 秒内没有重连")
+    if executor.reconcile():
+        # 流程还在跑：绝不因为它而退后端（挂机优先），只记一条日志
+        enginelog.warn("页面已离开但流程仍在运行，保持后端与悬浮框（不退出）")
+        return
+    enginelog.log_exit(f"{reason}，且 {grace:.0f} 秒内没有重连")
     print("[AutoGameTool] WebUI 已关闭，正在停止流程并退出后端…", flush=True)
     try:
         executor.stop()
@@ -893,12 +966,20 @@ async def _close_when_no_page() -> None:
     _request_shutdown()
 
 
-def _schedule_close_check() -> None:
+def _schedule_close_check(grace: float, reason: str) -> None:
     global _close_task
     if not _ever_connected or _keep_alive_on_close():
         return
     _cancel_close_timer()
-    _close_task = _spawn(_close_when_no_page())
+    _close_task = _spawn(_close_when_no_page(grace, reason))
+
+
+@app.post("/goodbye")
+async def goodbye():
+    """页面主动告别（关闭标签页 / 跳转离开）。只有这一条路径会真的关掉后端。"""
+    enginelog.info("编辑器页面主动告别：若 %.0f 秒内没有页面重连就退出后端", _GOODBYE_GRACE_SEC)
+    _schedule_close_check(_GOODBYE_GRACE_SEC, "页面主动关闭（收到告别信号）")
+    return {"ok": True, "grace": _GOODBYE_GRACE_SEC}
 
 
 def _request_shutdown() -> None:
@@ -951,11 +1032,19 @@ async def ws_endpoint(ws: WebSocket):
     finally:
         manager.disconnect(ws)
         enginelog.info("WebUI 已断开（剩余 %d 个页面）", len(manager.connections))
-        # 最后一个页面断开 → 启动「关闭后端」宽限计时
         if not manager.connections:
-            enginelog.warn("已无 WebUI 页面连接；若 %.0f 秒内没有重连，将停止流程并退出后端"
-                           "（可用 AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1 关闭该行为）", _CLOSE_GRACE_SEC)
-            _schedule_close_check()
+            if _keep_alive_on_close():
+                enginelog.warn("已无 WebUI 页面连接；AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1，后端继续运行")
+            elif _exit_on_page_loss():
+                # 旧行为（显式要求时）：静默掉线也退出
+                enginelog.warn("已无 WebUI 页面连接；若 %.0f 秒内没有重连，将停止流程并退出后端"
+                               "（AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1 指定的旧行为）", _CLOSE_GRACE_SEC)
+                _schedule_close_check(_CLOSE_GRACE_SEC, "WebUI 页面全部断开")
+            else:
+                # v0.8.1 默认：静默掉线**不退后端**。页面可能是被系统挂起/丢弃/浏览器崩了，
+                # 而挂机不该因此中断。真正关页面时前端会先发 /goodbye（那条路径才退）。
+                enginelog.warn("已无 WebUI 页面连接；后端继续运行，等待页面重连"
+                               "（只有页面主动告别才会退出）")
 
 
 # ---- 前端静态资源（打包后由引擎同源提供）----

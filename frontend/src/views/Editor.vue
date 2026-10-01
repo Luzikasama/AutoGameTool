@@ -19,7 +19,7 @@ import {
 import StepNode from '../components/StepNode.vue'
 import ScreenCapture from '../components/ScreenCapture.vue'
 import SettingsModal from '../components/SettingsModal.vue'
-import { engine, engineWsUrl, type HotkeyBinding } from '../api/client'
+import { engine, engineWsUrl, goodbyeBeacon, type HotkeyBinding } from '../api/client'
 import { useProjectStore } from '../stores/project'
 import { STEP_META, type FlowFile, type StepType, type WindowInfo } from '../types'
 import {
@@ -1328,6 +1328,8 @@ onMounted(() => {
   // 撤销/重做的历史起点 + 快捷键
   resetHistory()
   window.addEventListener('keydown', onHistoryKey)
+  // 关闭/跳转离开时明确告别一次：引擎据此区分「用户关了页面」与「页面被系统挂起」
+  window.addEventListener('pagehide', goodbyeBeacon)
 })
 onBeforeUnmount(() => {
   destroyed = true
@@ -1337,6 +1339,7 @@ onBeforeUnmount(() => {
   if (stateTimer) clearInterval(stateTimer)
   if (histTimer) clearTimeout(histTimer)
   window.removeEventListener('keydown', onHistoryKey)
+  window.removeEventListener('pagehide', goodbyeBeacon)
 })
 </script>
 

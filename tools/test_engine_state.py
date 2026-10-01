@@ -15,6 +15,7 @@
     engine\\.venv\\Scripts\\python.exe tools\\test_engine_state.py
 """
 import json
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -437,6 +438,100 @@ check("上界夹取：999999 -> 99999", engine_main._set_repeat_to(999999) == 99
 before = engine_main._set_repeat_to(7)
 check("非法输入保持原值", engine_main._set_repeat_to("abc") == before, before)
 check("± 与直接输入共用同一套逻辑", engine_main._change_repeat(1) == 8)
+
+print("== 访问令牌持久化（修「再次启动后页面连不上」）==")
+# 旧实现每次启动都新生成令牌：程序已在运行时再双击一次，那条路径会用它**自己那份新令牌**
+# 打开浏览器页面，而真正在跑的引擎用旧令牌 → 页面永远连不上（实测踩到）。
+_token_file = appconfig.config_dir() / "engine.token"
+if _token_file.exists():
+    _token_file.unlink()
+os.environ.pop("AUTOGAMETOOL_TOKEN", None)
+t1 = engine_main._load_or_create_token()
+t2 = engine_main._load_or_create_token()
+check("两次调用返回同一个令牌", t1 == t2 and len(t1) >= 16, t1[:6] + "...")
+check("令牌已落盘", _token_file.is_file())
+check("落盘内容与返回一致", _token_file.read_text(encoding="utf-8").strip() == t1)
+_token_file.write_text("short", encoding="utf-8")   # 明显非法（太短）
+check("过短的令牌会被重新生成", engine_main._load_or_create_token() not in ("short", t1))
+os.environ["AUTOGAMETOOL_TOKEN"] = "env-token-wins-0123456789"
+check("环境变量优先", engine_main._load_or_create_token() == "env-token-wins-0123456789")
+os.environ.pop("AUTOGAMETOOL_TOKEN", None)
+
+print("== 悬浮框/快捷键「启动」不依赖页面（页面没响应就用缓存流程兜底）==")
+# 实测事故：页面标签页被系统挂起后，悬浮框连点 14 次「启动」毫无反应——因为启动被
+# 无条件委托给页面，而页面已经不执行 JS 了。现在会等一小会儿再兜底。
+
+
+class _FakeManager:
+    def __init__(self) -> None:
+        self.connections = {object()}      # 引擎「以为」有页面连着
+        self.sent: list = []
+
+    async def broadcast(self, msg) -> None:
+        self.sent.append(msg)
+
+
+class _FakeExecutor:
+    def __init__(self) -> None:
+        self.running = False
+        self.toggled = 0
+        self.logs: list = []
+        self.current_flow = {"name": "fake"}
+
+    def reconcile(self) -> bool:
+        return self.running
+
+    async def log(self, level, msg, step=None) -> None:
+        self.logs.append((level, msg))
+
+    async def toggle(self) -> None:
+        self.toggled += 1
+
+
+async def _wait_start_fallback(manager, executor):
+    """用假对象跑一遍 _toggle_run 的启动分支。"""
+    real_m, real_e = engine_main.manager, engine_main.executor
+    engine_main.manager, engine_main.executor = manager, executor
+    try:
+        await engine_main._toggle_run("测试")
+    finally:
+        engine_main.manager, engine_main.executor = real_m, real_e
+
+
+_fm, _fe = _FakeManager(), _FakeExecutor()
+asyncio.run(_wait_start_fallback(_fm, _fe))
+check("先广播了 run_request（页面活着的话由它启动）",
+      any(m.get("type") == "run_request" for m in _fm.sent), _fm.sent)
+check("页面没响应时用引擎缓存流程兜底启动", _fe.toggled == 1, _fe.toggled)
+check("日志说明了「页面没有响应」",
+      any("没有响应" in m for _, m in _fe.logs), _fe.logs)
+
+# 页面正常响应（流程真的起来了）时不该再兜底启动一次，否则会重复触发
+class _FakeExecutorStarted(_FakeExecutor):
+    async def toggle(self) -> None:
+        self.toggled += 1
+
+
+_fm2, _fe2 = _FakeManager(), _FakeExecutorStarted()
+
+
+async def _page_responds():
+    real_m, real_e = engine_main.manager, engine_main.executor
+    engine_main.manager, engine_main.executor = _fm2, _fe2
+    try:
+        # 模拟页面收到 run_request 后真的把流程跑起来了
+        async def _mark_running():
+            await asyncio.sleep(0.25)
+            _fe2.running = True
+        task = asyncio.create_task(_mark_running())
+        await engine_main._toggle_run("测试")
+        await task
+    finally:
+        engine_main.manager, engine_main.executor = real_m, real_e
+
+
+asyncio.run(_page_responds())
+check("页面正常响应时不重复兜底启动", _fe2.toggled == 0, _fe2.toggled)
 
 print("")
 print("结果: PASS=" + str(_pass) + "  FAIL=" + str(_fail))
