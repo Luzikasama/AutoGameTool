@@ -155,7 +155,7 @@ AutoGameTool 是一款面向 **Windows** 的轻量级游戏自动化（类 RPA�
 | 分类 | 选型 | 说明 |
 |---|---|---|
 | 桌面壳 | **Tauri 2.0**（Rust） | 已配置 `frontend/src-tauri/`，可编译原生窗口 |
-| 当前发行方式 | **PyInstaller `--onefile`** | 引擎 + 内嵌前端 → 单个 `AutoGameTool.exe`（约 68 MB） |
+| 当前发行方式 | **PyInstaller `--onedir`**（v0.8.2 起） | 引擎 + 内嵌前端 → `AutoGameTool.exe` + `_internal\`（整目录约 179 MB，安装包 51.8 MB）。选文件夹形态是为了**不依赖系统临时目录**：单文件版每次启动都要往 `%TEMP%` 解压，`%TEMP%` 一旦不可用就会弹 `could not create temporary directory` 而起不来 |
 | 安装包 | **NSIS 3.10**（Unicode） | 生成带向导、快捷方式、卸载器的 `AutoGameTool-Setup.exe` |
 | 图标生成 | **Pillow 12** | `tools/make_icon.py` 生成多尺寸 `.ico` 与 favicon |
 | NSIS 工具链 | 内置 `tools/nsis/` | `build_installer.ps1` 找不到 `makensis` 时自动下载 |
@@ -175,7 +175,7 @@ pillow 12.3.0        pnpm 11.4.0         NSIS 3.10 (Unicode)
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    AutoGameTool.exe（单文件）                  │
+│              AutoGameTool.exe + _internal\（文件夹形态）        │
 │                                                              │
 │  ┌────────────────────────┐      ┌─────────────────────────┐  │
 │  │  前端（Vue 3 静态包）    │      │  Python 引擎（FastAPI）  │  │
@@ -208,10 +208,12 @@ pillow 12.3.0        pnpm 11.4.0         NSIS 3.10 (Unicode)
 
 ```
 AutoGameTool/
-├─ AutoGameTool.exe           # 发行版单文件（PyInstaller 产物）
+├─ AutoGameTool-app/          # 发行版（PyInstaller 产物，文件夹形态）
+│  ├─ AutoGameTool.exe        #   主程序（8.6 MB）
+│  └─ _internal/              #   运行库（Python、OpenCV、Tk 等，约 170 MB）
 ├─ AutoGameTool-Setup.exe     # 安装包（NSIS 产物）
 ├─ README.md
-├─ build_exe.ps1              # 一键打包：前端构建 + PyInstaller 单文件
+├─ build_exe.ps1              # 一键打包：前端构建 + PyInstaller（--onedir）
 ├─ build_installer.ps1        # 一键制作安装包（自动定位 / 下载 NSIS）
 ├─ run_engine.ps1             # 开发：启动引擎
 ├─ run_frontend.ps1           # 开发：启动前端
@@ -504,10 +506,10 @@ pnpm dev            # → http://localhost:1420
 
 ## 9. 打包与发布
 
-### 9.1 打包单文件 exe
+### 9.1 打包发行版（文件夹形态）
 
 ```powershell
-# 一键（推荐）：类型检查 + 前端构建 + PyInstaller 打包 + 复制到根目录
+# 一键（推荐）：类型检查 + 前端构建 + PyInstaller 打包 + 复制到 AutoGameTool-app\
 .\build_exe.ps1
 ```
 
@@ -516,7 +518,7 @@ pnpm dev            # → http://localhost:1420
 1. `vue-tsc --noEmit` 类型检查
 2. **`tools\check_ui_imports.mjs` 静态检查**：`.vue` 里用到的 `<n-xxx>` 是否都在该文件里 import 了
 3. `vite build` 产出 `frontend\dist`
-4. 调用 `engine\.venv\Scripts\pyinstaller.exe` 打成单文件（带应用图标），并复制到项目根目录
+4. 调用 `engine\.venv\Scripts\pyinstaller.exe` 打成**文件夹形态**（带应用图标），并整体复制到 `AutoGameTool-app\`
 
 > 第 2 步为什么必须有（v0.7.1 真实事故）：Naive UI 是按需 import 的，没有全局注册。如果某个 `<n-xxx>` 忘了 import，Vue 会把它当未知元素渲染，**具名插槽里的内容被整个丢掉**——那个按钮在界面上根本不存在。而 `vue-tsc` 只查类型、`vite build` 只做打包，**两者都不报错**，功能就这么无声无息地消失了（当时是 `NPopconfirm` 漏了，顶栏「＋ 新建」和属性面板的「✂ 拆分为可编辑步骤」都不显示）。现在构建期会直接失败并指出缺哪个组件。
 
@@ -524,7 +526,7 @@ pnpm dev            # → http://localhost:1420
 
 ```powershell
 cd engine
-.venv\Scripts\pyinstaller.exe --noconfirm --clean --onefile --name AutoGameTool `
+.venv\Scripts\pyinstaller.exe --noconfirm --clean --onedir --noconsole --name AutoGameTool `
   --icon ..\assets\AutoGameTool.ico `
   --add-data "..\frontend\dist;frontend_dist" `
   --hidden-import uvicorn.logging `
@@ -535,19 +537,20 @@ cd engine
   main.py
 ```
 
-产物：`engine\dist\AutoGameTool.exe` → 复制为 `AutoGameTool.exe`（约 68 MB）
+产物：`engine\dist\AutoGameTool\` → 复制为 `AutoGameTool-app\`（exe 8.6 MB + `_internal\`，整目录约 179 MB）
 
 **打包要点**
 
 - 前端 `dist` 通过 `--add-data` 打进 `frontend_dist`，运行时由引擎同源提供
 - opencv / onnxruntime 等含动态库的包建议加 `--collect-all`
-- 使用 `--onefile` 单文件分发；如需更快启动可改 `--onedir`
+- **用 `--onedir` 而不是 `--onefile`**（v0.8.2 起）：单文件版每次启动都要往 `%TEMP%` 解压 `_MEIxxxx`，而 `%TEMP%` 可能不可用（被清理掉、或从 SmartScreen 点「仍要运行」拉起时环境异常），此时 Windows 的 `GetTempPath` 会退回「当前目录」（往往是 `C:\Windows\System32`）→ 弹 `could not create temporary directory` 起不来。文件夹形态没有解压这一步，启动也更快；回归测试见 `tools\test_broken_temp.ps1`
+- 分发时必须**整个目录一起给**（不能只复制 exe）；安装包已处理好
 - 图标取自 `assets\AutoGameTool.ico`，缺失时脚本会先调用 `tools\make_icon.py` 生成
 
 ### 9.2 制作安装包（NSIS）
 
 ```powershell
-.\build_exe.ps1        # 1) 先产出 AutoGameTool.exe
+.\build_exe.ps1        # 1) 先产出 AutoGameTool-app\
 .\build_installer.ps1  # 2) 再产出安装包
 ```
 
@@ -575,7 +578,7 @@ cd engine
 | 系统要求 | Windows 10 / 11（安装时校验，低版本直接拦截） |
 | 免安装绿色版 | 直接跑 `AutoGameTool.exe`，数据同样写入 `%APPDATA%\AutoGameTool` |
 
-> **关于体积**：安装包大小基本等于 `AutoGameTool.exe`（v0.6.0 实测各约 71 MB）。因为 PyInstaller `--onefile` 的载荷本身已是 deflate 压缩过的，NSIS 的 LZMA 几乎压不动（实测压缩率 99.6%）。若希望安装包显著变小，可把打包改成 `--onedir`，让未压缩的 DLL 交给 NSIS 压缩，代价是分发形态从单文件变成一个目录。
+> **关于体积**（v0.8.2 实测）：改成文件夹形态后安装包**反而更小了**——`AutoGameTool-app\` 整目录 179 MB，其中大量未压缩的 DLL 交给 NSIS 的 LZMA 压缩，安装包只有 **51.8 MB**（此前单文件版是 71.3 MB：PyInstaller `--onefile` 的载荷本身已 deflate 过，NSIS 几乎压不动，实测压缩率 99.6%）。
 
 > 安装前建议先退出正在运行的 AutoGameTool：安装包会自动 `taskkill` 旧进程，但手动退出更稳妥（避免脚本执行到一半被打断）。
 
@@ -717,14 +720,14 @@ engine\.venv\Scripts\python.exe tools\test_ui_appearance.py
 ### 9.12 打包产物核验（无控制台 + 日志落盘）
 
 ```powershell
-.\tools\test_noconsole_log.ps1                    # 默认测根目录的 AutoGameTool.exe
+.\tools\test_noconsole_log.ps1                    # 默认测 AutoGameTool-app\AutoGameTool.exe
 .\tools\test_noconsole_log.ps1 -ExePath <路径>     # 测别的副本
 ```
 
 针对 v0.7.3 的两条硬要求，在**打包产物**上核验（10 项检查）：
 
 1. `AutoGameTool.exe` 是 **GUI 子系统**（PE 头 `Subsystem = 2`），不会分配控制台。同一段检测代码对 `engine\.venv\Scripts\python.exe` 读出 `3`（控制台）作为阳性对照——否则「没看到控制台窗口」可能只是检测本身失效
-2. 启动产物后枚举它的**全部顶层窗口**（`--onefile` 同时存在「父 bootloader」与「真正跑 Python 的子进程」两个同名进程，两个都要查），断言没有任何控制台类窗口（`ConsoleWindowClass` / `CASCADIA_HOSTING_WINDOW_CLASS` 等），并且确实看到了悬浮框的 `TkTopLevel`
+2. 启动产物后枚举它的**全部顶层窗口**（v0.7.3~v0.8.1 的单文件版会同时存在「父 bootloader」与「真正跑 Python 的子进程」两个同名进程，两个都查；v0.8.2 起的文件夹形态只有一个进程），断言没有任何控制台类窗口（`ConsoleWindowClass` / `CASCADIA_HOSTING_WINDOW_CLASS` 等），并且确实看到了悬浮框的 `TkTopLevel`
 3. `%APPDATA%\AutoGameTool\engine.log` 被创建、含带版本号的启动记录，且日志里的 `token=` 已掩成 `***`、**不含启动时传入的真实令牌**
 
 > 脚本用固定令牌（`AUTOGAMETOOL_TOKEN`）启动产物，才能断言「真令牌没有落盘」；它不注入任何真实鼠标 / 键盘，只在开始时把已有的 `engine.log` 备份到 `.tmp\`。运行前需 8765 端口空闲。
@@ -1144,7 +1147,7 @@ v0.7.0 改成「引擎是唯一事实来源」：
 | 模拟输入无效 | 见 [12. 已知限制](#12-已知限制)；先用 `/input/probe` 诊断 |
 | 窗口列表里没有目标窗口 | 只列出"任务栏窗口"；若游戏是子窗口/无标题窗口则不会出现 |
 | 截图黑屏 | 独占全屏游戏 GDI 无法截取；请改「无边框窗口」模式 |
-| exe 启动慢 | `--onefile` 每次需解压到临时目录；可改 `--onedir` |
+| exe 启动慢 / 弹 could not create temporary directory | v0.8.2 起已改为文件夹形态（`--onedir`），不再解压、也不再依赖 `%TEMP%`。若你还在用旧版单文件：把它放到一个可写目录，或直接换新安装包 |
 | 杀软误报 | PyInstaller / NSIS 常见现象；正式分发建议**代码签名** |
 | 安装包被 SmartScreen 拦截 | 安装包未签名，出现「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」 |
 | 构建安装包时找不到 makensis | `build_installer.ps1` 会自动下载 NSIS 3.10 到 `tools\nsis`；离线环境可手动安装 NSIS，再用环境变量 `AUTOGAMETOOL_MAKENSIS` 指向 `makensis.exe` |
@@ -1195,6 +1198,26 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 ---
 
 ## 14. 更新日志
+
+### v0.8.2 —— 2026-10-01
+
+修「装了却起不来、想升级又装不上」这条真实故障链：**程序不再依赖系统临时目录**（打包形态从单文件改为文件夹），**安装器遇到被占用的主程序会给出可照做的提示**。
+
+#### 🐛 修复
+
+- **双击后弹 `could not create temporary directory`，程序起不来**
+  - 根因：单文件版（`--onefile`）每次启动都要在 `%TEMP%` 下解压出 `_MEIxxxx`。一旦启动进程的 `%TEMP%` 不可用（被清理掉、或环境异常，例如从 SmartScreen 点「仍要运行」拉起时），Windows 的 `GetTempPath` 会**退回「当前目录」**——那时往往是 `C:\Windows\System32`——解压失败，于是弹这个框，进程还挂在错误框上不放
+  - 修复：打包改为 **文件夹形态（`--onedir`）**，启动不再解压，整条链路消失；顺带启动更快、不再在 `%TEMP%` 里留 `_MEI` 残留（本机实测曾累积 27 个、4.66 GB）
+  - 回归测试：`tools\test_broken_temp.ps1` —— 故意把 `TEMP`/`TMP` 指向一个**不存在**的目录，要求程序照样起来（旧单文件构建必然失败，新构建全绿）
+- **升级安装报「无法打开要写入的文件: …\AutoGameTool.exe」**
+  - 根因：AutoGameTool 还在运行（尤其是上面那种**卡在错误框上的进程**）时主程序文件被占用，NSIS 覆盖不了；而它默认只给「中止/重试/忽略」——点「忽略」会装出一个坏版本
+  - 修复：安装器改成 `AllowSkipFiles off` + 自己的**重试循环**：先杀进程，仍失败就明确提示「请先退出 AutoGameTool（或重启电脑）再点重试」，不再让用户面对系统原始报错
+
+#### 📝 文档
+
+- 发行形态相关说明全部更新为「文件夹形态（exe + `_internal`）」，安装包体积按实测重写
+- FAQ 新增：双击报 could not create temporary directory、升级安装报无法打开要写入的文件、SmartScreen「发布者未知」怎么处理
+- 回归测试新增 `tools\test_broken_temp.ps1`（7 条断言）
 
 ### v0.8.1 —— 2026-10-01
 
@@ -1591,7 +1614,7 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 
 - 可视化流程编辑器（Vue 3 + Vue Flow）与节点式编排：找图 / 判断分支 / 点击 / 按键 / 输入文本 / 键鼠宏回放 / 终止
 - Python 引擎（FastAPI + OpenCV）：灰度模板匹配、窗口枚举与绑定、真实与仿真（PostMessage）双输入模式、全局快捷键
-- PyInstaller 单文件 exe + NSIS 安装包（免管理员、含开始菜单与桌面快捷方式、标准卸载器）
+- PyInstaller 打包（文件夹形态）+ NSIS 安装包（免管理员、含开始菜单与桌面快捷方式、标准卸载器）
 
 ---
 
@@ -1607,6 +1630,6 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 
 <div align="center">
 
-**AutoGameTool** · Windows 优先 · 本地引擎 + 单文件分发
+**AutoGameTool** · Windows 优先 · 本地引擎 + 一键安装
 
 </div>

@@ -71,7 +71,14 @@ try {
     # 代价：stdout/stderr 不再存在，**所有输出只进 %APPDATA%\AutoGameTool\engine.log**
     #（engine/enginelog.py 会接管 sys.stdout/stderr，所以原有的 print 不会抛异常）。
     $pyiArgs = @(
-        "--noconfirm", "--clean", "--onefile", "--noconsole", "--name", "AutoGameTool",
+        "--noconfirm", "--clean", "--onedir", "--noconsole", "--name", "AutoGameTool",
+        # --onedir（v0.8.2 起）：不再往 %TEMP% 解压。为什么必须换掉 --onefile：
+        # 单文件版每次启动都要在 %TEMP% 下解开 _MEIxxxx；一旦启动进程的 %TEMP% 不可用
+        # （被删掉、或环境异常，例如从 SmartScreen 点「仍要运行」拉起时），Windows 的
+        # GetTempPath 会退回「当前目录」（那时往往是 System32）→ 解压失败 →
+        # 弹 "could not create temporary directory"，进程挂在错误框上不放，
+        # 还顺带锁死安装目录里的 exe，导致升级安装报「无法打开要写入的文件」。
+        # 文件夹形态没有解压这一步，从根上消除这类故障，启动也更快。
         "--add-data", "$dist;frontend_dist",
         "--hidden-import", "uvicorn.logging",
         "--hidden-import", "uvicorn.loops.auto",
@@ -89,10 +96,21 @@ try {
 }
 
 # ---------- 3. 复制到根目录 ----------
-$built = Join-Path $root "engine\dist\AutoGameTool.exe"
-Copy-Item $built (Join-Path $root "AutoGameTool.exe") -Force
+# v0.8.2 起改成 --onedir（文件夹形态）：不再需要往 %TEMP% 解压，因此
+# 「%TEMP% 不可用 / 从 SmartScreen 点『仍要运行』拉起」这类环境问题一律不再影响启动。
+# 代价是不能再单独复制 AutoGameTool.exe 走天下——必须整目录一起分发（安装包已处理好）。
+$builtDir = Join-Path $root "engine\dist\AutoGameTool"
+$appDir = Join-Path $root "AutoGameTool-app"
+if (-not (Test-Path (Join-Path $builtDir "AutoGameTool.exe"))) {
+    Write-Host "打包产物缺失：$builtDir\AutoGameTool.exe" -ForegroundColor Red
+    exit 1
+}
+# 旧版残留的单文件 exe 会让「双击哪个」变得含糊，直接清掉
+Remove-Item (Join-Path $root "AutoGameTool.exe") -Force -ErrorAction SilentlyContinue
+if (Test-Path $appDir) { Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue }
+Copy-Item $builtDir $appDir -Recurse -Force
 
-$size = [math]::Round((Get-Item $built).Length / 1MB, 1)
+$size = [math]::Round(((Get-ChildItem $appDir -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
 Write-Host ""
-Write-Host "打包完成：$(Join-Path $root 'AutoGameTool.exe')  ($size MB)" -ForegroundColor Green
+Write-Host "打包完成：$(Join-Path $appDir 'AutoGameTool.exe')  (整目录 $size MB)" -ForegroundColor Green
 Write-Host "下一步可执行 .\build_installer.ps1 生成安装包。" -ForegroundColor DarkGray

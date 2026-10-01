@@ -23,7 +23,12 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $Base = 'http://127.0.0.1:8765'
 
-if (-not $ExePath) { $ExePath = Join-Path $root 'AutoGameTool.exe' }
+if (-not $ExePath) {
+    # v0.8.2 起程序是文件夹形态（--onedir）：优先用 AutoGameTool-app\ 下的；
+    # 仍兼容根目录的单文件 exe（旧构建/对照用）
+    $appExe = Join-Path $root 'AutoGameTool-app\AutoGameTool.exe'
+    $ExePath = if (Test-Path $appExe) { $appExe } else { Join-Path $root 'AutoGameTool.exe' }
+}
 if (-not (Test-Path $ExePath)) { Write-Host "未找到 exe：$ExePath" -ForegroundColor Red; exit 1 }
 $ExePath = (Resolve-Path $ExePath).Path
 

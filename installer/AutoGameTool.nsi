@@ -26,7 +26,7 @@ Unicode true
 ; ---------------------------------------------------------------- 基本信息
 !define APP_NAME      "AutoGameTool"
 !define APP_NAME_CN   "AutoGameTool 游戏自动化脚本工具"
-!define APP_VERSION   "0.8.1"
+!define APP_VERSION   "0.8.2"
 !define APP_PUBLISHER "AutoGameTool"
 !define APP_EXE       "AutoGameTool.exe"
 !define APP_ICON      "${PROJECT_ROOT}\assets\AutoGameTool.ico"
@@ -44,12 +44,16 @@ InstallDirRegKey HKCU "${APP_KEY}" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 SetCompressorDictSize 64
+; 覆盖安装时若目标文件被占用（AutoGameTool 还在跑），让写入失败走 IfErrors 分支，
+; 由我们给出「先退出 AutoGameTool 再重试」的可操作提示；否则 NSIS 会弹自带的
+; 「无法打开要写入的文件 / 中止 重试 忽略」——用户一旦点「忽略」就会装出一个坏版本。
+AllowSkipFiles off
 
 Icon "${APP_ICON}"
 UninstallIcon "${APP_ICON}"
 
 ; ------------------------------------------------------- 文件属性（右键详情）
-VIProductVersion "0.8.1.0"
+VIProductVersion "0.8.2.0"
 VIAddVersionKey /LANG=2052 "ProductName"     "${APP_NAME}"
 VIAddVersionKey /LANG=2052 "FileDescription" "${APP_NAME} 安装程序"
 VIAddVersionKey /LANG=2052 "FileVersion"     "${APP_VERSION}"
@@ -76,7 +80,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright"  "Copyright (C) 2026 ${APP_PUBLISHER
 
 ; 欢迎页
 !define MUI_WELCOMEPAGE_TITLE "欢迎安装 ${APP_NAME}"
-!define MUI_WELCOMEPAGE_TEXT "本向导将引导您完成 ${APP_NAME} ${APP_VERSION} 的安装。$\r$\n$\r$\n${APP_NAME} 是一款面向 Windows 的「零代码」游戏自动化脚本工具：$\r$\n    · 拖拽节点即可编排流程（找图 / 点击 / 按键 / 判断分支 / 循环挂机）$\r$\n    · 全部能力在本地运行，找图、点击、按键不经过任何服务器$\r$\n    · 单文件分发，目标机器无需安装 Python 或任何运行环境$\r$\n$\r$\n安装位置：$LOCALAPPDATA\${APP_NAME}（仅当前用户，无需管理员权限）$\r$\n$\r$\n点击「下一步」继续。"
+!define MUI_WELCOMEPAGE_TEXT "本向导将引导您完成 ${APP_NAME} ${APP_VERSION} 的安装。$\r$\n$\r$\n${APP_NAME} 是一款面向 Windows 的「零代码」游戏自动化脚本工具：$\r$\n    · 拖拽节点即可编排流程（找图 / 点击 / 按键 / 判断分支 / 循环挂机）$\r$\n    · 全部能力在本地运行，找图、点击、按键不经过任何服务器$\r$\n    · 免安装运行环境，目标机器无需 Python（程序为文件夹形态，全部文件都在安装目录内）$\r$\n$\r$\n安装位置：$LOCALAPPDATA\${APP_NAME}（仅当前用户，无需管理员权限）$\r$\n$\r$\n点击「下一步」继续。"
 
 ; 完成页
 !define MUI_FINISHPAGE_TITLE "${APP_NAME} 安装完成"
@@ -127,8 +131,27 @@ Section "主程序（必需）" SEC_MAIN
     Sleep 700
 
     SetOutPath "$INSTDIR"
-    File "/oname=${APP_EXE}"     "${PROJECT_ROOT}\${APP_EXE}"
-    File "/oname=${README_FILE}" "${PROJECT_ROOT}\${README_FILE}"
+    ; 覆盖主程序：被占用时不要给 NSIS 的原始报错（用户会一脸懵，甚至点「忽略」装出坏版本），
+    ; 而是直接说清楚「先退出 AutoGameTool 再重试」。AllowSkipFiles off 让失败走 IfErrors 分支。
+    ; 程序是文件夹形态（v0.8.2 起：--onedir，不再往 %TEMP% 解压），所以要连 _internal 一起铺。
+    retry_main_exe:
+        ClearErrors
+        Delete "$INSTDIR\${APP_EXE}"
+        RMDir /r "$INSTDIR\_internal"
+        File "/oname=${APP_EXE}" "${PROJECT_ROOT}\AutoGameTool-app\${APP_EXE}"
+        File /r "${PROJECT_ROOT}\AutoGameTool-app\_internal"
+        File "/oname=${README_FILE}" "${PROJECT_ROOT}\${README_FILE}"
+        IfErrors 0 main_exe_ok
+        MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL|MB_DEFBUTTON1 \
+            "无法写入：$INSTDIR\${APP_EXE}$\r$\n$\r$\n通常是 AutoGameTool 还在运行（悬浮框或后台进程占着主程序文件）。$\r$\n$\r$\n请先在悬浮框上右键退出，或用任务管理器结束 AutoGameTool，然后点「重试」。$\r$\n若反复失败：重启电脑后再安装。" \
+            IDRETRY kill_and_retry
+        Abort
+    kill_and_retry:
+        nsExec::Exec '${KILL_CMD}'
+        Pop $0
+        Sleep 1200
+        Goto retry_main_exe
+    main_exe_ok:
 
     WriteUninstaller "$INSTDIR\Uninstall.exe"
 
@@ -169,7 +192,7 @@ Section "创建桌面快捷方式" SEC_DESKTOP
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-    !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN}    "AutoGameTool 主程序：单文件 exe，已内嵌前端界面与 Python 引擎。"
+    !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN}    "AutoGameTool 主程序：文件夹形态（exe + 运行库），已内嵌前端界面与 Python 引擎，无需另装运行环境。"
     !insertmacro MUI_DESCRIPTION_TEXT ${SEC_DESKTOP} "在当前用户桌面创建启动快捷方式。"
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
@@ -192,10 +215,11 @@ Section "Uninstall"
     RMDir  "$SMPROGRAMS\${APP_NAME}"
     Delete "$DESKTOP\${APP_NAME}.lnk"
 
-    ; 程序文件
+    ; 程序文件（v0.8.2 起是文件夹形态：exe + _internal）
     Delete "$INSTDIR\${APP_EXE}"
     Delete "$INSTDIR\${README_FILE}"
     Delete "$INSTDIR\Uninstall.exe"
+    RMDir /r "$INSTDIR\_internal"
 
     ; 目录里可能还留有运行时产物。只有目录名仍是默认的 AutoGameTool 时才递归清理，
     ; 避免用户把安装目录指到别处（例如某个已有文件夹）时误删。

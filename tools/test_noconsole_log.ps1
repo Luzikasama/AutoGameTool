@@ -23,9 +23,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-if (-not $ExePath) { $ExePath = Join-Path $root 'AutoGameTool.exe' }
+if (-not $ExePath) {
+    # v0.8.2 起是文件夹形态，优先测 AutoGameTool-app\ 下的（仍兼容根目录单文件 exe）
+    $appExe = Join-Path $root 'AutoGameTool-app\AutoGameTool.exe'
+    $ExePath = if (Test-Path $appExe) { $appExe } else { Join-Path $root 'AutoGameTool.exe' }
+}
 if (-not (Test-Path $ExePath)) { Write-Host "未找到 exe：$ExePath" -ForegroundColor Red; exit 1 }
 $exe = (Resolve-Path $ExePath).Path
+
+# 把 APPDATA 指到项目内 .tmp\ 下：被测程序仍是打包产物本身，但日志写在沙箱允许的目录里。
+# （本会话的沙箱策略会拦「往真实 %APPDATA% 写」，那是环境限制，不是产品问题；
+#   用户/驱动正常启动时日志照常写在 %APPDATA%\AutoGameTool\engine.log —— 已实测过。）
+$env:APPDATA = Join-Path $root '.tmp\noconsole-appdata'
+New-Item -ItemType Directory -Force -Path $env:APPDATA | Out-Null
 
 $log = Join-Path $env:APPDATA 'AutoGameTool\engine.log'
 $bak = Join-Path $root '.tmp\engine.log.bak'
@@ -64,14 +74,18 @@ Check 'exe 是 GUI 子系统(2)，不会分配控制台' ($exeSub -eq 2) "得到
 # ---- 2. 启动产物，检查窗口 ----
 Get-Process AutoGameTool -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
-Check '运行前 8765 端口空闲' (-not (Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue)) ''
+# 用 netstat 判断端口（Get-NetTCPConnection 在某些受限环境里读不到）
+Check '运行前 8765 端口空闲' (-not [bool](netstat -ano | Select-String ':8765' | Select-String 'LISTENING')) ''
 
 if (-not (Test-Path (Split-Path $bak -Parent))) { New-Item -ItemType Directory -Path (Split-Path $bak -Parent) -Force | Out-Null }
 if (Test-Path $log) { Copy-Item $log $bak -Force; Remove-Item $log -Force }
 
 $env:AUTOGAMETOOL_TOKEN = $token
 $env:AUTOGAMETOOL_NO_BROWSER = '1'
-$proc = Start-Process -FilePath $exe -PassThru
+# 必须重定向输出：GUI 子进程若继承本 shell 的 stdout 句柄，外层工具会一直等它退出
+$proc = Start-Process -FilePath $exe -PassThru `
+    -RedirectStandardOutput (Join-Path (Split-Path $PSScriptRoot -Parent) '.tmp\noconsole-out.log') `
+    -RedirectStandardError  (Join-Path (Split-Path $PSScriptRoot -Parent) '.tmp\noconsole-err.log')
 $env:AUTOGAMETOOL_TOKEN = ''
 $env:AUTOGAMETOOL_NO_BROWSER = ''
 

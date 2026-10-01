@@ -74,13 +74,18 @@ function Install-Nsis {
 # ---------------------------------------------------------------- 1. 前置检查
 Write-Host "=== 1. 检查输入 ===" -ForegroundColor Cyan
 
-$exe  = Join-Path $root "AutoGameTool.exe"
+$appDir = Join-Path $root "AutoGameTool-app"
+$exe  = Join-Path $appDir "AutoGameTool.exe"
 $icon = Join-Path $root "assets\AutoGameTool.ico"
 $nsi  = Join-Path $root "installer\AutoGameTool.nsi"
 $out  = Join-Path $root "AutoGameTool-Setup.exe"
 
 if (-not (Test-Path $exe)) {
-    Write-Host "未找到 AutoGameTool.exe，请先执行：.\build_exe.ps1" -ForegroundColor Red
+    Write-Host "未找到 AutoGameTool-app\AutoGameTool.exe（v0.8.2 起程序是文件夹形态），请先执行：.\build_exe.ps1" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path (Join-Path $appDir "_internal"))) {
+    Write-Host "未找到 AutoGameTool-app\_internal（运行库目录），安装包会不完整；请重新执行：.\build_exe.ps1" -ForegroundColor Red
     exit 1
 }
 if (-not (Test-Path $nsi)) {
@@ -97,7 +102,7 @@ if (-not (Test-Path $icon)) {
     exit 1
 }
 
-Write-Host ("  主程序：{0}  ({1} MB)" -f (Split-Path $exe -Leaf), [math]::Round((Get-Item $exe).Length / 1MB, 1))
+Write-Host ("  主程序：{0}  ({1} MB，整目录 {2} MB)" -f (Split-Path $exe -Leaf), [math]::Round((Get-Item $exe).Length / 1MB, 1), [math]::Round(((Get-ChildItem $appDir -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1))
 
 # ---------------------------------------------------------------- 2. 查找 NSIS
 Write-Host "=== 2. 查找 NSIS (makensis) ===" -ForegroundColor Cyan

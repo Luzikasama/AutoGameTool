@@ -56,6 +56,8 @@ CLAUDE.local.md
 # 因此统一不入库，改为在 GitHub Releases 中发布（见 README「打包与发布」）。
 /AutoGameTool.exe
 /AutoGameTool-Setup.exe
+# v0.8.2 起发行版是文件夹形态（exe + _internal\），同样不入库
+/AutoGameTool-app/
 
 # ---------- 编辑器 / 系统 ----------
 .vscode/
