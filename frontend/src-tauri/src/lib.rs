@@ -11,7 +11,7 @@
 //     也不需要把访问令牌从壳里注入页面 —— 令牌直接放在入口 URL 上（没有地址栏，用户看不到）。
 //   · 代价是壳必须等引擎起来才能开窗（见 start_engine/wait_health）。
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};

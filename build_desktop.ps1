@@ -31,6 +31,9 @@ $env:TMP = $buildTmp
 if (-not $env:CARGO_TARGET_DIR) {
     $env:CARGO_TARGET_DIR = Join-Path $root '.tmp\cargo-target'
 }
+# pnpm 在「没有 TTY」的脚本环境里会因「是否清空 node_modules」的交互确认直接中止
+# （ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY）；CI=true 等价于关掉那个确认。
+$env:CI = 'true'
 
 function Step($n, $text) { Write-Host "=== $n. $text ===" -ForegroundColor Cyan }
 
@@ -38,8 +41,13 @@ function Step($n, $text) { Write-Host "=== $n. $text ===" -ForegroundColor Cyan 
 Step 1 '前端构建（类型检查 + vite build）'
 Push-Location (Join-Path $root 'frontend')
 try {
+    # 外部命令（pnpm / cargo / tauri）都会往 stderr 写进度；本脚本 EAP=Stop 时
+    # PowerShell 会把那当成终止性错误。执行期间临时放宽，之后按退出码判断。
+    $ErrorActionPreference = 'Continue'
     & pnpm.cmd build
-    if ($LASTEXITCODE -ne 0) { throw "前端构建失败（exit $LASTEXITCODE）" }
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($code -ne 0) { throw "前端构建失败（exit $code）" }
 } finally { Pop-Location }
 
 # ---------------------------------------------------------------- 2. 引擎
@@ -59,8 +67,11 @@ if (-not (Test-Path (Join-Path $engineDir 'AutoGameTool.exe'))) {
 Step 3 'Tauri 构建（壳 + 引擎作为 resources + NSIS 安装包）'
 Push-Location (Join-Path $root 'frontend')
 try {
+    $ErrorActionPreference = 'Continue'   # cargo/tauri 的 stderr 进度输出同上
     & pnpm.cmd tauri build
-    if ($LASTEXITCODE -ne 0) { throw "Tauri 构建失败（exit $LASTEXITCODE）" }
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($code -ne 0) { throw "Tauri 构建失败（exit $code）" }
 } finally { Pop-Location }
 
 # ---------------------------------------------------------------- 4. 汇总
