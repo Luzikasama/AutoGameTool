@@ -91,6 +91,12 @@ export function goodbyeBeacon(): void {
 
 export const engine = {
   health: () => apiGet('/health'),
+  /**
+   * 用系统默认浏览器打开外链（顶栏「关于 → GitHub 发布页」）。
+   * 交给引擎做而不是 `window.open`：桌面壳里的 `window.open` 会开出一个没有地址栏、
+   * 没有前进/后退的 Tauri 子窗口，GitHub 页面在里面很难用；引擎天然能调系统浏览器。
+   */
+  openExternal: (url: string) => apiPost<{ ok: boolean }>('/open_external', { url }),
   listWindows: () => apiGet<{ windows: WindowInfo[] }>('/windows/list'),
   screenshot: (win?: number | null) =>
     apiGet<{ image: string; width: number; height: number }>(

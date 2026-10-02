@@ -488,7 +488,7 @@ async def lifespan(_: FastAPI):
     enginelog.info("清理完成，引擎退出")
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.8.2", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.9.0", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -538,6 +538,7 @@ _ALLOWED_HOSTS = {"127.0.0.1:8765", "localhost:8765", "[::1]:8765"}
 _PROTECTED_PREFIXES = (
     "/debug", "/windows", "/screen", "/vision", "/input",
     "/flow", "/run", "/config", "/pick", "/record", "/overlay", "/goodbye",
+    "/open_external",
     "/docs", "/openapi.json",
 )
 _MAX_BODY_BYTES = 64 * 1024 * 1024  # 请求体上限 64MB（防内存 DoS）
@@ -588,7 +589,7 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.8.2"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.9.0"}
 
 
 @app.get("/debug/kb")
@@ -905,8 +906,26 @@ async def record_stop():
 
 
 # ------------------------------------------------------------ 关闭页面即关闭后端
+def _desktop_mode() -> bool:
+    """是否由桌面壳（Tauri）拉起。
+
+    桌面模式下有两处语义必须不同：
+    1) 不自动开浏览器（壳自己开原生窗口）；
+    2) **永不因为「页面没了」而退出**：关窗、刷新、WebView 崩溃都由壳负责收尾，
+       引擎只负责活着；否则壳还在、引擎先自杀，界面就会变成一片「已断开」。
+    """
+    return os.environ.get("AUTOGAMETOOL_DESKTOP", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _keep_alive_on_close() -> bool:
     """是否「无论如何都不退后端」（无人值守挂机的逃生开关）。"""
+    if _desktop_mode():
+        return True
     return os.environ.get("AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE", "").strip().lower() in (
         "1",
         "true",
@@ -980,6 +999,28 @@ async def goodbye():
     enginelog.info("编辑器页面主动告别：若 %.0f 秒内没有页面重连就退出后端", _GOODBYE_GRACE_SEC)
     _schedule_close_check(_GOODBYE_GRACE_SEC, "页面主动关闭（收到告别信号）")
     return {"ok": True, "grace": _GOODBYE_GRACE_SEC}
+
+
+class OpenExternalRequest(BaseModel):
+    url: str
+
+
+@app.post("/open_external")
+async def open_external(req: OpenExternalRequest):
+    """用系统默认浏览器打开外链（顶栏「关于 → GitHub 发布页」）。
+
+    为什么由引擎来做而不是前端 `window.open`：桌面壳里的 `window.open` 会开出一个
+    没有地址栏/前进后退的 Tauri 子窗口（GitHub 页面在里面很难用），而引擎天然能调
+    系统浏览器；顺带这条路径在浏览器模式下也更好用。只放行 http/https。
+    """
+    url = (req.url or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="只允许打开 http/https 链接")
+    try:
+        threading.Thread(target=lambda: webbrowser.open(url), daemon=True).start()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"打开浏览器失败：{e}") from e
+    return {"ok": True}
 
 
 def _request_shutdown() -> None:
@@ -1100,10 +1141,14 @@ if __name__ == "__main__":
     print(f"[AutoGameTool] 编辑器地址: {_ENTRY_URL}", flush=True)
     enginelog.info("引擎启动：版本 %s，日志文件 %s", app.version, _LOG_PATH or "（不可用）")
 
-    # 设置 AUTOGAMETOOL_NO_BROWSER=1 可禁止自动打开浏览器（自动化测试 / 无人值守场景）
-    if os.environ.get("AUTOGAMETOOL_NO_BROWSER", "").strip().lower() in ("1", "true", "yes", "on"):
-        print("[AutoGameTool] 已按 AUTOGAMETOOL_NO_BROWSER 跳过自动打开浏览器。", flush=True)
-        enginelog.info("已按 AUTOGAMETOOL_NO_BROWSER 跳过自动打开浏览器")
+    # 设置 AUTOGAMETOOL_NO_BROWSER=1（或由桌面壳传入 AUTOGAMETOOL_DESKTOP=1）可禁止自动打开浏览器
+    _skip_browser = _desktop_mode() or os.environ.get("AUTOGAMETOOL_NO_BROWSER", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if _skip_browser:
+        _why = "AUTOGAMETOOL_DESKTOP=1（桌面壳）" if _desktop_mode() else "AUTOGAMETOOL_NO_BROWSER"
+        print(f"[AutoGameTool] 已按 {_why} 跳过自动打开浏览器。", flush=True)
+        enginelog.info("已按 %s 跳过自动打开浏览器", _why)
     else:
         threading.Thread(target=_open_browser, daemon=True).start()
 

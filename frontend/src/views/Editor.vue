@@ -762,10 +762,14 @@ function finishRecord() {
 
 // 「关于」：跳到 GitHub 发布页。必须用新标签页——本页是 WebUI 本身的连接，
 // 直接在当前页跳走会让引擎在宽限期后自动退出。
+// 桌面壳里不能直接 window.open 外链（会开一个没有地址栏的 Tauri 子窗口），
+// 交给引擎用系统默认浏览器打开；引擎不可用时再退回 window.open。
 const RELEASES_URL = 'https://github.com/Luzikasama/AutoGameTool/releases'
 
 function openAbout() {
-  window.open(RELEASES_URL, '_blank', 'noopener')
+  engine.openExternal(RELEASES_URL).catch(() => {
+    window.open(RELEASES_URL, '_blank', 'noopener')
+  })
 }
 
 // ---------- 运行 ----------

@@ -154,8 +154,8 @@ AutoGameTool 是一款面向 **Windows** 的轻量级游戏自动化（类 RPA�
 
 | 分类 | 选型 | 说明 |
 |---|---|---|
-| 桌面壳 | **Tauri 2.0**（Rust） | 已配置 `frontend/src-tauri/`，可编译原生窗口 |
-| 当前发行方式 | **PyInstaller `--onedir`**（v0.8.2 起） | 引擎 + 内嵌前端 → `AutoGameTool.exe` + `_internal\`（整目录约 179 MB，安装包 51.8 MB）。选文件夹形态是为了**不依赖系统临时目录**：单文件版每次启动都要往 `%TEMP%` 解压，`%TEMP%` 一旦不可用就会弹 `could not create temporary directory` 而起不来 |
+| 桌面壳 | **Tauri 2**（Rust + WebView2） | 当前形态（v0.9.0 起）：原生窗口显示编辑器，Python 引擎作为 sidecar/资源随包分发 |
+| 当前发行方式 | **PyInstaller `--onedir`**（引擎）+ **Tauri NSIS 安装包**（v0.9.0 起） | 引擎产出 `AutoGameTool-app\`（exe + `_internal\`），由 `build_desktop.ps1` 串起壳与安装包。<br>选文件夹形态是为了**不依赖系统临时目录**：onefile 每次启动都要往 `%TEMP%` 解压，`%TEMP%` 一旦不可用就会弹 `could not create temporary directory` 而起不来 |
 | 安装包 | **NSIS 3.10**（Unicode） | 生成带向导、快捷方式、卸载器的 `AutoGameTool-Setup.exe` |
 | 图标生成 | **Pillow 12** | `tools/make_icon.py` 生成多尺寸 `.ico` 与 favicon |
 | NSIS 工具链 | 内置 `tools/nsis/` | `build_installer.ps1` 找不到 `makensis` 时自动下载 |
@@ -505,6 +505,15 @@ pnpm dev            # → http://localhost:1420
 ---
 
 ## 9. 打包与发布
+
+> **形态变更（v0.9.0）**：本项目已从「浏览器 WebUI」迁移为 **Tauri 2 桌面版 + Python sidecar**：
+> 界面在原生窗口里显示，引擎仍以本地 HTTP/WS 提供服务（`127.0.0.1:8765`），
+> 用户数据目录与脚本格式完全不变（`%APPDATA%\AutoGameTool`、`.agflow`、找图模板按 id 引用）。
+>
+> - 开发：`pnpm tauri dev`（壳会用 venv 里的解释器拉起引擎源码，并开 DEV 模式免令牌 + 放行 vite 的 CORS）
+> - 构建：`.\build_desktop.ps1`（前端 → 引擎 onedir → `tauri build` → NSIS 安装包）
+> - **WebUI 时期的回归测试脚本已全部移除**（`tools\test_*.py/ps1/js`、`smoke_test.ps1` 等，仍可从 git 历史取回）；
+>   下面 9.3~9.13 为迁移前的历史说明，保留供查阅，不再对应仓库里的文件。
 
 ### 9.1 打包发行版（文件夹形态）
 
@@ -1198,6 +1207,22 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 ---
 
 ## 14. 更新日志
+
+### v0.9.0 —— 2026-10-02
+
+**从浏览器 WebUI 迁移为 Tauri 2 桌面版（Python 引擎作为 sidecar）**。界面、脚本格式与用户数据目录全部保持不变，老脚本 `\.agflow` 与找图模板零改动可用。
+
+- **桌面壳（Tauri 2）**：原生窗口显示同一个编辑器界面；壳负责「拉起引擎 → 等它就绪 → 开窗」，关闭窗口时结束引擎
+  - 引擎仍是本地 `127.0.0.1:8765` 的 HTTP/WS 服务，前端由引擎同源提供（因此不需要处理 CORS，也不需要在页面里注入令牌）
+  - 开发模式窗口开在 vite（1420）上，改前端即时热更新；发布模式窗口开在引擎入口 URL（带持久令牌）
+  - 单实例：第二次启动把已有窗口提到前台，而不是再开一个
+  - 壳自带诊断日志 `%APPDATA%\AutoGameTool\shell.log`（可用 `AUTOGAMETOOL_SHELL_LOG` 指定路径）
+- **引擎新增桌面模式** `AUTOGAMETOOL_DESKTOP=1`：不自动开浏览器，且**永不因为「页面没了」退出**（关窗、刷新、WebView 崩溃都由壳收尾）
+- **引擎新增** `POST /open_external`（令牌保护，只放行 http/https）：顶栏「关于 → GitHub 发布页」交给系统默认浏览器打开 —— 桌面壳里的 `window.open` 会开出一个没有地址栏、没有前进后退的子窗口
+- **打包**：新增 `build_desktop.ps1`（前端 → 引擎 onedir → `tauri build` → NSIS，安装包免管理员）；引擎作为 Tauri `resources` 随包分发，**仍用 onedir（不回到 onefile）**，避免重新引入 `%TEMP%` 解压那类启动失败
+- **清理**：移除 WebUI 时期的 17 个回归测试脚本（合计约 300 条断言）与临时/构建产物约 1.38 GB
+  - 取舍说明：这些脚本大量围绕「浏览器页面/多窗口/关闭页面即退出」的行为编写，桌面版语义已不同；引擎侧可复用的部分后续按新架构重建
+- 环境要求（本机实测通过）：Rust stable + MSVC 工具链、Node/pnpm、WebView2 运行时、Python 3.13 venv + PyInstaller、NSIS（Tauri 自带）
 
 ### v0.8.2 —— 2026-10-01
 

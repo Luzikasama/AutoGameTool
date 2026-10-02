@@ -26,7 +26,7 @@ Unicode true
 ; ---------------------------------------------------------------- 基本信息
 !define APP_NAME      "AutoGameTool"
 !define APP_NAME_CN   "AutoGameTool 游戏自动化脚本工具"
-!define APP_VERSION   "0.8.2"
+!define APP_VERSION   "0.9.0"
 !define APP_PUBLISHER "AutoGameTool"
 !define APP_EXE       "AutoGameTool.exe"
 !define APP_ICON      "${PROJECT_ROOT}\assets\AutoGameTool.ico"
@@ -53,7 +53,7 @@ Icon "${APP_ICON}"
 UninstallIcon "${APP_ICON}"
 
 ; ------------------------------------------------------- 文件属性（右键详情）
-VIProductVersion "0.8.2.0"
+VIProductVersion "0.9.0.0"
 VIAddVersionKey /LANG=2052 "ProductName"     "${APP_NAME}"
 VIAddVersionKey /LANG=2052 "FileDescription" "${APP_NAME} 安装程序"
 VIAddVersionKey /LANG=2052 "FileVersion"     "${APP_VERSION}"
@@ -133,7 +133,7 @@ Section "主程序（必需）" SEC_MAIN
     SetOutPath "$INSTDIR"
     ; 覆盖主程序：被占用时不要给 NSIS 的原始报错（用户会一脸懵，甚至点「忽略」装出坏版本），
     ; 而是直接说清楚「先退出 AutoGameTool 再重试」。AllowSkipFiles off 让失败走 IfErrors 分支。
-    ; 程序是文件夹形态（v0.8.2 起：--onedir，不再往 %TEMP% 解压），所以要连 _internal 一起铺。
+    ; 程序是文件夹形态（v0.9.0 起：--onedir，不再往 %TEMP% 解压），所以要连 _internal 一起铺。
     retry_main_exe:
         ClearErrors
         Delete "$INSTDIR\${APP_EXE}"
@@ -215,7 +215,7 @@ Section "Uninstall"
     RMDir  "$SMPROGRAMS\${APP_NAME}"
     Delete "$DESKTOP\${APP_NAME}.lnk"
 
-    ; 程序文件（v0.8.2 起是文件夹形态：exe + _internal）
+    ; 程序文件（v0.9.0 起是文件夹形态：exe + _internal）
     Delete "$INSTDIR\${APP_EXE}"
     Delete "$INSTDIR\${README_FILE}"
     Delete "$INSTDIR\Uninstall.exe"
