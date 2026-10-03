@@ -48,11 +48,17 @@ try {
 }
 
 # ---------- 2. PyInstaller 打包 ----------
+# 走 `python -m PyInstaller`，**不要**用 `engine\.venv\Scripts\pyinstaller.exe`：
+# venv 里的控制台启动器（pyinstaller.exe / pip.exe / uvicorn.exe / fastapi.exe …）是 pip 生成的
+# PE 包装器，尾部内嵌了绝对 shebang `#!<venv>\Scripts\python.exe` —— 工程一旦换目录就全部失效
+# （2026-10-03 迁移时实测：Scripts\ 下 31 个文件有 25 个指向旧路径）。
+# 而 `Scripts\python.exe` 本身不内嵌任何路径（运行时按 pyvenv.cfg 定位），换目录照样能用。
+# 详见 AGENTS.local.md 第六节。
 Write-Host "=== 2. PyInstaller 打包 ===" -ForegroundColor Cyan
-$pyi = Join-Path $root "engine\.venv\Scripts\pyinstaller.exe"
-if (-not (Test-Path $pyi)) {
-    Write-Host "未找到 PyInstaller，请先安装：" -ForegroundColor Red
-    Write-Host "  engine\.venv\Scripts\python -m pip install pyinstaller"
+$py = Join-Path $root "engine\.venv\Scripts\python.exe"
+if (-not (Test-Path $py)) {
+    Write-Host "未找到虚拟环境解释器：$py" -ForegroundColor Red
+    Write-Host "先重建 venv，见 AGENTS.local.md 第六节" -ForegroundColor Red
     exit 1
 }
 
@@ -89,7 +95,7 @@ try {
     if ($icon) { $pyiArgs += @("--icon", $icon) }
     $pyiArgs += "main.py"
 
-    & $pyi @pyiArgs
+    & $py -m PyInstaller @pyiArgs
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller 打包失败（exit $LASTEXITCODE）" }
 } finally {
     Pop-Location
@@ -113,4 +119,4 @@ Copy-Item $builtDir $appDir -Recurse -Force
 $size = [math]::Round(((Get-ChildItem $appDir -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
 Write-Host ""
 Write-Host "打包完成：$(Join-Path $appDir 'AutoGameTool.exe')  (整目录 $size MB)" -ForegroundColor Green
-Write-Host "下一步可执行 .\build_installer.ps1 生成安装包。" -ForegroundColor DarkGray
+Write-Host "下一步可执行 .\build_desktop.ps1 -SkipEngine 生成安装包。" -ForegroundColor DarkGray

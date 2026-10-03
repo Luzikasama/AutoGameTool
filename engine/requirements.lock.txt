@@ -1,0 +1,47 @@
+# AutoGameTool engine 依赖锁定快照（engine\.venv 的完整包集合）
+# 用途：engine\.venv 被删除/迁移后，按本文件精确重建，避免 requirements.txt 拉错版本。
+# 来源：2026-10-03 从迁移前的 .venv\Lib\site-packages\*.dist-info\METADATA 导出，共 39 个包。
+# 重建用法：
+#   & "C:\Users\14405\AppData\Local\Programs\Python\Python313\python.exe" -m venv .venv
+#   .\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
+# 注意：README/AGENTS 里说的 engine\.venv\Scripts\pyinstaller.exe 这类启动器不要用，
+#       一律写成 python -m PyInstaller / python -m pip（换目录就失效，见 AGENTS.local.md 第六节）。
+altgraph==0.17.5
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+click==8.5.0
+fastapi==0.141.1
+flatbuffers==25.12.19
+h11==0.16.0
+httptools==0.8.0
+idna==3.19
+mss==10.2.0
+numpy==2.5.3
+onnxruntime==1.29.0
+opencv-python==5.0.0.93
+packaging==26.3
+pefile==2024.8.26
+pillow==12.3.0
+pip==26.2.1
+protobuf==7.36.1
+pyclipper==1.4.0
+pydantic_core==2.46.5
+pydantic==2.13.5
+pyinstaller==6.22.2
+pyinstaller-hooks-contrib==2026.7
+pynput==1.8.2
+python-dotenv==1.2.3
+pywin32==312
+pywin32-ctypes==0.2.3
+PyYAML==6.0.3
+rapidocr-onnxruntime==1.2.3
+setuptools==84.0.0
+shapely==2.1.2
+six==1.17.0
+starlette==1.6.0
+typing_extensions==4.16.0
+typing-inspection==0.4.4
+uvicorn==0.52.4
+watchfiles==1.2.0
+websockets==17.1

@@ -488,7 +488,7 @@ async def lifespan(_: FastAPI):
     enginelog.info("清理完成，引擎退出")
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.9.0", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.1.0", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -589,7 +589,7 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.9.0"}
+    return {"status": "ok", "engine": "autogametool", "version": "0.1.0"}
 
 
 @app.get("/debug/kb")

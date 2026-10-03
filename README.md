@@ -15,8 +15,11 @@
 
 | 方式 | 说明 |
 |---|---|
-| **[⬇ 安装包（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool-Setup.exe`，Windows 10 / 11，免管理员，约 71 MB |
-| 从源码构建 | 见 [9. 打包与发布](#9-打包与发布)：`build_exe.ps1` → `build_installer.ps1` |
+| **[⬇ 安装包（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool-Setup.exe`，Windows 10 / 11，免管理员，约 53.5 MB |
+| 从源码构建 | 见 [9. 打包与发布](#9-打包与发布)：`.\build_desktop.ps1`（前端 → 引擎 onedir → Tauri 壳 → NSIS 安装包） |
+
+> **当前形态：桌面版 v0.1.0** —— 原生窗口（Tauri 2）+ 本地 Python 引擎。
+> 版本号自本版起**按桌面版单独计数**；此前沿用的 WebUI 期 `0.9.x` 号段内容已并入本版（见 [14. 更新日志](#14-更新日志)）。
 
 安装包未做代码签名，若 SmartScreen 提示请选「更多信息 → 仍要运行」。
 
@@ -154,11 +157,11 @@ AutoGameTool 是一款面向 **Windows** 的轻量级游戏自动化（类 RPA�
 
 | 分类 | 选型 | 说明 |
 |---|---|---|
-| 桌面壳 | **Tauri 2**（Rust + WebView2） | 当前形态（v0.9.0 起）：原生窗口显示编辑器，Python 引擎作为 sidecar/资源随包分发 |
-| 当前发行方式 | **PyInstaller `--onedir`**（引擎）+ **Tauri NSIS 安装包**（v0.9.0 起） | 引擎产出 `AutoGameTool-app\`（exe + `_internal\`），由 `build_desktop.ps1` 串起壳与安装包。<br>选文件夹形态是为了**不依赖系统临时目录**：onefile 每次启动都要往 `%TEMP%` 解压，`%TEMP%` 一旦不可用就会弹 `could not create temporary directory` 而起不来 |
-| 安装包 | **NSIS 3.10**（Unicode） | 生成带向导、快捷方式、卸载器的 `AutoGameTool-Setup.exe` |
+| 桌面壳 | **Tauri 2**（Rust + WebView2） | 当前形态（桌面版 v0.1.0 起）：原生窗口显示编辑器，Python 引擎作为 sidecar/资源随包分发 |
+| 当前发行方式 | **PyInstaller `--onedir`**（引擎）+ **Tauri NSIS 安装包**（桌面版 v0.1.0 起） | 引擎产出 `AutoGameTool-app\`（exe + `_internal\`），由 `build_desktop.ps1` 串起壳与安装包。<br>选文件夹形态是为了**不依赖系统临时目录**：onefile 每次启动都要往 `%TEMP%` 解压，`%TEMP%` 一旦不可用就会弹 `could not create temporary directory` 而起不来 |
+| 安装包 | **NSIS**（由 Tauri bundler 内置下载与调用） | 生成带向导、快捷方式、卸载器的 `AutoGameTool-Setup.exe`；不再依赖手工维护的 `.nsi` 与 `build_installer.ps1` |
+| 桌面壳工程 | `frontend/src-tauri/` | `tauri.conf.json` 里 `bundle.targets=["nsis"]`、`installMode="currentUser"`，并把 `../../AutoGameTool-app/` 作为 `resources` 打进安装包的 `engine/` |
 | 图标生成 | **Pillow 12** | `tools/make_icon.py` 生成多尺寸 `.ico` 与 favicon |
-| NSIS 工具链 | 内置 `tools/nsis/` | `build_installer.ps1` 找不到 `makensis` 时自动下载 |
 
 ### 3.4 关键依赖版本（实测）
 
@@ -166,7 +169,7 @@ AutoGameTool 是一款面向 **Windows** 的轻量级游戏自动化（类 RPA�
 fastapi 0.141.1      uvicorn 0.52.4      opencv-python 5.0.0.93
 numpy 2.5.3          mss 10.2.0          pynput 1.8.2
 pyinstaller 6.22.2   vue 3.5.42          naive-ui 2.45.3
-pillow 12.3.0        pnpm 11.4.0         NSIS 3.10 (Unicode)
+pillow 12.3.0        pnpm 11.4.0         tauri-cli 2.x
 ```
 
 ---
@@ -208,46 +211,27 @@ pillow 12.3.0        pnpm 11.4.0         NSIS 3.10 (Unicode)
 
 ```
 AutoGameTool/
-├─ AutoGameTool-app/          # 发行版（PyInstaller 产物，文件夹形态）
-│  ├─ AutoGameTool.exe        #   主程序（8.6 MB）
-│  └─ _internal/              #   运行库（Python、OpenCV、Tk 等，约 170 MB）
-├─ AutoGameTool-Setup.exe     # 安装包（NSIS 产物）
+├─ AutoGameTool-Setup.exe     # 安装包（Tauri bundler → NSIS 产物，不入库）
 ├─ README.md
-├─ build_exe.ps1              # 一键打包：前端构建 + PyInstaller（--onedir）
-├─ build_installer.ps1        # 一键制作安装包（自动定位 / 下载 NSIS）
-├─ run_engine.ps1             # 开发：启动引擎
-├─ run_frontend.ps1           # 开发：启动前端
+├─ build_desktop.ps1          # ★ 一键出安装包：前端 → 引擎 onedir → Tauri 壳 → NSIS
+├─ build_exe.ps1              # 只打引擎：前端构建 + PyInstaller（--onedir）→ AutoGameTool-app\
+├─ run_engine.ps1             # 开发：只启动引擎
+├─ run_frontend.ps1           # 开发：只启动前端
+│
+├─ AutoGameTool-app/          # 引擎产物（PyInstaller onedir，不入库）
+│  ├─ AutoGameTool.exe        #   引擎主程序（约 8.6 MB）
+│  └─ _internal/              #   运行库（Python、OpenCV、Tk 等，约 170 MB）
 │
 ├─ assets/
 │  ├─ AutoGameTool.ico        # 应用图标（多尺寸 16~256，exe / 安装包 / 快捷方式共用）
 │  └─ AutoGameTool.png        # 512px 主图
 │
-├─ installer/
-│  └─ AutoGameTool.nsi        # NSIS 安装包脚本
-│
 ├─ tools/
 │  ├─ make_icon.py            # 用 Pillow 生成图标（同时输出前端 favicon 与 Tauri 图标）
-│  ├─ to-utf8-bom.ps1         # 把 .ps1 / .nsi 统一转为 UTF-8 with BOM
-│  ├─ smoke_test.ps1          # 冒烟测试：启动 exe → 校验接口 → 关闭
-│  ├─ test_macro_split.ps1    # 录制拆分/打包算法回归测试（编译 macroSplit.ts 后跑 52 条断言）
-│  ├─ test_macro_split.js     # 上述断言本体
-│  ├─ test_engine_state.py    # 快捷键锁 / 快捷键绑定表 / 录制收尾清理 / 悬浮框状态去重 / 暂停状态机（纯逻辑，不起服务）
-│  ├─ test_single_page.py     # 端到端：只允许一个 WebUI（4409 拒绝 + 原窗口不受影响 + 接管）
-│  ├─ test_ui_appearance.py   # 界面回归：外观三态、顶栏/设置栏按钮位置、中文确认框（无头浏览器 + CDP）
-│  ├─ test_appearance.ps1     # 外观判定纯函数回归（编译 appearance.ts 后跑 28 条断言）
-│  ├─ test_appearance.js      # 上述断言本体
-│  ├─ test_state_sync.py      # 端到端：WebUI 与悬浮框启停状态一致、暂停真的冻住、停止真能停
-│  ├─ test_webui_close.py     # 端到端：页面离开时后端退不退（静默掉线不退 / 主动告别才退 / 运行中不退）
-│  ├─ test_overlay_edit.py    # 悬浮框循环次数编辑（Tk 内部合成事件，不注入系统输入）
-│  ├─ test_engine_log.py      # 运行日志：落盘、轮转、令牌绝不落盘
-│  ├─ test_noconsole_log.ps1  # 打包产物核验：GUI 子系统（无控制台）+ 日志落盘 + 令牌掩码
-│  ├─ test_bg_crop.ps1        # 背景截取几何回归测试（编译 bgCrop.ts 后跑 23 条断言）
-│  ├─ test_bg_crop.js         # 上述断言本体
-│  ├─ check_ui_imports.mjs    # 静态检查：.vue 里用到的 <n-xxx> 是否都 import 了（构建期自动跑）
-│  ├─ test_installer.ps1      # 安装包端到端验证：装 → 校验 → 跑 → 卸载
-│  └─ nsis/                   # NSIS 3.10 工具链（build_installer.ps1 可自动下载）
+│  ├─ to-utf8-bom.ps1         # 把 .ps1 统一转为 UTF-8 with BOM
+│  └─ check_ui_imports.mjs    # 静态检查：.vue 里用到的 <n-xxx> 是否都 import 了（构建期自动跑）
 │
-├─ frontend/                  # Vue 3 前端
+├─ frontend/                  # Vue 3 前端 + Tauri 2 桌面壳
 │  ├─ package.json
 │  ├─ pnpm-workspace.yaml     # pnpm v11 配置（allowBuilds 等）
 │  ├─ vite.config.ts
@@ -271,10 +255,15 @@ AutoGameTool/
 │  │     ├─ StepNode.vue      # 自定义流程节点（判断节点双出口）
 │  │     ├─ ScreenCapture.vue # 截图框选 / 单点拾取
 │  │     └─ SettingsModal.vue # 设定面板（外观 → 选图 → 截取 → 透明度）
-│  └─ src-tauri/              # Tauri 2 桌面壳（Rust，可选）
+│  └─ src-tauri/              # 桌面壳（Rust）
+│     ├─ tauri.conf.json      #   Tauri 2 配置：NSIS 目标、把 AutoGameTool-app\ 作为 resources 打进 engine/
+│     ├─ Cargo.toml           #   壳版本号（与 package.json / tauri.conf.json / engine/main.py 同步）
+│     ├─ build.rs
+│     └─ src/lib.rs           #   ★ 壳逻辑：拉引擎 → 等 /health 就绪 → 开窗（失败退回浏览器并写 shell.log）
 │
 └─ engine/                    # Python 引擎
-   ├─ requirements.txt
+   ├─ requirements.txt        #   直接依赖（6 项、不锁版本）
+   ├─ requirements.lock.txt   #   ★ 完整锁定快照（39 个包带版本号）—— 重建 venv 请用这个
    ├─ main.py                 # FastAPI 入口（25 个端点 + WebSocket）
    ├─ executor.py             # 图执行器（分支/单次/终止/宏回放）
    ├─ vision.py               # 截图 + 模板匹配 + 模板管理
@@ -303,11 +292,11 @@ AutoGameTool/
 
 1. 双击 `AutoGameTool-Setup.exe`，按向导安装（默认安装到 `%LOCALAPPDATA%\AutoGameTool`）
 2. 从开始菜单或桌面快捷方式启动
-3. 程序会自动打开浏览器进入编辑器
+3. 壳会先拉起引擎、等 `/health` 就绪，然后**在原生窗口里打开编辑器**（不再需要浏览器；建窗失败时会退回系统默认浏览器并把原因写进 `shell.log`，见 [11](#11-常见问题与排错)）
 
-**方式 B：免安装**
+**方式 B：免安装（绿色）**
 
-直接双击 `AutoGameTool.exe` 即可（绿色版，配置与模板仍写入 `%APPDATA%`）。
+安装包里解出来的目录本身就是绿色的 —— `autogametool.exe`（桌面壳）+ `engine\`（Python 引擎）拷到任意位置，双击壳即可。配置与模板同样写入 `%APPDATA%\AutoGameTool`。
 
 > 🔸 **只能运行一个实例**。重复启动会提示"程序已在运行"并退出——这是为了避免多开导致键盘钩子冲突。
 
@@ -322,7 +311,7 @@ engine\.venv\Scripts\python tools\make_icon.py
 # 1) 引擎
 cd engine
 py -3.13 -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m pip install -r requirements.lock.txt   # 完整快照（推荐）
 .venv\Scripts\python -m uvicorn main:app --host 127.0.0.1 --port 8765
 
 # 2) 前端（另开一个终端）
@@ -506,14 +495,15 @@ pnpm dev            # → http://localhost:1420
 
 ## 9. 打包与发布
 
-> **形态变更（v0.9.0）**：本项目已从「浏览器 WebUI」迁移为 **Tauri 2 桌面版 + Python sidecar**：
+> **形态变更（桌面版 v0.1.0）**：本项目已从「浏览器 WebUI」迁移为 **Tauri 2 桌面版 + Python sidecar**：
 > 界面在原生窗口里显示，引擎仍以本地 HTTP/WS 提供服务（`127.0.0.1:8765`），
 > 用户数据目录与脚本格式完全不变（`%APPDATA%\AutoGameTool`、`.agflow`、找图模板按 id 引用）。
 >
 > - 开发：`pnpm tauri dev`（壳会用 venv 里的解释器拉起引擎源码，并开 DEV 模式免令牌 + 放行 vite 的 CORS）
 > - 构建：`.\build_desktop.ps1`（前端 → 引擎 onedir → `tauri build` → NSIS 安装包）
-> - **WebUI 时期的回归测试脚本已全部移除**（`tools\test_*.py/ps1/js`、`smoke_test.ps1` 等，仍可从 git 历史取回）；
->   下面 9.3~9.13 为迁移前的历史说明，保留供查阅，不再对应仓库里的文件。
+> - **随迁移下线的东西**：WebUI 期的独立安装器（`build_installer.ps1` + `installer\AutoGameTool.nsi`）、便携版（`dist-desktop\` 与 `-便携版.zip`）、NSIS 工具链副本 `tools\nsis\`，以及 WebUI 期的回归测试脚本（`tools\test_*.py/ps1/js`、`smoke_test.ps1` 等）。
+>   安装包改由 Tauri bundler 内置的 NSIS 产出；需要老脚本时仍可从 git 历史取回。
+>   下面 9.3 起的若干小节为迁移前的历史说明，保留供查阅，不再对应仓库里的文件。
 
 ### 9.1 打包发行版（文件夹形态）
 
@@ -527,7 +517,7 @@ pnpm dev            # → http://localhost:1420
 1. `vue-tsc --noEmit` 类型检查
 2. **`tools\check_ui_imports.mjs` 静态检查**：`.vue` 里用到的 `<n-xxx>` 是否都在该文件里 import 了
 3. `vite build` 产出 `frontend\dist`
-4. 调用 `engine\.venv\Scripts\pyinstaller.exe` 打成**文件夹形态**（带应用图标），并整体复制到 `AutoGameTool-app\`
+4. 用 `python -m PyInstaller`（**不是** `engine\.venv\Scripts\pyinstaller.exe`，原因见 `AGENTS.local.md` 第六节）打成**文件夹形态**（带应用图标），并整体复制到 `AutoGameTool-app\`
 
 > 第 2 步为什么必须有（v0.7.1 真实事故）：Naive UI 是按需 import 的，没有全局注册。如果某个 `<n-xxx>` 忘了 import，Vue 会把它当未知元素渲染，**具名插槽里的内容被整个丢掉**——那个按钮在界面上根本不存在。而 `vue-tsc` 只查类型、`vite build` 只做打包，**两者都不报错**，功能就这么无声无息地消失了（当时是 `NPopconfirm` 漏了，顶栏「＋ 新建」和属性面板的「✂ 拆分为可编辑步骤」都不显示）。现在构建期会直接失败并指出缺哪个组件。
 
@@ -535,7 +525,7 @@ pnpm dev            # → http://localhost:1420
 
 ```powershell
 cd engine
-.venv\Scripts\pyinstaller.exe --noconfirm --clean --onedir --noconsole --name AutoGameTool `
+.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onedir --noconsole --name AutoGameTool `
   --icon ..\assets\AutoGameTool.ico `
   --add-data "..\frontend\dist;frontend_dist" `
   --hidden-import uvicorn.logging `
@@ -552,56 +542,58 @@ cd engine
 
 - 前端 `dist` 通过 `--add-data` 打进 `frontend_dist`，运行时由引擎同源提供
 - opencv / onnxruntime 等含动态库的包建议加 `--collect-all`
-- **用 `--onedir` 而不是 `--onefile`**（v0.8.2 起）：单文件版每次启动都要往 `%TEMP%` 解压 `_MEIxxxx`，而 `%TEMP%` 可能不可用（被清理掉、或从 SmartScreen 点「仍要运行」拉起时环境异常），此时 Windows 的 `GetTempPath` 会退回「当前目录」（往往是 `C:\Windows\System32`）→ 弹 `could not create temporary directory` 起不来。文件夹形态没有解压这一步，启动也更快；回归测试见 `tools\test_broken_temp.ps1`
+- **用 `--onedir` 而不是 `--onefile`**（v0.8.2 起）：单文件版每次启动都要往 `%TEMP%` 解压 `_MEIxxxx`，而 `%TEMP%` 可能不可用（被清理掉、或从 SmartScreen 点「仍要运行」拉起时环境异常），此时 Windows 的 `GetTempPath` 会退回「当前目录」（往往是 `C:\Windows\System32`）→ 弹 `could not create temporary directory` 起不来。文件夹形态没有解压这一步，启动也更快
 - 分发时必须**整个目录一起给**（不能只复制 exe）；安装包已处理好
 - 图标取自 `assets\AutoGameTool.ico`，缺失时脚本会先调用 `tools\make_icon.py` 生成
 
-### 9.2 制作安装包（NSIS）
+### 9.2 制作安装包（Tauri bundler + NSIS）
 
 ```powershell
-.\build_exe.ps1        # 1) 先产出 AutoGameTool-app\
-.\build_installer.ps1  # 2) 再产出安装包
+# 一键（推荐）：前端 → 引擎 onedir → Tauri 壳 → NSIS 安装包
+.\build_desktop.ps1
+
+# 引擎产物已存在（AutoGameTool-app\AutoGameTool.exe）时，只重建壳与安装包
+.\build_desktop.ps1 -SkipEngine
 ```
 
-产物：`AutoGameTool-Setup.exe`
+产物：`AutoGameTool-Setup.exe`（由 `tauri build` 输出到 `<CARGO_TARGET_DIR>\release\bundle\nsis\`，根目录那份是分发副本）
 
-`build_installer.ps1` 的行为：
+`build_desktop.ps1` 的行为：
 
-1. 检查 `AutoGameTool.exe`、应用图标、`installer\AutoGameTool.nsi` 是否齐备
-2. 依次在 环境变量 `AUTOGAMETOOL_MAKENSIS` → `PATH` → `tools\nsis\` → 系统安装目录 中查找 `makensis.exe`；都没有就**自动下载并解压 NSIS 3.10** 到 `tools\nsis`
-3. 用 `/DPROJECT_ROOT=<项目根>` `/DOUT_DIR=<项目根>` 调用 `makensis`（NSIS 3 中 `Icon` / `File` / `OutFile` 的相对路径是以「`.nsi` 所在目录」为基准的，所以统一传绝对路径）
-4. 输出安装包大小与 SHA256 校验值
+1. `pnpm build` 构建前端（`vue-tsc` 类型检查 + `check_ui_imports.mjs` + `vite build`）
+2. 引擎打成 onedir → `AutoGameTool-app\`（等价于单独跑 `.\build_exe.ps1`；`-SkipEngine` 用于跳过这一步）
+3. `pnpm tauri build`：编译壳，把 `AutoGameTool-app\` 作为 `resources` 打进安装包的 `engine\`，最后调用 Tauri 内置的 NSIS 产出安装包
+4. 打印壳与安装包的路径、体积与 SHA256
+
+安装包行为全部由 `frontend\src-tauri\tauri.conf.json` 的 `bundle` 段决定（`targets: ["nsis"]`、`installMode: "currentUser"`）。
 
 **安装包行为**
 
 | 项 | 说明 |
 |---|---|
 | 安装目录 | `%LOCALAPPDATA%\AutoGameTool`（当前用户，**不触发 UAC**） |
-| 可选组件 | 主程序（必需）+ 桌面快捷方式（可选，默认勾选） |
-| 快捷方式 | 开始菜单（启动 / 使用说明 / 卸载）+ 桌面 |
+| 快捷方式 | 开始菜单 + 桌面（安装向导里可选） |
 | 卸载入口 | 设置 → 应用 → 已安装的应用（注册标准 `Uninstall` 键） |
-| 用户数据 | `%APPDATA%\AutoGameTool`（模板 / 配置，**卸载时询问，默认保留**） |
-| 版本升级 | 检测到旧版会先静默卸载再安装，用户数据不受影响 |
+| 用户数据 | `%APPDATA%\AutoGameTool`（模板 / 配置 / 运行日志，**卸载不动**） |
+| 版本升级 | 直接覆盖安装；卸载项里的 `DisplayVersion` 取自 `tauri.conf.json` 的 `version` |
 | 静默安装 | `AutoGameTool-Setup.exe /S`（`/D=路径` 可指定目录，须置于最后且不加引号） |
-| 静默卸载 | `"%LOCALAPPDATA%\AutoGameTool\Uninstall.exe" /S`（静默卸载一律保留用户数据） |
-| 系统要求 | Windows 10 / 11（安装时校验，低版本直接拦截） |
-| 免安装绿色版 | 直接跑 `AutoGameTool.exe`，数据同样写入 `%APPDATA%\AutoGameTool` |
+| 静默卸载 | `"%LOCALAPPDATA%\AutoGameTool\Uninstall.exe" /S` |
+| 免安装绿色版 | 把安装目录里的 `autogametool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可，数据同样写入 `%APPDATA%\AutoGameTool` |
 
-> **关于体积**（v0.8.2 实测）：改成文件夹形态后安装包**反而更小了**——`AutoGameTool-app\` 整目录 179 MB，其中大量未压缩的 DLL 交给 NSIS 的 LZMA 压缩，安装包只有 **51.8 MB**（此前单文件版是 71.3 MB：PyInstaller `--onefile` 的载荷本身已 deflate 过，NSIS 几乎压不动，实测压缩率 99.6%）。
+> **关于体积**（0.1.0 实测）：`AutoGameTool-app\` 整目录约 179 MB，其中大量未压缩的 DLL 会由 NSIS 以 LZMA 压掉大部分，安装包 **53.52 MiB**（56,114,814 字节）。
 
-> 安装前建议先退出正在运行的 AutoGameTool：安装包会自动 `taskkill` 旧进程，但手动退出更稳妥（避免脚本执行到一半被打断）。
+> 安装前建议先退出正在运行的 AutoGameTool（覆盖安装时旧进程会占用主程序文件）。
 
 ### 9.3 源码编码约定（重要）
 
-`build_exe.ps1`、`build_installer.ps1`、`installer\AutoGameTool.nsi` 内含中文，**必须保存为「UTF-8 with BOM」**：
+项目里的 `.ps1`（`build_exe.ps1`、`build_desktop.ps1`、`run_engine.ps1`、`run_frontend.ps1`、`tools\to-utf8-bom.ps1`）内含中文，**必须保存为「UTF-8 with BOM」**：
 
 - Windows PowerShell 5.1 对无 BOM 的 UTF-8 文件会按系统 ANSI 代码页解码，中文变乱码并抛出「字符串缺少终止符」之类的语法错误
-- `makensis` 同样依赖 BOM 判断源文件是 UTF-8
 
 改完脚本后跑一次即可修正：
 
 ```powershell
-.\tools\to-utf8-bom.ps1            # 修复所有 .ps1 / .nsi
+.\tools\to-utf8-bom.ps1            # 修复所有 .ps1
 .\tools\to-utf8-bom.ps1 -Check     # 仅检查，未通过返回 1（可放进 CI）
 ```
 
@@ -718,7 +710,7 @@ engine\.venv\Scripts\python.exe tools\test_ui_appearance.py
 1. 静默安装（`/S`）：安装位置为注册表记录的 `InstallDir`（首次安装即 `%LOCALAPPDATA%\AutoGameTool`）
 2. 校验主程序 / README / Uninstall.exe 是否落盘
 3. 校验开始菜单 3 个快捷方式与桌面快捷方式
-4. 校验注册表：`DisplayName`、`DisplayVersion`（期望值从 `installer/AutoGameTool.nsi` 的 `APP_VERSION` 读出，不写死）、`UninstallString`、`QuietUninstallString`、`InstallLocation`、`DisplayIcon`、`EstimatedSize`、`App Paths`
+4. 校验注册表：`DisplayName`、`DisplayVersion`（期望值从 `frontend/src-tauri/tauri.conf.json` 的 `version` 读出，不写死）、`UninstallString`、`QuietUninstallString`、`InstallLocation`、`DisplayIcon`、`EstimatedSize`、`App Paths`
 5. 对**已安装的 exe** 跑一遍 `smoke_test.ps1`
 6. 静默卸载，校验安装目录 / 快捷方式 / 注册表项均已清理，且**用户数据被保留**
 
@@ -752,7 +744,7 @@ gh release upload v0.7.2 .\AutoGameTool-Setup.exe --clobber   # 补传 / 覆盖�
 
 约定：
 
-- **版本号必须三处一致**：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`installer/AutoGameTool.nsi`（`APP_VERSION` / `VIProductVersion`）
+- **版本号必须四处一致**：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`frontend/src-tauri/tauri.conf.json`（决定安装包文件名与卸载项 `DisplayVersion`）、`frontend/src-tauri/Cargo.toml`（同步 `Cargo.lock` 里 `autogametool` 的版本行）
 - **Release 说明直接取自本 README 的「更新日志」对应章节**，保持单一事实来源，不在别处另写一份
 - `AutoGameTool.exe` 与 `AutoGameTool-Setup.exe` **不入库**（见 `.gitignore`），只随 Release 分发；仓库里始终只有源码
 - 补传资产用 `--clobber` 覆盖同名文件，避免留下 `state=starter` 的僵尸资产
@@ -1116,7 +1108,7 @@ v0.7.0 改成「引擎是唯一事实来源」：
 
 | 现象 | 原因 / 解决 |
 |---|---|
-| 桌面版**双击后没有窗口** | v0.9.0 起：壳会先拉引擎、就绪后才开窗。若窗口创建失败（例如系统处于**锁屏/非活动桌面**时 WebView2 会报 `拒绝访问`），壳**不会退出**：它会写日志并**退回系统默认浏览器**打开同一个界面，引擎与悬浮框继续可用。看 `%APPDATA%\AutoGameTool\shell.log` 确认走到哪一步 |
+| 桌面版**双击后没有窗口** | 桌面版 v0.1.0 起：壳会先拉引擎、就绪后才开窗。若窗口创建失败（例如系统处于**锁屏/非活动桌面**时 WebView2 会报 `拒绝访问`），壳**不会退出**：它会写日志并**退回系统默认浏览器**打开同一个界面，引擎与悬浮框继续可用。看 `%APPDATA%\AutoGameTool\shell.log` 确认走到哪一步 |
 | 想看桌面壳的诊断日志 | `%APPDATA%\AutoGameTool\shell.log`（可用环境变量 `AUTOGAMETOOL_SHELL_LOG` 改路径）。里面逐条记录：启动引擎 → 引擎就绪 → 创建窗口 → 结果 |
 | 关掉桌面窗口后引擎还在吗 | 不在：关窗即结束引擎与悬浮框（壳在退出时负责收尾）。想挂机就别关窗口；最小化即可 |
 | 双击 exe 提示"程序已在运行" | 已有实例在跑。检查任务管理器结束残留 `AutoGameTool.exe` |
@@ -1162,7 +1154,7 @@ v0.7.0 改成「引擎是唯一事实来源」：
 | exe 启动慢 / 弹 could not create temporary directory | v0.8.2 起已改为文件夹形态（`--onedir`），不再解压、也不再依赖 `%TEMP%`。若你还在用旧版单文件：把它放到一个可写目录，或直接换新安装包 |
 | 杀软误报 | PyInstaller / NSIS 常见现象；正式分发建议**代码签名** |
 | 安装包被 SmartScreen 拦截 | 安装包未签名，出现「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」 |
-| 构建安装包时找不到 makensis | `build_installer.ps1` 会自动下载 NSIS 3.10 到 `tools\nsis`；离线环境可手动安装 NSIS，再用环境变量 `AUTOGAMETOOL_MAKENSIS` 指向 `makensis.exe` |
+| 构建安装包时找不到 makensis | 桌面版不再手工调用 `makensis`：NSIS 由 `tauri build` 的 bundler 自行下载并调用。若因网络失败，可重试或给 bundler 预置本地 NSIS |
 | 改了 `.ps1` / `.nsi` 后脚本报「字符串缺少终止符」 | 文件被存成了「UTF-8 无 BOM」，执行 `.\tools\to-utf8-bom.ps1` 修复（见 [9.3](#93-源码编码约定重要)） |
 | 安装后快捷方式图标空白 | 图标缓存问题，执行 `ie4uinit.exe -show` 或重建快捷方式 |
 
@@ -1211,21 +1203,42 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 
 ## 14. 更新日志
 
-### v0.9.0 —— 2026-10-02
+### v0.1.0（桌面版首版）—— 2026-10-03
 
-**从浏览器 WebUI 迁移为 Tauri 2 桌面版（Python 引擎作为 sidecar）**。界面、脚本格式与用户数据目录全部保持不变，老脚本 `\.agflow` 与找图模板零改动可用。
+**桌面版从本版起算 0.1.0。** 本版 = 「从浏览器 WebUI 迁移为 Tauri 2 桌面版」+「修掉装完打不开的构建陈旧问题」+「下线 WebUI 期的构建与分发产物」，并把版本号**重基线为桌面版号段**（此前沿用 WebUI 期的 `0.9.x`，其内容全部并入本版）。界面、脚本格式与用户数据目录保持不变，老脚本 `.agflow` 与找图模板零改动可用。
 
-- **桌面壳（Tauri 2）**：原生窗口显示同一个编辑器界面；壳负责「拉起引擎 → 等它就绪 → 开窗」，关闭窗口时结束引擎
-  - 引擎仍是本地 `127.0.0.1:8765` 的 HTTP/WS 服务，前端由引擎同源提供（因此不需要处理 CORS，也不需要在页面里注入令牌）
+#### ✨ 桌面化
+
+- **桌面壳（Tauri 2）**：原生窗口显示同一个编辑器界面；壳负责「拉起引擎 → 等 `/health` 就绪 → 开窗」，关闭窗口时结束引擎
+  - 引擎仍是本地 `127.0.0.1:8765` 的 HTTP/WS 服务，前端由引擎同源提供（不需要处理 CORS，也不需要在页面里注入令牌）
   - 开发模式窗口开在 vite（1420）上，改前端即时热更新；发布模式窗口开在引擎入口 URL（带持久令牌）
   - 单实例：第二次启动把已有窗口提到前台，而不是再开一个
   - 壳自带诊断日志 `%APPDATA%\AutoGameTool\shell.log`（可用 `AUTOGAMETOOL_SHELL_LOG` 指定路径）
 - **引擎新增桌面模式** `AUTOGAMETOOL_DESKTOP=1`：不自动开浏览器，且**永不因为「页面没了」退出**（关窗、刷新、WebView 崩溃都由壳收尾）
 - **引擎新增** `POST /open_external`（令牌保护，只放行 http/https）：顶栏「关于 → GitHub 发布页」交给系统默认浏览器打开 —— 桌面壳里的 `window.open` 会开出一个没有地址栏、没有前进后退的子窗口
-- **打包**：新增 `build_desktop.ps1`（前端 → 引擎 onedir → `tauri build` → NSIS，安装包免管理员）；引擎作为 Tauri `resources` 随包分发，**仍用 onedir（不回到 onefile）**，避免重新引入 `%TEMP%` 解压那类启动失败
-- **清理**：移除 WebUI 时期的 17 个回归测试脚本（合计约 300 条断言）与临时/构建产物约 1.38 GB
-  - 取舍说明：这些脚本大量围绕「浏览器页面/多窗口/关闭页面即退出」的行为编写，桌面版语义已不同；引擎侧可复用的部分后续按新架构重建
+- **打包**：新增 `build_desktop.ps1`（前端 → 引擎 onedir → `tauri build` → NSIS 安装包）；引擎作为 Tauri `resources` 随包分发，**仍用 onedir（不回到 onefile）**，避免重新引入 `%TEMP%` 解压那类启动失败
+
+#### 🐛 修复
+
+- **装完后双击没反应、窗口始终不出现**
+  - 根因：发出去的 `AutoGameTool-Setup.exe` 构建于「建窗失败改为退回浏览器」那次源码改动**之前**。旧壳在 `open_main_window` 失败时直接把错误往上抛，Tauri 的 `build().expect(..)` 随之 panic；release 是无控制台子系统，于是**静默退出**——用户看到的就是「双击了，然后什么都没有」
+  - 触发条件在真实环境里确实存在：系统处于**锁屏/非活动桌面**时 WebView2 建窗会报 `拒绝访问 (os error 5)`；或引擎在 90 秒内没就绪
+  - 修复：按当前源码重新构建安装包。新壳建窗失败时**退回系统默认浏览器**打开同一界面，并把原因写进 `shell.log`，进程不再退出，引擎与悬浮框继续可用
+
+#### 🧹 清理（本版下线）
+
+- **WebUI 期独立安装器**：删除 `build_installer.ps1`、`installer\AutoGameTool.nsi` 与 `tools\nsis\` 工具链 —— 安装包改由 Tauri bundler 内置的 NSIS 产出，不再需要手工维护 `.nsi`
+- **便携版**：删除 `dist-desktop\` 与 `AutoGameTool-0.9.0-便携版.zip`。「免安装」不再单独出一个包 —— 安装包解出来的 `autogametool.exe` + `engine\` 本身就是绿色的（见 [9.2](#92-制作安装包tauri-bundler--nsis)）
+- **构建产物**：删除 `engine\dist\`、`engine\build\`、`engine\AutoGameTool.spec` 与 `engine\build.log`（下次构建自动重建）
+- **WebUI 期回归测试脚本**（17 个、约 300 条断言）与临时/构建产物约 1.4 GB —— 取舍说明：这些脚本大量围绕「浏览器页面 / 多窗口 / 关闭页面即退出」编写，桌面版语义已不同；引擎侧可复用的部分后续按新架构重建
 - 环境要求（本机实测通过）：Rust stable + MSVC 工具链、Node/pnpm、WebView2 运行时、Python 3.13 venv + PyInstaller、NSIS（Tauri 自带）
+
+#### 📝 说明
+
+- 版本号统一为 `0.1.0`，四处联动：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`frontend/src-tauri/tauri.conf.json`、`frontend/src-tauri/Cargo.toml`
+- 安装包文件名 `AutoGameTool_0.1.0_x64-setup.exe`（分发副本为根目录 `AutoGameTool-Setup.exe`）
+
+> 以下为 WebUI 期的历史记录 —— 那些版本号属于迁移前的号段，与桌面版的 `0.x` 不连续，保留供查阅。
 
 ### v0.8.2 —— 2026-10-01
 
