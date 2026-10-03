@@ -1237,6 +1237,7 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 
 - 版本号统一为 `0.1.0`，四处联动：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`frontend/src-tauri/tauri.conf.json`、`frontend/src-tauri/Cargo.toml`
 - 安装包文件名 `AutoGameTool_0.1.0_x64-setup.exe`（分发副本为根目录 `AutoGameTool-Setup.exe`）
+- 发布 tag 用 **`v0.1.0-desktop`** —— WebUI 期的 `v0.1.0` tag（2026-09-11）已被历史版本占用且发过同名 Release，故加 `-desktop` 后缀区分，不复用旧号。后续桌面版按 `0.x` 号段继续，与迁移前的 WebUI 号段不做衔接
 
 > 以下为 WebUI 期的历史记录 —— 那些版本号属于迁移前的号段，与桌面版的 `0.x` 不连续，保留供查阅。
 
