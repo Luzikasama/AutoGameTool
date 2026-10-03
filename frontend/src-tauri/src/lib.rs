@@ -216,14 +216,19 @@ fn start_engine(app: &AppHandle) -> Result<String, String> {
     Ok(token)
 }
 
-fn open_main_window(app: &AppHandle, token: &str) -> Result<(), String> {
-    // 开发：窗口开在 vite dev 上（改前端即时热更新；引擎已开 DEV 模式免令牌 + 放行 1420 CORS）
-    // 发布：窗口开在引擎的入口 URL 上（前端由引擎同源提供，天然没有 CORS 与令牌注入问题）
-    let url = if cfg!(debug_assertions) {
+/// 窗口该指向哪里：
+///   · 开发：vite dev（改前端即时热更新；引擎已开 DEV 模式免令牌 + 放行 1420 CORS）
+///   · 发布：引擎入口 URL（前端由引擎同源提供，天然没有 CORS 与令牌注入问题）
+fn entry_url(token: &str) -> String {
+    if cfg!(debug_assertions) {
         "http://localhost:1420/".to_string()
     } else {
         format!("http://{ENGINE_ADDR}/?token={token}")
-    };
+    }
+}
+
+fn open_main_window(app: &AppHandle, token: &str) -> Result<(), String> {
+    let url = entry_url(token);
     shell_log(&format!("创建主窗口：{url}"));
     let parsed = url.parse().map_err(|e| format!("入口地址非法：{e}"))?;
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed))
@@ -235,6 +240,20 @@ fn open_main_window(app: &AppHandle, token: &str) -> Result<(), String> {
         .map_err(|e| format!("创建窗口失败：{e}"))?;
     shell_log("主窗口已创建");
     Ok(())
+}
+
+/// 窗口建不出来时的兜底：用系统默认浏览器打开同一个界面。
+///
+/// 为什么要有这条：WebView2 建窗依赖 Chromium 宿主窗口，在**锁屏/非活动桌面**等场合
+/// 会以 `os error 5（拒绝访问）` 失败（实测）。这时如果直接退出，用户看到的就是
+/// "双击了没反应"；改为退回浏览器 + 在 shell.log 里写清原因，至少界面还能用，
+/// 而且问题可诊断。引擎与悬浮框都还在跑。
+fn fallback_to_browser(token: &str, err: &str) {
+    let url = entry_url(token);
+    shell_log(&format!("窗口创建失败，退回系统浏览器：{url}（原因：{err}）"));
+    if let Err(e) = tauri_plugin_opener::open_url(url, None::<&str>) {
+        shell_log(&format!("退回浏览器也失败：{e}"));
+    }
 }
 
 /// 顶栏「关于」等外链：交给系统默认浏览器
@@ -277,8 +296,10 @@ pub fn run() {
             match start_engine(&handle) {
                 Ok(token) => {
                     if let Err(e) = open_main_window(&handle, &token) {
+                        // 建窗失败不再直接退出（那会表现成"双击没反应"）：
+                        // 退回浏览器 + 写清原因，引擎与悬浮框继续可用。
                         shell_log(&e);
-                        return Err(e.into());
+                        fallback_to_browser(&token, &e);
                     }
                 }
                 Err(e) => {
