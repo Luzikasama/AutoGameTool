@@ -40,6 +40,7 @@ import hotkey
 import overlay
 import vision
 from executor import Executor, validate_flow
+from scriptgraph import validate_scripts
 from hotkey import HotkeyManager
 from picker import CoordinatePicker
 from recorder import Recorder
@@ -528,7 +529,7 @@ async def lifespan(_: FastAPI):
     enginelog.info("清理完成，引擎退出")
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.1.1", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.1.2", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -633,7 +634,7 @@ async def health():
     return {
         "status": "ok",
         "engine": "autogametool",
-        "version": "0.1.1",
+        "version": "0.1.2",
         "desktop": _desktop_mode(),
     }
 
@@ -776,13 +777,27 @@ async def api_text(req: TextRequest):
     return {"ok": True}
 
 
+def _check_flow_or_400(flow: dict) -> None:
+    """校验流程结构 + 脚本调用关系，有问题就抛 400（前端直接把 detail 弹给用户）。
+
+    执行器内部也有同一份检查（那是给"绕过 HTTP 直接调 run()"的路径兜底），
+    但在这里先拦一次能让用户在点「运行」的当下就看到原因，而不是去翻运行日志。
+    错误信息都是中文、且带完整调用链（例如「主脚本 → 打怪 → 回城 → 打怪」），
+    面向的是零代码用户。
+    """
+    try:
+        validate_flow(flow)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    problems = validate_scripts(flow)
+    if problems:
+        raise HTTPException(400, "\n".join(problems))
+
+
 @app.post("/flow/load")
 async def load_flow(req: RunRequest):
     """仅加载流程（不执行），供快捷键启停使用。"""
-    try:
-        validate_flow(req.flow)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    _check_flow_or_400(req.flow)
     executor.current_flow = req.flow
     _sync_repeat(req.flow)
     return {"ok": True}
@@ -790,10 +805,7 @@ async def load_flow(req: RunRequest):
 
 @app.post("/run")
 async def run(req: RunRequest):
-    try:
-        validate_flow(req.flow)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    _check_flow_or_400(req.flow)
     # 加锁保证「检查-启动」原子性，防止并发 /run 双双通过检查
     async with _run_lock:
         if executor.running:
@@ -1070,7 +1082,7 @@ class OpenExternalRequest(BaseModel):
 
 @app.post("/open_external")
 async def open_external(req: OpenExternalRequest):
-    """用系统默认浏览器打开外链（顶栏「关于 → GitHub 发布页」）。
+    """用系统默认浏览器打开外链（设定 → 关于 → 项目主页 / 发布页）。
 
     为什么由引擎来做而不是前端 `window.open`：桌面壳里的 `window.open` 会开出一个
     没有地址栏/前进后退的 Tauri 子窗口（GitHub 页面在里面很难用），而引擎天然能调
