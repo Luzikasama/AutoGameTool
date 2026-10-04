@@ -15,13 +15,16 @@
 
 | 方式 | 说明 |
 |---|---|
-| **[⬇ 安装包（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool-Setup.exe`，Windows 10 / 11，免管理员，约 53.5 MB |
+| **[⬇ 安装包（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool-Setup.exe`，Windows 10 / 11，免管理员，双击即装，约 55.2 MB |
+| **[⬇ 免安装绿色版（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool_0.1.1_portable_x64.zip`，解压即用、不写注册表，约 73.5 MB |
 | 从源码构建 | 见 [9. 打包与发布](#9-打包与发布)：`.\build_desktop.ps1`（前端 → 引擎 onedir → Tauri 壳 → NSIS 安装包） |
 
 > **当前形态：桌面版 v0.1.1** —— 原生窗口（Tauri 2）+ 本地 Python 引擎。
 > 版本号自 `0.1.0` 起**按桌面版单独计数**，更新日志从桌面版 `0.1.0` 开始（见 [14. 更新日志](#14-更新日志)）。
 
-安装包未做代码签名，若 SmartScreen 提示请选「更多信息 → 仍要运行」。
+两个包都**未做代码签名**。从浏览器下载后首次运行时，Windows 会弹蓝色的「Windows 已保护你的电脑」（SmartScreen）—— 这是**未签名程序的通用提示，不是报毒**，点 **「更多信息」→「仍要运行」** 即可，之后不再出现。
+
+安装包已**内嵌 WebView2 引导程序**：目标机器缺少 WebView2 运行时也能由安装器自行补齐，安装过程不依赖单独联网下载。
 
 ---
 
@@ -296,7 +299,9 @@ AutoGameTool/
 
 **方式 B：免安装（绿色）**
 
-安装包里解出来的目录本身就是绿色的 —— `autogametool.exe`（桌面壳）+ `engine\`（Python 引擎）拷到任意位置，双击壳即可。配置与模板同样写入 `%APPDATA%\AutoGameTool`。
+下载 `AutoGameTool_0.1.1_portable_x64.zip`，解压出 `AutoGameTool\` 目录后双击里面的 `AutoGameTool\autogametool.exe` 即可（建议解压路径不含中文）。目录内容就是 `autogametool.exe`（桌面壳）+ `engine\`（Python 引擎）—— **不写注册表、不建快捷方式，删掉目录即卸载**。配置与模板同样写入 `%APPDATA%\AutoGameTool`。
+
+> 也可以自己动手做绿色版：把安装目录里的 `autogametool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可。
 
 > 🔸 **只能运行一个实例**。重复启动会提示"程序已在运行"并退出——这是为了避免多开导致键盘钩子冲突。
 
@@ -583,9 +588,12 @@ cd engine
 | 版本升级 | 直接覆盖安装；卸载项里的 `DisplayVersion` 取自 `tauri.conf.json` 的 `version` |
 | 静默安装 | `AutoGameTool-Setup.exe /S`（`/D=路径` 可指定目录，须置于最后且不加引号） |
 | 静默卸载 | `"%LOCALAPPDATA%\AutoGameTool\Uninstall.exe" /S` |
-| 免安装绿色版 | 把安装目录里的 `autogametool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可，数据同样写入 `%APPDATA%\AutoGameTool` |
+| 免安装绿色版 | Release 附带 `AutoGameTool_0.1.1_portable_x64.zip`；也可直接把安装目录里的 `autogametool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可，数据同样写入 `%APPDATA%\AutoGameTool` |
+| WebView2 运行时 | 安装包**内嵌引导程序**（`embedBootstrapper`）：目标机器缺 WebView2 时安装器自行补齐，不需要安装期单独下载 |
 
-> **关于体积**（0.1.0 实测）：`AutoGameTool-app\` 整目录约 179 MB，其中大量未压缩的 DLL 会由 NSIS 以 LZMA 压掉大部分，安装包 **53.52 MiB**（56,114,814 字节）。
+> **关于体积**（0.1.1 实测）：`AutoGameTool-app\` 整目录约 182 MB，其中大量未压缩的 DLL 会由 NSIS 以 LZMA 压掉大部分，安装包 **55.22 MiB**（57,906,805 字节）；绿色版 zip 为 **73.49 MiB**（77,059,951 字节）。
+>
+> 安装包比 0.1.0 大约 1.7 MB，是**内嵌 WebView2 引导程序**（`webviewInstallMode: embedBootstrapper`）带来的 —— 换掉默认的 `downloadBootstrapper` 后，目标机器缺 WebView2 时安装器不必先联网单独去下载一个引导程序。
 
 > 安装前建议先退出正在运行的 AutoGameTool（覆盖安装时旧进程会占用主程序文件）。
 
@@ -1165,7 +1173,8 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 | 截图黑屏 | 独占全屏游戏 GDI 无法截取；请改「无边框窗口」模式 |
 | exe 启动慢 / 弹 could not create temporary directory | 当前为文件夹形态（`--onedir`），不解压、也不依赖 `%TEMP%`。若你还在用旧版单文件：把它放到一个可写目录，或直接换新安装包 |
 | 杀软误报 | PyInstaller / NSIS 常见现象；正式分发建议**代码签名** |
-| 安装包被 SmartScreen 拦截 | 安装包未签名，出现「Windows 已保护你的电脑」时点「更多信息 → 仍要运行」 |
+| 安装包被 SmartScreen 拦截 | 安装包**未做代码签名**，从浏览器下载后首次运行会弹「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」即可，之后不再出现。这是未签名程序的通用提示，不代表文件有问题（用命令行/`gh release download` 取到的副本没有"下载来源"标记，不会触发） |
+| 安装时提示缺少 WebView2 | 0.1.1 起安装包已**内嵌 WebView2 引导程序**（`embedBootstrapper`），安装器会自行补齐。若目标机器完全离线且从未装过 WebView2，改用**免安装绿色版**，并先手动装一次 WebView2 运行时 |
 | 构建安装包时找不到 makensis | 桌面版不再手工调用 `makensis`：NSIS 由 `tauri build` 的 bundler 自行下载并调用。若因网络失败，可重试或给 bundler 预置本地 NSIS |
 | 改了 `.ps1` / `.nsi` 后脚本报「字符串缺少终止符」 | 文件被存成了「UTF-8 无 BOM」，执行 `.\tools\to-utf8-bom.ps1` 修复（见 [9.3](#93-源码编码约定重要)） |
 | 安装后快捷方式图标空白 | 图标缓存问题，执行 `ie4uinit.exe -show` 或重建快捷方式 |
@@ -1242,6 +1251,9 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 - 版本号统一为 `0.1.1`，**五处一致**：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`frontend/src-tauri/tauri.conf.json`、`frontend/src-tauri/Cargo.toml` 及其 `Cargo.lock` 里的版本行
 - `/health` 额外返回 `desktop` 字段，前端据此判断是否需要发送告别信号
 - 安装包文件名 `AutoGameTool_0.1.1_x64-setup.exe`（分发副本为根目录 `AutoGameTool-Setup.exe`）；发布 tag 用 **`v0.1.1`**（`0.1.0` 那次加 `-desktop` 后缀只是为了避开仓库里更早的同名 tag）
+- 安装包改为**内嵌 WebView2 引导程序**（`bundle.windows.webviewInstallMode = embedBootstrapper`）并固定安装器图标 —— 目标机器缺少 WebView2 时不再需要安装期单独联网下载
+- **重新提供免安装绿色版** `AutoGameTool_0.1.1_portable_x64.zip`：0.1.0「不再单独出绿色包」的决定在本版撤回 —— 真实场景里仍有既没有管理员权限、也不愿意动安装器的机器
+- 两个包的安装路径已各自实测：安装包在**非工程目录**（下载目录）下 `/S` 静默安装 → 注册表 `DisplayVersion=0.1.1`、桌面快捷方式、`/health` 正常；绿色版解压后直接双击 → `引擎 /health 已就绪` → `主窗口已创建`
 
 ### v0.1.0（桌面版首版）—— 2026-10-03
 
@@ -1268,7 +1280,7 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 #### 🧹 清理（本版下线）
 
 - **WebUI 期独立安装器**：删除 `build_installer.ps1`、`installer\AutoGameTool.nsi` 与 `tools\nsis\` 工具链 —— 安装包改由 Tauri bundler 内置的 NSIS 产出，不再需要手工维护 `.nsi`
-- **便携版**：删除 `dist-desktop\` 与便携版 zip。「免安装」不再单独出一个包 —— 安装包解出来的 `autogametool.exe` + `engine\` 本身就是绿色的（见 [9.2](#92-制作安装包tauri-bundler--nsis)）
+- **便携版**：删除 `dist-desktop\` 与便携版 zip。「免安装」不再单独出一个包 —— 安装包解出来的 `autogametool.exe` + `engine\` 本身就是绿色的（见 [9.2](#92-制作安装包tauri-bundler--nsis)）※ 本项**已在 0.1.1 撤回**，绿色包重新提供
 - **构建产物**：删除 `engine\dist\`、`engine\build\`、`engine\AutoGameTool.spec` 与 `engine\build.log`（下次构建自动重建）
 - **WebUI 期回归测试脚本**（17 个、约 300 条断言）与临时/构建产物约 1.4 GB —— 取舍说明：这些脚本大量围绕「浏览器页面 / 多窗口 / 关闭页面即退出」编写，桌面版语义已不同；引擎侧可复用的部分后续按新架构重建
 - 环境要求（本机实测通过）：Rust stable + MSVC 工具链、Node/pnpm、WebView2 运行时、Python 3.13 venv + PyInstaller、NSIS（Tauri 自带）
