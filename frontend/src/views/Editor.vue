@@ -227,25 +227,34 @@ function onNodeClick({ node }: any) {
 
 function onPaneClick() {
   selectedId.value = null
-  refreshSelection()
+  selIds.value = []
 }
 
 // 刷新多选集合。
-// 注意：@vue-flow/core 1.48 的 emits 列表里**没有** selectionChange（只有
-// selectionStart / selectionDrag / selectionEnd / nodeClick / paneClick），
-// 所以这里不监听"选择变化"，而是在这几个真实存在的事件里主动向 Vue Flow
-// 要一次当前选中集合（getSelectedNodes 是权威来源）。
+// 注意 @vue-flow/core 1.48.2 的 emits 列表里**没有** selectionChange，只有
+// selectionStart / selectionDrag / selectionEnd / nodeClick / paneClick，所以这里不监听
+// 「选择变化」，而是在这几个真实存在的事件里主动向 Vue Flow 要一次当前选中集合。
+//
+// 另一个坑：实例上的 getSelectedNodes 是**数组**（store 里的 computed 已被 reactive 解包，
+// 类型定义写的是 `getSelectedNodes: GraphNode[]`），**不是函数**。旧代码写成
+// `vf.getSelectedNodes()` 会抛 TypeError 并被下面的 catch 吞掉，于是每次都会退回
+// 「遍历 nodes 找 selected」这条兜底 —— 而 v-model 的数组未必及时跟得上内部 store，
+// 表现就是「明明框选上了，打包按钮却不亮」。
 function refreshSelection() {
-  try {
-    const list = vf?.getSelectedNodes?.()
-    if (Array.isArray(list)) {
-      selIds.value = list.map((n: any) => n.id)
-      return
-    }
-  } catch {
-    /* 退回到节点自身的 selected 标记 */
+  const list: any = (vf as any)?.getSelectedNodes
+  const ids: string[] = Array.isArray(list)
+    ? list.map((n: any) => n.id)
+    : nodes.value.filter((n: any) => n.selected).map((n) => n.id)
+  selIds.value = ids
+  // 让右侧属性面板跟着选择走：
+  //  · 全清空 → 面板清空
+  //  · 当前面板对象已不在选中集合里（例如刚框选了另一批）→ 换到集合里的第一个
+  //  · 面板对象仍在集合里 → 保持不动，多选时面板不会来回跳
+  if (ids.length === 0) {
+    selectedId.value = null
+  } else if (!selectedId.value || !ids.includes(selectedId.value)) {
+    selectedId.value = ids[0]
   }
-  selIds.value = nodes.value.filter((n: any) => n.selected).map((n) => n.id)
 }
 
 // ---------- 撤销 / 重做 ----------
@@ -962,14 +971,11 @@ function orderSelectedChain(sel: any[]): any[] | null {
 }
 
 /** 打包时真正要用的选中集合：优先向 Vue Flow 要（权威），再退回本地记录。
- *  这样即使响应式刷新慢一拍，按钮亮着就一定能打包。 */
+ *  这样即使响应式刷新慢一拍，按钮亮着就一定能打包。
+ *  同样注意 getSelectedNodes 在实例上是**数组**，不是函数（见 refreshSelection 的注释）。 */
 function currentSelection(): any[] {
-  try {
-    const list = vf?.getSelectedNodes?.()
-    if (Array.isArray(list) && list.length >= 2) return list
-  } catch {
-    /* 忽略 */
-  }
+  const list: any = (vf as any)?.getSelectedNodes
+  if (Array.isArray(list) && list.length >= 2) return list
   return selNodes.value
 }
 
@@ -1423,10 +1429,19 @@ onBeforeUnmount(() => {
       </aside>
 
       <!-- 画布操作（与常见流程图软件一致）：
-           · 左键在空白处拖拽 = 框选多个节点（selectionOnDrag）
+           · 左键在空白处拖拽 = 框选多个节点
            · 右键拖拽 = 平移画布（panOnDrag=[2]，2 是鼠标右键）
            两者是互斥的：既然左键被框选占用，平移就必须换个按键，否则没法既框选又平移。
-           右键原生菜单在这里没有用处（还会和拖拽打架），直接屏蔽。 -->
+           右键原生菜单在这里没有用处（还会和拖拽打架），直接屏蔽。
+
+           ⚠️ 框选开关的坑（@vue-flow/core 1.48.2）：
+           · 这个版本**没有** selectionOnDrag 这个 prop —— 那是 React Flow 的 API，
+             传进来只会变成一个没人读的 DOM 属性，什么也不会发生。
+           · 真正管事的只有 selectionKeyCode，它的语义是：
+               普通按键字符串（默认 'Shift'）= 按住该键才能框选
+               true                          = **左键按下即框选**（常开）
+               null                          = 彻底禁用框选
+             之前传的正是 null，所以左键拖拽只会落到「什么都不做」上。 -->
       <section class="canvas" @mousemove="onCanvasMove" @contextmenu.prevent>
         <VueFlow
           v-model:nodes="nodes"
@@ -1436,12 +1451,13 @@ onBeforeUnmount(() => {
           :max-zoom="2"
           :fit-view-on-init="false"
           :pan-on-drag="[2]"
-          :selection-on-drag="true"
-          :selection-key-code="null"
+          :selection-key-code="true"
+          multi-selection-key-code="Control"
           @connect="onConnect"
           @node-click="onNodeClick"
-          @selection-end="refreshSelection"
+          @selection-start="refreshSelection"
           @selection-drag="refreshSelection"
+          @selection-end="refreshSelection"
           @pane-click="onPaneClick"
           @pane-ready="onPaneReady"
         >

@@ -132,6 +132,28 @@ body {
   border-radius: 10px;
   font-size: 13px;
 }
+/* ---------- 框选相关 ----------
+   这套样式必须在这里写（全局），因为这几个元素是 Vue Flow 自己渲染的，
+   不在任何组件的 scoped 作用域里。
+   默认主题给的是淡蓝（rgba(0,89,220,.08)），在深色底上几乎看不见。 */
+
+/* 按住左键拖出来的选择矩形 */
+.vue-flow__selection {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+/* 框选结束后套在整批选中节点外面的虚线框（可以整体拖动） */
+.vue-flow__nodesselection-rect {
+  background: transparent;
+  border: 1.5px dashed var(--accent);
+  border-radius: 10px;
+}
+/* 左键在空白处按下就是「开始框选」，光标给个十字；
+   节点自身的 cursor: grab 优先级更高，鼠标移到节点上仍然是拖动手势。 */
+.vue-flow__pane.selection {
+  cursor: crosshair;
+}
 .vue-flow__edge-path {
   stroke: var(--edge);
   stroke-width: 4;

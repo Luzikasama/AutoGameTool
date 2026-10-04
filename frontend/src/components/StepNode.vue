@@ -41,7 +41,13 @@ const summary = computed(() => {
 </script>
 
 <template>
-  <div class="step-node" :style="{ borderColor: selected ? 'var(--accent)' : meta.color }">
+  <!-- 步骤类型色走 CSS 变量下发，而不是直接写在 border-color 上：
+       内联样式优先级高于样式表，一旦写死就没法用 .is-selected 类覆盖了。 -->
+  <div
+    class="step-node"
+    :class="{ 'is-selected': selected }"
+    :style="{ '--node-color': meta.color }"
+  >
     <Handle type="target" :position="Position.Left" />
     <div class="step-icon" :style="{ background: meta.color }">{{ meta.icon }}</div>
     <div class="step-body">
@@ -55,6 +61,9 @@ const summary = computed(() => {
         <span class="branch-no">● 失败</span>
       </div>
     </div>
+    <!-- 选中角标：放在节点框外右上角，用绝对定位，不参与布局（否则会改节点尺寸、
+         触发 Vue Flow 的尺寸重测，节点会自己抖一下）。 -->
+    <span v-if="selected" class="sel-badge" aria-hidden="true">✓</span>
     <template v-if="isJudge">
       <Handle type="source" id="yes" :position="Position.Right" :style="{ top: '28%' }" class="handle-yes" />
       <Handle type="source" id="no" :position="Position.Right" :style="{ top: '72%' }" class="handle-no" />
@@ -65,16 +74,54 @@ const summary = computed(() => {
 
 <style scoped>
 .step-node {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
   background: var(--bg-panel);
-  border: 1.5px solid var(--border);
+  border: 1.5px solid var(--node-color, var(--border));
   border-radius: 10px;
   min-width: 150px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
-  transition: border-color 0.15s;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+/* ---------- 选中反馈 ----------
+   只换边框颜色在深色底上根本认不出来（尤其是本来边框就有步骤类型色的时候）。
+   这里一次性叠四层信号，保证「一眼看出来选中了谁」：
+     1) 边框 + 标题文字换成主题强调色
+     2) 紧贴的 2px 实心光环（box-shadow，不占布局、不改节点尺寸）
+     3) 外圈柔光，多选时相邻节点的光环能连成一片，整体选区一目了然
+     4) 右上角 ✓ 角标
+   全部用 box-shadow / 绝对定位实现，**刻意不改 width/height/border-width**——
+   那会改变节点外框尺寸，触发 Vue Flow 的尺寸重测，节点选中瞬间会自己抖一下。 */
+.step-node.is-selected {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 0 0 7px var(--accent-soft),
+    0 6px 20px rgba(0, 0, 0, 0.45);
+}
+.step-node.is-selected .step-title {
+  color: var(--accent);
+}
+.sel-badge {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
 }
 .step-icon {
   width: 26px;
