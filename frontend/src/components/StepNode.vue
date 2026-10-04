@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, inject } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
 import { STEP_META } from '../types'
 
@@ -8,10 +8,25 @@ const props = defineProps<{
   selected?: boolean
 }>()
 
+/**
+ * 「调用脚本」节点要判断被调用的子脚本是否还在。
+ * 由编辑器 provide 进来（而不是往 data 里塞一个字段）—— data 会进撤销快照，
+ * 塞进去就会因为"扫描结果变了"产生一堆假的历史记录。
+ */
+const scriptExists = inject<(id: string) => boolean>('scriptExists', () => true)
+
 const meta = computed(() => STEP_META[props.data.stepType as keyof typeof STEP_META])
 
 const isJudge = computed(() => props.data.stepType === 'judge')
 const isTerminate = computed(() => props.data.stepType === 'terminate')
+const isScriptCall = computed(() => props.data.stepType === 'script_call')
+
+/** 子脚本缺失（被删掉 / 导入时没带上）——节点上要显示出来，别让问题藏到运行时 */
+const scriptMissing = computed(() => {
+  if (!isScriptCall.value) return false
+  const id = String(props.data.params?.script_id || '')
+  return !!id && !scriptExists(id)
+})
 
 const summary = computed(() => {
   const p = props.data.params || {}
@@ -32,6 +47,11 @@ const summary = computed(() => {
       return `${(p.events || []).length} 个事件 · x${p.speed ?? 1}`
     case 'autoclick':
       return `(${p.x ?? 0}, ${p.y ?? 0}) · ${p.count ?? 10} 次 · ${p.interval_ms ?? 100}ms`
+    case 'script_call': {
+      if (!p.script_id) return '未选择子脚本'
+      const name = p.name || p.script_id
+      return scriptMissing.value ? `脚本不存在：${name}` : `调用：${name}`
+    }
     case 'terminate':
       return '立即停止运行'
     default:
@@ -45,7 +65,7 @@ const summary = computed(() => {
        内联样式优先级高于样式表，一旦写死就没法用 .is-selected 类覆盖了。 -->
   <div
     class="step-node"
-    :class="{ 'is-selected': selected }"
+    :class="{ 'is-selected': selected, 'is-broken': scriptMissing }"
     :style="{ '--node-color': meta.color }"
   >
     <Handle type="target" :position="Position.Left" />
@@ -55,7 +75,7 @@ const summary = computed(() => {
         {{ data.label }}
         <span v-if="data.once" class="once-badge">单次</span>
       </div>
-      <div class="step-summary">{{ summary }}</div>
+      <div class="step-summary" :class="{ broken: scriptMissing }">{{ summary }}</div>
       <div v-if="isJudge" class="branch-legend">
         <span class="branch-yes">● 成功</span>
         <span class="branch-no">● 失败</span>
@@ -64,6 +84,8 @@ const summary = computed(() => {
     <!-- 选中角标：放在节点框外右上角，用绝对定位，不参与布局（否则会改节点尺寸、
          触发 Vue Flow 的尺寸重测，节点会自己抖一下）。 -->
     <span v-if="selected" class="sel-badge" aria-hidden="true">✓</span>
+    <!-- 子脚本缺失角标：同样绝对定位 -->
+    <span v-if="scriptMissing" class="warn-badge" aria-hidden="true">!</span>
     <template v-if="isJudge">
       <Handle type="source" id="yes" :position="Position.Right" :style="{ top: '28%' }" class="handle-yes" />
       <Handle type="source" id="no" :position="Position.Right" :style="{ top: '72%' }" class="handle-no" />
@@ -115,6 +137,32 @@ const summary = computed(() => {
   height: 18px;
   border-radius: 50%;
   background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+/* ---------- 子脚本缺失 ----------
+   被调用的子脚本不存在时，节点必须自己"喊出来"：否则这个问题会一直藏到运行那一刻，
+   错误信息在日志里一闪而过，用户根本对不上是哪个节点。 */
+.step-node.is-broken {
+  border-color: var(--danger);
+  border-style: dashed;
+}
+.step-summary.broken {
+  color: var(--danger);
+}
+.warn-badge {
+  position: absolute;
+  top: -9px;
+  left: -9px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--danger);
   color: #fff;
   font-size: 12px;
   font-weight: 700;

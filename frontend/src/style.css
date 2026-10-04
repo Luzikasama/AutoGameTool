@@ -24,6 +24,12 @@
   /* 顶栏「关于」徽标 */
   --badge-text: #94a3b8;
   --badge-border: #334155;
+  /* 设置面板：侧栏 / 卡片。
+     卡片要**比内容底更亮**才能"浮"出来。深色下 bg-panel(#1c212b) 正好比 bg(#0e1116) 亮，
+     但浅色下 bg-panel(#f7f8fc) 和 bg(#f4f5f8) 几乎一个色，所以单独给一组 token，
+     而不是让设置面板去猜哪个变量合适。 */
+  --bg-nav: #161a22;
+  --bg-card: #1c212b;
   /* 滚动条 */
   --scroll-thumb: #2a303c;
   --scroll-thumb-hover: #3a4252;
@@ -51,6 +57,9 @@
   --glass-panel: rgba(255, 255, 255, 0.78);
   --badge-text: #5f6779;
   --badge-border: #c8cdda;
+  /* 浅色：侧栏和卡片都取纯白，内容区用 --bg(#f4f5f8) 垫在下面 */
+  --bg-nav: #ffffff;
+  --bg-card: #ffffff;
   --scroll-thumb: #c8cdda;
   --scroll-thumb-hover: #aeb5c6;
   --shadow: 0 4px 16px rgba(24, 28, 40, 0.16);

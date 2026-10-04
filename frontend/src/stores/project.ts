@@ -2,11 +2,13 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { LogEntry } from '../types'
 
+/**
+ * 运行日志与运行状态。
+ *
+ * 这两个是**整个应用一份**的：引擎只跑一个流程，日志面板也只有一个。
+ * 各个脚本自己的内容（名称、循环轮数、节点、历史）不在这里 —— 见 stores/docs.ts。
+ */
 export const useProjectStore = defineStore('project', () => {
-  const flowName = ref('未命名脚本')
-  const repeat = ref(1)
-  const inputMode = ref<'real' | 'simulated'>('real')
-  const boundWindow = ref<{ hwnd: number; title: string } | null>(null)
   const logs = ref<LogEntry[]>([])
   const running = ref(false)
   // 暂停：与停止不同，暂停保留执行位置，继续后从原地接着跑
@@ -21,5 +23,5 @@ export const useProjectStore = defineStore('project', () => {
     logs.value = []
   }
 
-  return { flowName, repeat, inputMode, boundWindow, logs, running, paused, addLog, clearLogs }
+  return { logs, running, paused, addLog, clearLogs }
 })
