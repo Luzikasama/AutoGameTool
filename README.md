@@ -16,7 +16,7 @@
 | 方式 | 说明 |
 |---|---|
 | **[⬇ 安装包（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool-Setup.exe`，Windows 10 / 11，免管理员，双击即装，约 55.2 MB |
-| **[⬇ 免安装绿色版（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool_0.1.1_portable_x64.zip`，解压即用、不写注册表，约 73.5 MB |
+| **[⬇ 免安装绿色版（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool_0.1.1_portable_x64.zip`，解压即用、不写注册表，约 73.2 MB |
 | 从源码构建 | 见 [9. 打包与发布](#9-打包与发布)：`.\build_desktop.ps1`（前端 → 引擎 onedir → Tauri 壳 → NSIS 安装包） |
 
 > **当前形态：桌面版 v0.1.1** —— 原生窗口（Tauri 2）+ 本地 Python 引擎。
@@ -591,7 +591,7 @@ cd engine
 | 免安装绿色版 | Release 附带 `AutoGameTool_0.1.1_portable_x64.zip`；也可直接把安装目录里的 `autogametool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可，数据同样写入 `%APPDATA%\AutoGameTool` |
 | WebView2 运行时 | 安装包**内嵌引导程序**（`embedBootstrapper`）：目标机器缺 WebView2 时安装器自行补齐，不需要安装期单独下载 |
 
-> **关于体积**（0.1.1 实测）：`AutoGameTool-app\` 整目录约 182 MB，其中大量未压缩的 DLL 会由 NSIS 以 LZMA 压掉大部分，安装包 **55.22 MiB**（57,906,805 字节）；绿色版 zip 为 **73.49 MiB**（77,059,951 字节）。
+> **关于体积**（0.1.1 实测）：`AutoGameTool-app\` 整目录约 182 MB，其中大量未压缩的 DLL 会由 NSIS 以 LZMA 压掉大部分，安装包 **55.23 MiB**（57,910,501 字节）；绿色版 zip 为 **73.25 MiB**（76,810,713 字节）。
 >
 > 安装包比 0.1.0 大约 1.7 MB，是**内嵌 WebView2 引导程序**（`webviewInstallMode: embedBootstrapper`）带来的 —— 换掉默认的 `downloadBootstrapper` 后，目标机器缺 WebView2 时安装器不必先联网单独去下载一个引导程序。
 
@@ -1243,6 +1243,9 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 
 - **顶栏重排**：删掉最左侧的名称与 logo；**新建 / 加载 / 保存**移到**最左侧**；**悬浮框 / 运行**固定在最**右侧**；快捷键与外观收进 ⚙ 设定
 - **画布鼠标逻辑**：改为**右键拖拽平移**、**左键拖拽框选**多个流程节点（`Ctrl`+点击逐个加选），并屏蔽画布上的浏览器右键菜单。原先「左键拖拽 = 平移、`Shift`+拖拽 = 框选」的组合已不再使用
+  - ⚠️ 首版发出的 0.1.1 里这条**实际没生效**，本版已修：`selectionOnDrag` 是 **React Flow** 的 API，`@vue-flow/core` 里根本没有这个 prop（传进去只会变成一个没人读的 DOM 属性，不报错也不警告），而 `selectionKeyCode=null` 的语义恰好是**彻底禁用框选** —— 两者叠加导致左键框选**永远无法启动**。已改为 `selectionKeyCode=true`（左键即框选）+ `multiSelectionKeyCode=Control`
+  - 同一处还有第二个 bug：实例上的 `vf.getSelectedNodes` 是**数组而非函数**（旧代码按函数调用会抛 `TypeError` 并被 `catch` 静默吞掉），于是每次都退回「遍历 nodes 找 selected」这条不可靠的兜底 —— 表现就是「框上了，但打包合并按钮不亮」。已改为直接读数组，并让右侧属性面板跟随选择集同步
+  - 选中反馈不再只换边框色：改为「边框 + 标题文字变强调色 / 2px 实心光环 / 外圈柔光（多选时相邻节点连成一片）/ 右上角 ✓ 角标」四层叠加。全部用 `box-shadow` 与绝对定位实现，**刻意不动 `width/height/border-width`** —— 改了会触发 Vue Flow 的尺寸重测，节点在选中瞬间会自己抖一下
 - **去掉多余的悬停提示**：快捷键 / 悬浮框 / 关于 / 设定这几个可点击按钮不再包 `NTooltip`（提示与按钮文字重复，还会在点击瞬间挡住目标）
 - **「⏺ 开始录制」按钮**去掉文字后面括号里的快捷键提示（键位改到设置里查看）；**「✂ 拆分录制」**去掉警示色，并与 **📦 打包合并**放进同一行、不再换行
 
