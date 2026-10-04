@@ -30,6 +30,8 @@ const summary = computed(() => {
       return p.template ? `判断：${p.template}` : '判断：未选择模板'
     case 'macro':
       return `${(p.events || []).length} 个事件 · x${p.speed ?? 1}`
+    case 'autoclick':
+      return `(${p.x ?? 0}, ${p.y ?? 0}) · ${p.count ?? 10} 次 · ${p.interval_ms ?? 100}ms`
     case 'terminate':
       return '立即停止运行'
     default:

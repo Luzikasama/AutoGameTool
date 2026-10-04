@@ -159,8 +159,10 @@ export interface PackResult {
   badTypes: StepType[]
 }
 
-/** 这些步骤类型表达不了"键鼠事件"，因此不能被打包进录制步骤。 */
-const UNPACKABLE: StepType[] = ['find_image', 'judge', 'text', 'terminate']
+/** 这些步骤类型表达不了"键鼠事件"，因此不能被打包进录制步骤。
+ *  autoclick（连点器）虽然是鼠标动作，但它的语义是"按这个节奏点 N 次"，
+ *  录制里没有等价的"节奏 + 次数"表达，硬塞进去会悄悄丢掉次数与间隔。 */
+const UNPACKABLE: StepType[] = ['find_image', 'judge', 'text', 'terminate', 'autoclick']
 
 /** 某个步骤类型能否被打包进录制。 */
 export function canPack(stepType: StepType): boolean {

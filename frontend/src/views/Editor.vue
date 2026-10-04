@@ -19,7 +19,7 @@ import {
 import StepNode from '../components/StepNode.vue'
 import ScreenCapture from '../components/ScreenCapture.vue'
 import SettingsModal from '../components/SettingsModal.vue'
-import { engine, engineWsUrl, goodbyeBeacon, type HotkeyBinding } from '../api/client'
+import { engine, engineWsUrl, goodbyeBeacon } from '../api/client'
 import { useProjectStore } from '../stores/project'
 import { STEP_META, type FlowFile, type StepType, type WindowInfo } from '../types'
 import {
@@ -47,7 +47,7 @@ const stepTypes = Object.entries(STEP_META) as Array<[StepType, { label: string;
 const nodes = ref<any[]>([])
 const edges = ref<any[]>([])
 const selectedId = ref<string | null>(null)
-// 多选（Vue Flow 内建：Shift+拖拽框选、Ctrl+点击逐个加选）选中的节点 id。
+// 多选（Vue Flow 内建：空白处左键拖拽框选、Ctrl+点击逐个加选）选中的节点 id。
 // 用 selection-change 事件单独记一份，而不是依赖 node.selected —— 打包按钮的
 // 可用状态/数量要能跟着选择实时变。
 const selIds = ref<string[]>([])
@@ -74,12 +74,9 @@ const keyRecording = ref(false)
 // 键鼠录制
 const macroRecording = ref(false)
 
-// 快捷键：全部命令都能改键 + 单独启用/停用（标签由引擎给出）
-const hotkeyVisible = ref(false)
-const bindings = ref<HotkeyBinding[]>([])
-const hotkeyDefaults = ref<HotkeyBinding[]>([])
-/** 正在录制按键的那条绑定 id；空串表示没在录 */
-const recordingId = ref('')
+// 桌面版标志：引擎 /health 给出。桌面版里「页面」就是原生窗口的内容，
+// 关窗由壳负责结束进程，因此前端不再发「告别」信号（见 onMounted 的 pagehide）。
+const desktopMode = ref(false)
 
 // 缩放/平移实例
 let vf: any = null
@@ -143,10 +140,19 @@ const DEFAULTS: Record<StepType, Record<string, any>> = {
   judge: { template: '', threshold: 0.85, timeout_ms: 5000 },
   terminate: {},
   macro: { events: [], speed: 1.0 },
+  // 连点器：interval_ms 是两次点击之间的间隔（频率越低间隔越大）
+  autoclick: { x: 0, y: 0, button: 'left', interval_ms: 100, count: 10 },
 }
 
 function metaOf(type: string) {
   return STEP_META[type as StepType] ?? { label: type, icon: '❓', color: '#888' }
+}
+
+/** 连点器：把「间隔毫秒」换算成「次/秒」，对着"频率"更好理解 */
+function clickRate(intervalMs: number): string {
+  const ms = Number(intervalMs)
+  if (!ms || ms <= 0) return '不限速（尽可能快）'
+  return `约 ${(1000 / ms).toFixed(1)} 次/秒`
 }
 
 // ---------- 画布控制 ----------
@@ -399,7 +405,8 @@ async function onCaptured(tplId: string) {
 function onPicked(x: number, y: number) {
   if (!pickingVisible.value) return
   pickingVisible.value = false
-  if (selectedNode.value && selectedNode.value.data.stepType === 'click') {
+  const st = selectedNode.value?.data.stepType
+  if (selectedNode.value && (st === 'click' || st === 'autoclick')) {
     selectedNode.value.data.params.x = x
     selectedNode.value.data.params.y = y
     message.success(`已拾取坐标 (${x}, ${y})`)
@@ -666,104 +673,12 @@ function onLoadFile(e: Event) {
   input.value = ''
 }
 
-// ---------- 快捷键 ----------
-const KEY_ALIAS: Record<string, string> = {
-  arrowup: 'up',
-  arrowdown: 'down',
-  arrowleft: 'left',
-  arrowright: 'right',
-  escape: 'esc',
-  return: 'enter',
-  del: 'delete',
-  control: 'ctrl',
-  meta: 'win',
-}
+// 全局快捷键的改键界面已挪到「⚙ 设定 → 快捷键」（见 components/SettingsModal.vue）：
+// 它属于"设定"而不是"高频操作"，放在顶栏会挤掉真正的常用按钮。
 
-/** 显示用的按键文本：alt + f1 */
-function keysText(keys: string[]) {
-  return (keys || []).join(' + ') || '（未设置）'
-}
-
-/** 界面上某条快捷键的显示文本（录制按钮上要用） */
-function hotkeyLabel(id: string): string {
-  const b = bindings.value.find((x) => x.id === id)
-  if (!b) return ''
-  return b.enabled ? keysText(b.keys) : '未启用'
-}
-
-async function loadHotkeys() {
-  try {
-    const r = await engine.getHotkeys()
-    bindings.value = r.bindings || []
-    hotkeyDefaults.value = r.defaults || []
-  } catch {
-    /* 引擎不可达时留空（下次打开面板再取） */
-  }
-}
-
-async function openHotkeys() {
-  hotkeyVisible.value = true
-  if (!bindings.value.length) await loadHotkeys()
-}
-
-async function saveHotkeys() {
-  try {
-    const r = await engine.setHotkeys(bindings.value)
-    bindings.value = r.bindings || []
-    message.success('快捷键已保存')
-  } catch (e: any) {
-    message.error('保存快捷键失败：' + e.message)
-  }
-}
-
-function restoreHotkeyDefaults() {
-  bindings.value = hotkeyDefaults.value.map((b) => ({ ...b, keys: [...b.keys] }))
-  message.info('已填回默认快捷键，点「保存」后生效')
-}
-
-function startRecord(id: string) {
-  if (recordingId.value === id) {
-    finishRecord()
-    return
-  }
-  recordingId.value = id
-  window.addEventListener('keydown', onRecordKey)
-}
-
-/** 录制一次按键组合。
- *
- *  直接看这次事件的修饰键状态，而不是像旧实现那样「按到修饰键先攒起来、等主键再收尾」：
- *  后者在用户先松修饰键再按主键、或者一次按到位时都容易攒出错的组合。
- */
-function onRecordKey(e: KeyboardEvent) {
-  e.preventDefault()
-  e.stopPropagation()
-  const k = e.key.toLowerCase()
-  const mods: string[] = []
-  if (e.ctrlKey) mods.push('ctrl')
-  if (e.altKey) mods.push('alt')
-  if (e.shiftKey) mods.push('shift')
-  if (e.metaKey) mods.push('win')
-  // 只按下修饰键：等主键，不结束录制
-  if (['control', 'alt', 'shift', 'meta'].includes(k)) return
-  const main = k === ' ' ? 'space' : KEY_ALIAS[k] || k
-  const b = bindings.value.find((x) => x.id === recordingId.value)
-  if (b) {
-    b.keys = [...mods, main]
-    b.enabled = true
-  }
-  finishRecord()
-}
-
-function finishRecord() {
-  recordingId.value = ''
-  window.removeEventListener('keydown', onRecordKey)
-}
-
-// 「关于」：跳到 GitHub 发布页。必须用新标签页——本页是 WebUI 本身的连接，
-// 直接在当前页跳走会让引擎在宽限期后自动退出。
-// 桌面壳里不能直接 window.open 外链（会开一个没有地址栏的 Tauri 子窗口），
-// 交给引擎用系统默认浏览器打开；引擎不可用时再退回 window.open。
+// 「关于」：跳到 GitHub 发布页。交给引擎用系统默认浏览器打开——
+// 桌面壳里的 window.open 会开出一个没有地址栏、没有前进后退的子窗口。
+// （过去还要顾虑"当前页跳走会让引擎在宽限期后退出"，桌面模式下已不存在这条链路。）
 const RELEASES_URL = 'https://github.com/Luzikasama/AutoGameTool/releases'
 
 function openAbout() {
@@ -1020,7 +935,7 @@ function splitMacroFromToolbar() {
   if (sel && sel.data.stepType === 'macro') return splitMacro(sel)
   const list = macroNodes.value
   if (!list.length) {
-    message.warning('流程里还没有「键鼠录制」步骤：先点「⏺ 开始录制 (alt+9)」录一段操作')
+    message.warning('流程里还没有「键鼠录制」步骤：先点「⏺ 开始录制」录一段操作')
     return
   }
   if (list.length > 1) {
@@ -1062,7 +977,7 @@ function currentSelection(): any[] {
 function mergeSelected() {
   const sel = currentSelection()
   if (sel.length < 2) {
-    message.warning('请先在画布上选中至少 2 个相邻步骤（Shift+拖拽框选，或 Ctrl+点击逐个加选）')
+    message.warning('请先在画布上选中至少 2 个相邻步骤（左键拖拽框选，或 Ctrl+点击逐个加选）')
     return
   }
   const chain = orderSelectedChain(sel)
@@ -1309,18 +1224,29 @@ watch(
 let syncTimer: ReturnType<typeof setInterval> | null = null
 let stateTimer: ReturnType<typeof setInterval> | null = null
 
+/** 页面告别：浏览器模式下才发（见下面的 pagehide）。
+ *
+ *  桌面版里页面就是原生窗口的内容：刷新、WebView 崩溃、壳重建窗口都会触发
+ *  pagehide，而引擎侧的生命周期由壳负责 —— 再发「告别」只会让日志里凭空多出
+ *  一堆"页面主动关闭"，属于 WebUI 时代的遗留动作。桌面版直接跳过。
+ */
+function onPageHide() {
+  if (desktopMode.value) return
+  goodbyeBeacon()
+}
+
 onMounted(() => {
   connectWs()
   refreshTemplates()
   refreshWindows()
-  loadHotkeys()
   syncOverlay()
   loadFlowToEngine(true)
-  // 「关于」的提示里显示引擎版本：确认「当前跑的是哪一版」时不用再翻发布页
+  // 引擎版本 + 当前形态（桌面版 / 浏览器版）：形态决定要不要发「页面告别」
   engine
     .health()
     .then((h) => {
       engineVersion.value = String(h?.version || '')
+      desktopMode.value = !!h?.desktop
     })
     .catch(() => {
       /* 引擎不可达时留空 */
@@ -1332,8 +1258,9 @@ onMounted(() => {
   // 撤销/重做的历史起点 + 快捷键
   resetHistory()
   window.addEventListener('keydown', onHistoryKey)
-  // 关闭/跳转离开时明确告别一次：引擎据此区分「用户关了页面」与「页面被系统挂起」
-  window.addEventListener('pagehide', goodbyeBeacon)
+  // 关闭/跳转离开时告别一次：引擎据此区分「用户关了页面」与「页面被系统挂起」。
+  // 桌面版不发（见 onPageHide）。
+  window.addEventListener('pagehide', onPageHide)
 })
 onBeforeUnmount(() => {
   destroyed = true
@@ -1343,55 +1270,15 @@ onBeforeUnmount(() => {
   if (stateTimer) clearInterval(stateTimer)
   if (histTimer) clearTimeout(histTimer)
   window.removeEventListener('keydown', onHistoryKey)
-  window.removeEventListener('pagehide', goodbyeBeacon)
+  window.removeEventListener('pagehide', onPageHide)
 })
 </script>
 
 <template>
   <div class="editor">
     <header class="topbar">
-      <div class="brand">🎮 AutoGameTool</div>
-      <n-input v-model:value="store.flowName" class="name-input" placeholder="脚本名称" />
-      <div class="setting">
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <n-button size="small" @click="openHotkeys">⌨ 快捷键</n-button>
-          </template>
-          全局快捷键：每条都能改键、也能单独停用（默认 alt+F1 / alt+F2 / alt+F3）
-        </n-tooltip>
-      </div>
-      <div class="setting">
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <n-button
-              size="small"
-              :type="overlayEnabled ? 'primary' : 'default'"
-              :disabled="!overlayAvailable"
-              @click="toggleOverlay"
-            >
-              🪟 悬浮框{{ overlayEnabled ? '已开' : '' }}
-            </n-button>
-          </template>
-          {{ overlayAvailable
-            ? '在游戏画面上方置顶显示循环进度与当前步骤（可拖拽，点 ✕ 收起）'
-            : '悬浮框不可用：当前运行环境缺少 tkinter' }}
-        </n-tooltip>
-      </div>
-      <div class="spacer" />
-      <n-tooltip trigger="hover">
-        <template #trigger>
-          <button class="ver-badge" type="button" @click="openAbout">
-            关于{{ engineVersion ? ` v${engineVersion}` : '' }}
-          </button>
-        </template>
-        当前引擎版本 {{ engineVersion || '未知' }} · 点击打开 GitHub 发布页（新标签页，不会断开当前页面）
-      </n-tooltip>
-      <n-tooltip trigger="hover">
-        <template #trigger>
-          <n-button size="small" @click="settingsVisible = true">⚙ 设定</n-button>
-        </template>
-        设定：外观（浅色 / 深色 / 跟随系统）与自定义背景
-      </n-tooltip>
+      <!-- 左侧：文件操作 + 脚本名。不再放 Logo/品牌名——桌面窗口的标题栏已经写了 AutoGameTool，
+           顶栏那块位置留给真正高频的操作。 -->
       <n-popconfirm
         positive-text="确定"
         negative-text="取消"
@@ -1402,9 +1289,25 @@ onBeforeUnmount(() => {
         </template>
         新建会清空当前画布与脚本名（未保存的改动会丢）。误点了可以按 Ctrl+Z 恢复。确定新建？
       </n-popconfirm>
-      <n-button size="small" @click="saveFlow">💾 保存</n-button>
       <n-button size="small" @click="triggerLoad">📂 加载</n-button>
+      <n-button size="small" @click="saveFlow">💾 保存</n-button>
       <input ref="fileInput" type="file" accept=".agflow,application/json" style="display: none" @change="onLoadFile" />
+      <span class="topbar-divider" />
+      <n-input v-model:value="store.flowName" class="name-input" placeholder="脚本名称" />
+      <div class="spacer" />
+      <!-- 右侧：关于 / 设定 / 悬浮框 / 运行。这四类按钮一律不加悬停提示。 -->
+      <button class="ver-badge" type="button" @click="openAbout">
+        关于{{ engineVersion ? ` v${engineVersion}` : '' }}
+      </button>
+      <n-button size="small" @click="settingsVisible = true">⚙ 设定</n-button>
+      <n-button
+        size="small"
+        :type="overlayEnabled ? 'primary' : 'default'"
+        :disabled="!overlayAvailable"
+        @click="toggleOverlay"
+      >
+        🪟 悬浮框{{ overlayEnabled ? '已开' : '' }}
+      </n-button>
       <n-button v-if="!store.running" type="primary" @click="run">▶ 运行</n-button>
       <template v-else>
         <n-tooltip trigger="hover">
@@ -1471,15 +1374,14 @@ onBeforeUnmount(() => {
           @click="macroRecording ? stopRecording() : startRecording()"
         >
           {{ macroRecording ? '⏹ 停止录制' : '⏺ 开始录制' }}
-          <template v-if="hotkeyLabel('record')">（{{ hotkeyLabel('record') }}）</template>
         </n-button>
       </div>
-      <div class="setting">
+      <!-- 拆分与打包是一对逆操作，放在同一个不换行容器里，保证它们始终同一行 -->
+      <div class="setting nowrap-group">
         <n-tooltip trigger="hover">
           <template #trigger>
             <n-button
               size="small"
-              type="warning"
               :disabled="!macroNodes.length"
               @click="splitMacroFromToolbar"
             >
@@ -1490,11 +1392,9 @@ onBeforeUnmount(() => {
             macroNodes.length
               ? '把「键鼠录制」步骤拆成可单独编辑的鼠标点击 / 键盘按键 / 延时节点' +
                 (macroNodes.length > 1 ? '；流程里有多个录制步骤，先在画布上选中要拆的那个' : '')
-              : '流程里还没有「键鼠录制」步骤：先用 ⏺ 开始录制 (alt+9) 录一段操作'
+              : '流程里还没有「键鼠录制」步骤：先用「⏺ 开始录制」录一段操作'
           }}
         </n-tooltip>
-      </div>
-      <div class="setting">
         <n-tooltip trigger="hover">
           <template #trigger>
             <n-button size="small" :disabled="selNodes.length < 2" @click="mergeSelected">
@@ -1504,7 +1404,7 @@ onBeforeUnmount(() => {
           {{
             selNodes.length >= 2
               ? `把选中的 ${selNodes.length} 个相邻步骤合并成一个「键鼠录制」步骤（拆分的逆操作）`
-              : '先选中至少 2 个相邻步骤：Shift+拖拽框选，或按住 Ctrl 逐个点击加选'
+              : '先选中至少 2 个相邻步骤：在画布上左键拖拽框选，或按住 Ctrl 逐个点击加选'
           }}
         </n-tooltip>
       </div>
@@ -1518,11 +1418,16 @@ onBeforeUnmount(() => {
           <span>{{ meta.label }}</span>
         </div>
         <div class="palette-hint">
-          点击添加步骤<br />拖动节点圆点手动连线<br /><b>Shift+拖拽</b> 框选多个步骤<br /><b>Ctrl+点击</b> 逐个加选
+          点击添加步骤<br />拖动节点圆点手动连线<br /><b>左键拖拽</b> 框选多个步骤<br /><b>右键拖拽</b> 平移画布<br /><b>Ctrl+点击</b> 逐个加选
         </div>
       </aside>
 
-      <section class="canvas" @mousemove="onCanvasMove">
+      <!-- 画布操作（与常见流程图软件一致）：
+           · 左键在空白处拖拽 = 框选多个节点（selectionOnDrag）
+           · 右键拖拽 = 平移画布（panOnDrag=[2]，2 是鼠标右键）
+           两者是互斥的：既然左键被框选占用，平移就必须换个按键，否则没法既框选又平移。
+           右键原生菜单在这里没有用处（还会和拖拽打架），直接屏蔽。 -->
+      <section class="canvas" @mousemove="onCanvasMove" @contextmenu.prevent>
         <VueFlow
           v-model:nodes="nodes"
           v-model:edges="edges"
@@ -1530,6 +1435,9 @@ onBeforeUnmount(() => {
           :min-zoom="0.2"
           :max-zoom="2"
           :fit-view-on-init="false"
+          :pan-on-drag="[2]"
+          :selection-on-drag="true"
+          :selection-key-code="null"
           @connect="onConnect"
           @node-click="onNodeClick"
           @selection-end="refreshSelection"
@@ -1659,6 +1567,60 @@ onBeforeUnmount(() => {
             </div>
           </template>
 
+          <template v-else-if="selectedNode.data.stepType === 'autoclick'">
+            <div class="field">
+              <label>连点坐标（X, Y）</label>
+              <div class="row">
+                <n-input-number v-model:value="selectedNode.data.params.x" :step="1" style="flex: 1" />
+                <n-input-number v-model:value="selectedNode.data.params.y" :step="1" style="flex: 1" />
+              </div>
+              <n-button size="small" block style="margin-top: 6px" @click="startPicking">🎯 采集点击坐标</n-button>
+              <p class="terminate-hint" style="margin-top: 6px">
+                点「采集」后切到游戏画面，按拾取快捷键（默认 alt+F3）再单击左键，坐标会自动填进来。
+              </p>
+            </div>
+            <div class="field">
+              <label>点击频率：{{ clickRate(selectedNode.data.params.interval_ms) }}</label>
+              <n-slider
+                v-model:value="selectedNode.data.params.interval_ms"
+                :min="0"
+                :max="2000"
+                :step="1"
+                :format-tooltip="(v: number) => `${v} ms（${clickRate(v)}）`"
+              />
+            </div>
+            <div class="field">
+              <label>间隔（毫秒，两次点击之间；0 = 不限速）</label>
+              <n-input-number
+                v-model:value="selectedNode.data.params.interval_ms"
+                :min="0"
+                :max="600000"
+                :step="10"
+              />
+            </div>
+            <div class="field">
+              <label>点击次数</label>
+              <n-input-number v-model:value="selectedNode.data.params.count" :min="1" :max="100000" :step="10" />
+            </div>
+            <div class="field">
+              <label>按键</label>
+              <n-select
+                v-model:value="selectedNode.data.params.button"
+                :options="[
+                  { label: '左键', value: 'left' },
+                  { label: '右键', value: 'right' },
+                  { label: '中键', value: 'middle' },
+                ]"
+              />
+            </div>
+            <div class="field">
+              <p class="terminate-hint">
+                连点过程中可以随时暂停 / 停止：每次点击前都会查一次状态，长连点也不会卡住「停止」。
+                整个过程算作一个步骤，循环轮数照常生效。
+              </p>
+            </div>
+          </template>
+
           <template v-else-if="selectedNode.data.stepType === 'key'">
             <div class="field">
               <label>按键（点「录制」后按下按键）</label>
@@ -1715,12 +1677,12 @@ onBeforeUnmount(() => {
                 :type="macroRecording ? 'error' : 'primary'"
                 @click="macroRecording ? stopRecording() : startRecording()"
               >
-                {{ macroRecording ? '⏹ 停止录制' : '⏺ 重新录制（alt+9）' }}
+                {{ macroRecording ? '⏹ 停止录制' : '⏺ 重新录制' }}
               </n-button>
             </div>
             <div class="field">
               <p class="terminate-hint">
-                提示：录制会覆盖当前步骤内容；录制时请切换到目标窗口操作，再次按 alt+9 结束。
+                提示：录制会覆盖当前步骤内容；录制时请切换到目标窗口操作，再按一次录制快捷键（默认 alt+F2）结束。
                 拆分后每个动作都是独立节点，可以单独删除/改坐标/改按键；长按某个键会被化简为单击（如需长按可在其后手动加延时）。
               </p>
             </div>
@@ -1791,50 +1753,10 @@ onBeforeUnmount(() => {
       <img :src="matchImage" alt="match result" style="max-width: 100%; border-radius: 8px" />
     </n-modal>
 
-    <!-- 设定：自定义背景（选图 → 按屏幕比例截取 → 调透明度） -->
+    <!-- 设定：外观 / 自定义背景 / 全局快捷键（快捷键改键属于"设定"，不再占顶栏） -->
     <SettingsModal v-model:show="settingsVisible" />
 
-    <n-modal v-model:show="hotkeyVisible" preset="card" title="全局快捷键设置" style="width: 560px">
-      <div class="hotkey-body">
-        <p class="hk-tip">
-          每条都能改键，也能单独停用。点右侧「录制」后按下想要的组合键即可
-          （支持 ctrl / alt / shift / win + 字母、数字、f1-f12）。
-        </p>
-        <div v-for="b in bindings" :key="b.id" class="hk-row">
-          <span class="hk-label">{{ b.label }}</span>
-          <button
-            class="hk-keys"
-            type="button"
-            :class="{ recording: recordingId === b.id, off: !b.enabled }"
-            @click="startRecord(b.id)"
-          >
-            {{ recordingId === b.id ? '请按下组合键…' : keysText(b.keys) }}
-          </button>
-          <n-switch
-            :value="b.enabled"
-            size="small"
-            @update:value="(v: boolean) => (b.enabled = v)"
-          />
-          <span class="hk-state">{{ b.enabled ? '启用' : '已停用' }}</span>
-        </div>
-        <p v-if="!bindings.length" class="hk-hint">读不到快捷键（引擎未就绪），稍后重新打开本面板。</p>
-        <p class="hk-hint">
-          同一组按键不能给两个功能用；保存时引擎会校验并提示冲突。
-          停用的功能仍可用界面上的按钮（例如「开始录制」）。
-        </p>
-      </div>
-      <template #footer>
-        <div style="display: flex; justify-content: space-between; gap: 8px">
-          <n-button quaternary @click="restoreHotkeyDefaults">恢复默认</n-button>
-          <div style="display: flex; gap: 8px">
-            <n-button @click="hotkeyVisible = false">取消</n-button>
-            <n-button type="primary" @click="saveHotkeys">保存</n-button>
-          </div>
-        </div>
-      </template>
-    </n-modal>
-
-    <!-- 只允许一个 WebUI：本页被引擎拒绝时给出明确说明，并后台重试（刷新页面能自动接管） -->
+    <!-- 只允许一个编辑器窗口：本页被引擎拒绝时给出明确说明，并后台重试（刷新页面能自动接管） -->
     <div v-if="webuiBusy" class="busy-mask">
       <div class="busy-card">
         <div class="busy-title">已在另一个窗口打开</div>
@@ -1862,9 +1784,12 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border);
   background: var(--bg-soft);
 }
-.brand {
-  font-weight: 700;
-  white-space: nowrap;
+/* 左侧文件操作与脚本名之间的细分隔线 */
+.topbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  flex: none;
 }
 .name-input {
   max-width: 200px;
@@ -1892,7 +1817,7 @@ onBeforeUnmount(() => {
 .settings-bar {
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 14px;
   padding: 6px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
@@ -1902,6 +1827,11 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+/* 组内必须同一行（拆分录制 / 打包合并是一对逆操作，拆开看会很别扭） */
+.nowrap-group {
+  flex-wrap: nowrap;
+  white-space: nowrap;
 }
 .setting-label {
   font-size: 12px;
@@ -2150,67 +2080,9 @@ onBeforeUnmount(() => {
   word-break: break-all;
 }
 
-.hotkey-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.hk-tip {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1.6;
-}
-.hk-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.hk-label {
-  width: 140px;
-  flex: none;
-  font-size: 13px;
-}
-/* 快捷键显示区就是「录制」按钮：点一下开始录，避免多一个按钮 */
-.hk-keys {
-  flex: 1;
-  min-width: 0;
-  text-align: left;
-  padding: 5px 10px;
-  border-radius: 7px;
-  border: 1px solid var(--border);
-  background: var(--bg-panel);
-  color: var(--text);
-  font-family: 'Cascadia Code', Consolas, monospace;
-  font-size: 13px;
-  cursor: pointer;
-  transition: 0.15s;
-}
-.hk-keys:hover {
-  border-color: var(--accent);
-}
-.hk-keys.recording {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.hk-keys.off {
-  color: var(--text-dim);
-  text-decoration: line-through;
-}
-.hk-state {
-  width: 44px;
-  flex: none;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-.hk-hint {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.6;
-}
+/* 快捷键改键界面已挪到「⚙ 设定」（SettingsModal.vue），相关样式随之搬走 */
 
-/* 被「只允许一个 WebUI」拒绝时的遮罩：此时页面本来也没连上引擎，先挡住误操作 */
+/* 被「只允许一个编辑器窗口」拒绝时的遮罩：此时页面本来也没连上引擎，先挡住误操作 */
 .busy-mask {
   position: fixed;
   inset: 0;

@@ -43,7 +43,15 @@ from executor import Executor, validate_flow
 from hotkey import HotkeyManager
 from picker import CoordinatePicker
 from recorder import Recorder
-from window import capture_window, find_webui_window, focus_window, get_window_rect, is_minimized, list_windows
+from window import (
+    capture_window,
+    find_webui_window,
+    find_window_of_pid,
+    focus_window,
+    get_window_rect,
+    is_minimized,
+    list_windows,
+)
 from ws_manager import manager
 
 # 把「推给前端的日志」同时落盘：这样页面关掉/WebSocket 断开之后，运行过程仍然可查
@@ -328,19 +336,51 @@ async def _restore_audit(hwnd: int | None, why: str) -> None:
         pass
 
 
-async def _focus_webui() -> None:
-    """把 WebUI 所在的浏览器窗口恢复并切到前台（悬浮框「界面」按钮）。
+async def _focus_ui() -> None:
+    """把编辑器界面切到前台（悬浮框右上角「回到界面」图标）。
 
-    注意只按标题找会命中同名文件夹的资源管理器窗口，因此 window.find_webui_window
-    额外要求「类名/进程像浏览器」并排除 explorer.exe 与自身进程。
+    两种形态目标不同，这是桌面化之后必须分开的第一处：
+
+    · 桌面模式：目标是**壳创建的原生窗口**（进程名 autogametool.exe）。它被
+      `find_webui_window` 的「必须像浏览器」规则排除在外，所以按**父进程 pid**
+      直接找 —— 引擎是壳拉起的 sidecar，父进程就是壳。
+    · 浏览器模式（源码直跑 / 退回浏览器）：仍是老路径，按标题找浏览器窗口。
+      只按标题找会命中同名文件夹的资源管理器，因此 `find_webui_window` 额外要求
+      「类名/进程像浏览器」并排除 explorer.exe 与自身进程。
     """
+    if _desktop_mode():
+        target = await asyncio.to_thread(find_window_of_pid, os.getppid(), _WEBUI_TITLE_HINT)
+        if not target:
+            await manager.broadcast(
+                {
+                    "type": "log",
+                    "level": "warn",
+                    "message": "未找到程序主窗口：请确认 AutoGameTool 窗口没有被关掉",
+                    "step": None,
+                    "ts": time.time(),
+                }
+            )
+            return
+        ok = await asyncio.to_thread(focus_window, target["hwnd"])
+        if not ok:
+            await manager.broadcast(
+                {
+                    "type": "log",
+                    "level": "warn",
+                    "message": f"无法切到程序主窗口：{target['title']}",
+                    "step": None,
+                    "ts": time.time(),
+                }
+            )
+        return
+
     target = await asyncio.to_thread(find_webui_window, _WEBUI_TITLE_HINT)
     if not target:
         await manager.broadcast(
             {
                 "type": "log",
                 "level": "warn",
-                "message": "未找到 WebUI 浏览器窗口：请确认 AutoGameTool 标签页仍开着（页面标题需含 AutoGameTool）",
+                "message": "未找到编辑器窗口：请确认 AutoGameTool 标签页仍开着（页面标题需含 AutoGameTool）",
                 "step": None,
                 "ts": time.time(),
             }
@@ -352,7 +392,7 @@ async def _focus_webui() -> None:
             {
                 "type": "log",
                 "level": "warn",
-                "message": f"无法切到 WebUI 窗口：{target['title']}",
+                "message": f"无法切到编辑器窗口：{target['title']}",
                 "step": None,
                 "ts": time.time(),
             }
@@ -390,7 +430,7 @@ async def _do_overlay_action(name: str) -> None:
         await manager.broadcast({"type": "repeat", "value": value, "ts": time.time()})
         await executor.log("info", f"循环轮数设为 {value}")
     elif name == "focus_ui":
-        await _focus_webui()
+        await _focus_ui()
 
 
 def _overlay_action(name: str) -> None:
@@ -488,7 +528,7 @@ async def lifespan(_: FastAPI):
     enginelog.info("清理完成，引擎退出")
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="AutoGameTool Engine", version="0.1.1", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -589,7 +629,13 @@ _run_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "engine": "autogametool", "version": "0.1.0"}
+    # desktop 供前端判断当前形态：桌面版不发「页面告别」、界面文案也按原生窗口说
+    return {
+        "status": "ok",
+        "engine": "autogametool",
+        "version": "0.1.1",
+        "desktop": _desktop_mode(),
+    }
 
 
 @app.get("/debug/kb")
@@ -937,11 +983,12 @@ def _keep_alive_on_close() -> bool:
 def _exit_on_page_loss() -> bool:
     """静默掉线（页面被系统挂起/标签页被丢弃/浏览器崩溃）时是否照旧退出后端。
 
-    v0.8.1 起**默认不退出**：区分「用户主动关了页面」与「页面不见了」。
+    **默认不退出**：区分「用户主动关了页面」与「页面不见了」。
     只有页面主动告别（前端在 pagehide 时发 /goodbye）才退；静默掉线一律继续跑，
     这样挂机不会因为浏览器把后台标签页挂起而中断（实测踩过：日志里只有
-    「WebUI 已断开」，6 秒后引擎自己退出、悬浮框一起消失）。
+    「编辑器页面已断开」，6 秒后引擎自己退出、悬浮框一起消失）。
     需要旧行为时设 AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1。
+    （桌面模式下这条整体不生效——后端生命周期由壳管理，见 _desktop_mode。）
     """
     return os.environ.get("AUTOGAMETOOL_EXIT_ON_PAGE_LOSS", "").strip().lower() in (
         "1",
@@ -975,7 +1022,7 @@ async def _close_when_no_page(grace: float, reason: str) -> None:
         enginelog.warn("页面已离开但流程仍在运行，保持后端与悬浮框（不退出）")
         return
     enginelog.log_exit(f"{reason}，且 {grace:.0f} 秒内没有重连")
-    print("[AutoGameTool] WebUI 已关闭，正在停止流程并退出后端…", flush=True)
+    print("[AutoGameTool] 编辑器页面已关闭，正在停止流程并退出后端…", flush=True)
     try:
         executor.stop()
         # 给正在跑的流程一点时间走完 finally（复位 running、释放钩子）再退出
@@ -986,7 +1033,16 @@ async def _close_when_no_page(grace: float, reason: str) -> None:
 
 
 def _schedule_close_check(grace: float, reason: str) -> None:
+    """安排「没有页面就退后端」的检查。
+
+    桌面模式下这条链路整体不成立（见 _keep_alive_on_close）：窗口由壳持有，
+    关窗时壳会直接结束引擎进程，引擎自己再去数「还有几个页面」没有意义 ——
+    何况 WebView 刷新、崩溃、壳重建窗口都会让页面数瞬间为 0。
+    """
     global _close_task
+    if _desktop_mode():
+        enginelog.info("桌面模式：忽略「%s」（后端生命周期由壳管理，不随页面断开退出）", reason)
+        return
     if not _ever_connected or _keep_alive_on_close():
         return
     _cancel_close_timer()
@@ -995,7 +1051,14 @@ def _schedule_close_check(grace: float, reason: str) -> None:
 
 @app.post("/goodbye")
 async def goodbye():
-    """页面主动告别（关闭标签页 / 跳转离开）。只有这一条路径会真的关掉后端。"""
+    """页面主动告别（关闭标签页 / 跳转离开）。只有这一条路径会真的关掉后端。
+
+    桌面版里前端不会再发这条（页面在原生窗口里，关窗由壳负责），
+    真收到了也只记一条日志、不做任何事。
+    """
+    if _desktop_mode():
+        enginelog.info("桌面模式：收到页面告别信号，已忽略（后端随窗口由壳收尾）")
+        return {"ok": True, "grace": 0.0, "ignored": "desktop"}
     enginelog.info("编辑器页面主动告别：若 %.0f 秒内没有页面重连就退出后端", _GOODBYE_GRACE_SEC)
     _schedule_close_check(_GOODBYE_GRACE_SEC, "页面主动关闭（收到告别信号）")
     return {"ok": True, "grace": _GOODBYE_GRACE_SEC}
@@ -1060,7 +1123,7 @@ async def ws_endpoint(ws: WebSocket):
         return
     await manager.connect(ws)
     _ever_connected = True
-    enginelog.info("WebUI 已连接（当前 %d 个页面）", len(manager.connections))
+    enginelog.info("编辑器页面已连接（当前 %d 个页面）", len(manager.connections))
     # 有页面连上就取消退出倒计时（含刷新页面时的重连）
     _cancel_close_timer()
     try:
@@ -1072,19 +1135,25 @@ async def ws_endpoint(ws: WebSocket):
         pass
     finally:
         manager.disconnect(ws)
-        enginelog.info("WebUI 已断开（剩余 %d 个页面）", len(manager.connections))
-        if not manager.connections:
+        if _desktop_mode():
+            # 桌面版：页面就是原生窗口的内容，刷新/崩溃/壳重建窗口都会断开，
+            # 断连与"用户想关掉程序"没有关系。后端生命周期一律由壳管理。
+            enginelog.info("桌面模式：编辑器页面已断开（剩余 %d 个），后端继续运行"
+                           "（关窗由壳负责结束进程）", len(manager.connections))
+        else:
+            enginelog.info("编辑器页面已断开（剩余 %d 个页面）", len(manager.connections))
+        if not manager.connections and not _desktop_mode():
             if _keep_alive_on_close():
-                enginelog.warn("已无 WebUI 页面连接；AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1，后端继续运行")
+                enginelog.warn("已无编辑器页面连接；AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1，后端继续运行")
             elif _exit_on_page_loss():
                 # 旧行为（显式要求时）：静默掉线也退出
-                enginelog.warn("已无 WebUI 页面连接；若 %.0f 秒内没有重连，将停止流程并退出后端"
+                enginelog.warn("已无编辑器页面连接；若 %.0f 秒内没有重连，将停止流程并退出后端"
                                "（AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1 指定的旧行为）", _CLOSE_GRACE_SEC)
-                _schedule_close_check(_CLOSE_GRACE_SEC, "WebUI 页面全部断开")
+                _schedule_close_check(_CLOSE_GRACE_SEC, "编辑器页面全部断开")
             else:
-                # v0.8.1 默认：静默掉线**不退后端**。页面可能是被系统挂起/丢弃/浏览器崩了，
+                # 默认：静默掉线**不退后端**。页面可能是被系统挂起/丢弃/浏览器崩了，
                 # 而挂机不该因此中断。真正关页面时前端会先发 /goodbye（那条路径才退）。
-                enginelog.warn("已无 WebUI 页面连接；后端继续运行，等待页面重连"
+                enginelog.warn("已无编辑器页面连接；后端继续运行，等待页面重连"
                                "（只有页面主动告别才会退出）")
 
 

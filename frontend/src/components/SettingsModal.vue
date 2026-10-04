@@ -1,12 +1,14 @@
 <script setup lang="ts">
 /**
- * 设定面板：外观（浅色 / 深色 / 跟随系统）+ 自定义背景。
+ * 设定面板：外观（浅色 / 深色 / 跟随系统）+ 自定义背景 + 全局快捷键。
  *
  * 选图 → 截取（按当前窗口比例）→ 透明度，三步都在这里完成。
  * 图片与外观偏好只存本机浏览器（localStorage），不上传引擎、不写进 .agflow。
+ * 快捷键存在引擎的 config.json（hotkeys 字段），因为全局钩子在引擎侧。
  */
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { NButton, NModal, NRadioButton, NRadioGroup, NSlider, useMessage } from 'naive-ui'
+import { NButton, NModal, NRadioButton, NRadioGroup, NSlider, NSwitch, useMessage } from 'naive-ui'
+import { engine, type HotkeyBinding } from '../api/client'
 import { useUiStore } from '../stores/ui'
 import { APPEARANCE_OPTIONS, appearanceLabel } from '../lib/appearance'
 import { clampPan, drawRect, outputSize } from '../lib/bgCrop'
@@ -14,6 +16,96 @@ import { clampPan, drawRect, outputSize } from '../lib/bgCrop'
 const show = defineModel<boolean>('show', { default: false })
 const ui = useUiStore()
 const message = useMessage()
+
+// ---------- 全局快捷键 ----------
+// 从顶栏搬过来的：改键属于"设定一次就不动"的操作，放顶栏会挤掉常用按钮。
+const bindings = ref<HotkeyBinding[]>([])
+const hotkeyDefaults = ref<HotkeyBinding[]>([])
+/** 正在录制按键的那条绑定 id；空串表示没在录 */
+const recordingId = ref('')
+const hotkeyLoaded = ref(false)
+
+const KEY_ALIAS: Record<string, string> = {
+  arrowup: 'up',
+  arrowdown: 'down',
+  arrowleft: 'left',
+  arrowright: 'right',
+  escape: 'esc',
+  return: 'enter',
+  del: 'delete',
+  control: 'ctrl',
+  meta: 'win',
+}
+
+/** 显示用的按键文本：alt + f1 */
+function keysText(keys: string[]) {
+  return (keys || []).join(' + ') || '（未设置）'
+}
+
+async function loadHotkeys() {
+  try {
+    const r = await engine.getHotkeys()
+    bindings.value = r.bindings || []
+    hotkeyDefaults.value = r.defaults || []
+    hotkeyLoaded.value = true
+  } catch {
+    /* 引擎不可达时留空（下次打开面板再取） */
+  }
+}
+
+async function saveHotkeys() {
+  try {
+    const r = await engine.setHotkeys(bindings.value)
+    bindings.value = r.bindings || []
+    message.success('快捷键已保存')
+  } catch (e: any) {
+    message.error('保存快捷键失败：' + e.message)
+  }
+}
+
+function restoreHotkeyDefaults() {
+  bindings.value = hotkeyDefaults.value.map((b) => ({ ...b, keys: [...b.keys] }))
+  message.info('已填回默认快捷键，点「保存快捷键」后生效')
+}
+
+function startRecord(id: string) {
+  if (recordingId.value === id) {
+    finishRecord()
+    return
+  }
+  recordingId.value = id
+  window.addEventListener('keydown', onRecordKey)
+}
+
+/** 录制一次按键组合。
+ *
+ *  直接看这次事件的修饰键状态，而不是像旧实现那样「按到修饰键先攒起来、等主键再收尾」：
+ *  后者在用户先松修饰键再按主键、或者一次按到位时都容易攒出错的组合。
+ */
+function onRecordKey(e: KeyboardEvent) {
+  e.preventDefault()
+  e.stopPropagation()
+  const k = e.key.toLowerCase()
+  const mods: string[] = []
+  if (e.ctrlKey) mods.push('ctrl')
+  if (e.altKey) mods.push('alt')
+  if (e.shiftKey) mods.push('shift')
+  if (e.metaKey) mods.push('win')
+  // 只按下修饰键：等主键，不结束录制
+  if (['control', 'alt', 'shift', 'meta'].includes(k)) return
+  const main = k === ' ' ? 'space' : KEY_ALIAS[k] || k
+  const b = bindings.value.find((x) => x.id === recordingId.value)
+  if (b) {
+    b.keys = [...mods, main]
+    b.enabled = true
+  }
+  finishRecord()
+}
+
+function finishRecord() {
+  recordingId.value = ''
+  window.removeEventListener('keydown', onRecordKey)
+}
 
 // ---------- 选图 ----------
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -237,12 +329,19 @@ async function confirmCrop() {
 }
 
 watch(show, (v) => {
-  if (v) nextTick(() => measure())
-  else cancelCrop()
+  if (v) {
+    nextTick(() => measure())
+    // 打开时拉一次快捷键（引擎侧是唯一事实来源；改键也在这里做）
+    loadHotkeys()
+  } else {
+    cancelCrop()
+    finishRecord()
+  }
 })
 window.addEventListener('resize', measure)
 onBeforeUnmount(() => {
   stopObserveBody()
+  finishRecord()
   window.removeEventListener('resize', measure)
   window.removeEventListener('mousemove', onMove)
   window.removeEventListener('mouseup', onUp)
@@ -342,6 +441,42 @@ onBeforeUnmount(() => {
         <p v-if="ui.bgWarn" class="warn">{{ ui.bgWarn }}</p>
       </div>
 
+      <div class="sect">
+        <div class="sect-title">⌨ 全局快捷键</div>
+        <p class="hint">
+          每条都能改键，也能单独停用（默认 alt+F1 启动 / 停止、alt+F2 键鼠录制、alt+F3 拾取坐标）。
+          点中间那一栏后按下想要的组合键即可，支持 ctrl / alt / shift / win + 字母、数字、f1-f12。
+        </p>
+        <div v-for="b in bindings" :key="b.id" class="hk-row">
+          <span class="hk-label">{{ b.label }}</span>
+          <button
+            class="hk-keys"
+            type="button"
+            :class="{ recording: recordingId === b.id, off: !b.enabled }"
+            @click="startRecord(b.id)"
+          >
+            {{ recordingId === b.id ? '请按下组合键…' : keysText(b.keys) }}
+          </button>
+          <n-switch
+            :value="b.enabled"
+            size="small"
+            @update:value="(v: boolean) => (b.enabled = v)"
+          />
+          <span class="hk-state">{{ b.enabled ? '启用' : '已停用' }}</span>
+        </div>
+        <p v-if="hotkeyLoaded && !bindings.length" class="hint">
+          读不到快捷键（引擎未就绪），稍后重新打开本面板。
+        </p>
+        <p class="hint">
+          同一组按键不能给两个功能用；保存时引擎会校验并提示冲突。
+          停用的功能仍可用界面上的按钮（例如「开始录制」）。
+        </p>
+        <div class="row">
+          <n-button size="small" quaternary @click="restoreHotkeyDefaults">恢复默认</n-button>
+          <n-button size="small" type="primary" @click="saveHotkeys">保存快捷键</n-button>
+        </div>
+      </div>
+
       <div class="actions">
         <n-button type="primary" @click="show = false">完成</n-button>
       </div>
@@ -409,6 +544,51 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 16px;
+}
+
+/* ---- 全局快捷键 ---- */
+.hk-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+}
+.hk-label {
+  width: 140px;
+  flex: none;
+  font-size: 13px;
+}
+/* 键位显示区本身就是「录制」按钮：点一下开始录，省掉一个按钮 */
+.hk-keys {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 13px;
+  cursor: pointer;
+  transition: 0.15s;
+}
+.hk-keys:hover {
+  border-color: var(--accent);
+}
+.hk-keys.recording {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.hk-keys.off {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+.hk-state {
+  width: 44px;
+  flex: none;
+  font-size: 12px;
+  color: var(--text-dim);
 }
 
 /* 设置视图里各分节之间留出分隔（外观 / 背景 / …） */

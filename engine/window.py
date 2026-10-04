@@ -383,6 +383,85 @@ def find_webui_window(page_title: str, exclude_pids: set[int] | None = None) -> 
     return matched[0]
 
 
+def find_window_of_pid(pid: int, hint: str = "") -> dict | None:
+    """按进程号找它的**主窗口**（桌面壳的原生窗口）。
+
+    桌面版里悬浮框的「回到界面」要切回的是壳创建的 Tauri 窗口。它的进程名是
+    `autogametool.exe`，被 `find_webui_window` 的「必须像浏览器」规则明确排除，
+    所以走另一条路：直接按**父进程 pid** 枚举窗口，不再猜进程名。
+
+    只认「可见 + 有标题 + 没有 owner」的顶层窗口（有 owner 的是对话框/工具窗），
+    排除工具栏样式与浏览器内核以外的控制台宿主；优先未最小化、面积最大的那个。
+    """
+    if not pid:
+        return None
+    hint_l = (hint or "").strip().lower()
+    owner = None
+    try:
+        user32.GetWindow.restype = wintypes.HWND
+        owner = user32.GetWindow
+    except Exception:
+        owner = None
+
+    matched: list[dict] = []
+    proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        # 有 owner 的顶层窗口是对话框/工具窗，不是主窗口
+        try:
+            if owner and owner(hwnd, GW_OWNER):
+                return True
+        except Exception:
+            pass
+        if _get_exstyle(hwnd) & WS_EX_TOOLWINDOW:
+            return True
+        wpid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if int(wpid.value) != int(pid):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = buf.value
+        cls = _class_name(hwnd)
+        if any(cls.startswith(c) for c in _NON_BROWSER_CLASSES):
+            return True
+        matched.append(
+            {
+                "hwnd": hwnd,
+                "title": title,
+                "rect": get_window_rect(hwnd),
+                "minimized": bool(user32.IsIconic(hwnd)),
+                "exe": _process_exe(int(wpid.value)),
+                "class": cls,
+                "browser": False,
+            }
+        )
+        return True
+
+    try:
+        user32.EnumWindows(proc_type(_cb), 0)
+    except Exception:
+        return None
+    if not matched:
+        return None
+
+    def _rank(w: dict) -> tuple:
+        # 标题带提示词的最优先（多个窗口时不会挑错），其次未最小化、面积最大
+        return (
+            0 if hint_l and hint_l in w["title"].lower() else 1,
+            w["minimized"],
+            -(w["rect"]["width"] * w["rect"]["height"]),
+        )
+
+    matched.sort(key=_rank)
+    return matched[0]
+
+
 def focus_window(hwnd: int) -> bool:
     """把窗口恢复（若已最小化）并切到前台，成功返回 True。
 

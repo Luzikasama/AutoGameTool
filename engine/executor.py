@@ -26,6 +26,7 @@ _STEP_LABEL = {
     "judge": "判断分支",
     "macro": "键鼠回放",
     "terminate": "终止条件",
+    "autoclick": "连点器",
 }
 
 
@@ -145,6 +146,8 @@ class Executor:
             extra = f"{p.get('ms', 0)} ms"
         elif ntype == "text":
             extra = str(p.get("text") or "")[:14]
+        elif ntype == "autoclick":
+            extra = f"{p.get('count', 1)} 次 / {p.get('interval_ms', 100)} ms"
         return f"{label} {extra}".strip()
 
     async def toggle(self) -> None:
@@ -424,8 +427,65 @@ class Executor:
             await self.log("debug", f"输入文本 {text!r}")
         elif stype == "macro":
             await self._run_macro(params, input_mode, hwnd, scale_fn)
+        elif stype == "autoclick":
+            await self._do_autoclick(params, input_mode, hwnd, scale_fn)
         else:
             await self.log("warn", f"未知节点类型: {stype}")
+
+    async def _do_autoclick(self, params: dict, input_mode: str, hwnd, scale_fn=None) -> None:
+        """连点器：在同一个坐标上按固定间隔点 N 次。
+
+        与「鼠标点击」节点的区别：那个是"点一下（可连续 N 下，间隔固定很短的内部实现）"，
+        本节点关心的是**节奏可控的连点**——坐标固定、间隔可调、次数可调，且整个
+        过程可暂停、可停止（每次点击前都查一遍标志，长连点不会卡住停止按钮）。
+
+        interval_ms 是**两次点击之间的间隔**（不是点击按住时长）。
+        """
+        try:
+            x, y = int(params.get("x", 0)), int(params.get("y", 0))
+            count = int(params.get("count", 10))
+            interval_ms = int(params.get("interval_ms", 100))
+        except (TypeError, ValueError):
+            await self.log("error", "连点器参数无效（坐标 / 次数 / 间隔必须是整数）")
+            return
+        button = str(params.get("button", "left"))
+        count = max(1, min(count, 100000))
+        interval_ms = max(0, min(interval_ms, 600000))
+        if scale_fn:
+            x, y = scale_fn(x, y)
+        rate = f"，约 {1000 / interval_ms:.1f} 次/秒" if interval_ms > 0 else ""
+        await self.log(
+            "info",
+            f"连点器开始：坐标 ({x}, {y})，{count} 次，间隔 {interval_ms}ms{rate}",
+        )
+        done = 0
+        for i in range(count):
+            if self.stopped:
+                await self.log("warn", f"连点器被中断（已完成 {done}/{count} 次）")
+                return
+            # 暂停检查点：放在每次点击之前，恢复后正好从下一次接着点，不会重复点
+            await self._wait_if_paused()
+            if self.stopped:
+                await self.log("warn", f"连点器被中断（已完成 {done}/{count} 次）")
+                return
+            try:
+                await asyncio.to_thread(inputctl.click, x, y, button, 1, input_mode, hwnd)
+                done += 1
+            except Exception as e:
+                await self.log("warn", f"连点器第 {i + 1} 次点击失败: {e}")
+            # 间隔按 50ms 切片睡，保证停止/暂停在长间隔下也能及时生效
+            left = interval_ms
+            while left > 0 and not self.stopped:
+                await self._wait_if_paused()
+                if self.stopped:
+                    break
+                take = min(50, left)
+                await asyncio.sleep(take / 1000)
+                left -= take
+        if self.stopped:
+            await self.log("warn", f"连点器被中断（已完成 {done}/{count} 次）")
+            return
+        await self.log("info", f"连点器完成：共点击 {done} 次")
 
     async def _run_macro(self, params: dict, input_mode: str, hwnd, scale_fn=None) -> None:
         """回放键鼠录制步骤。"""

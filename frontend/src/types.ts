@@ -1,4 +1,13 @@
-export type StepType = 'delay' | 'find_image' | 'click' | 'key' | 'text' | 'judge' | 'terminate' | 'macro'
+export type StepType =
+  | 'delay'
+  | 'find_image'
+  | 'click'
+  | 'key'
+  | 'text'
+  | 'judge'
+  | 'terminate'
+  | 'macro'
+  | 'autoclick'
 
 export interface FlowNode {
   id: string
@@ -32,6 +41,7 @@ export const STEP_META: Record<StepType, { label: string; icon: string; color: s
   judge: { label: '判断分支', icon: '🔀', color: '#06b6d4' },
   terminate: { label: '终止条件', icon: '🛑', color: '#ef4444' },
   macro: { label: '键鼠录制', icon: '⏺', color: '#f97316' },
+  autoclick: { label: '连点器', icon: '⚡', color: '#14b8a6' },
 }
 
 export interface LogEntry {
