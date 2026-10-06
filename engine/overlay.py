@@ -285,7 +285,7 @@ class Overlay:
         # ---- 标题行 ----
         head = tk.Frame(frame, bg=_BG)
         head.pack(fill="x", padx=10, pady=(7, 0))
-        title = tk.Label(head, text="● AutoGameTool", bg=_BG, fg=_ACCENT,
+        title = tk.Label(head, text="● AutoTool", bg=_BG, fg=_ACCENT,
                          font=(_FONT, 8, "bold"), anchor="w")
         title.pack(side="left")
         # 「回到界面」放右上角，用矢量图标而不是文字按钮（见 _mk_back_icon）。

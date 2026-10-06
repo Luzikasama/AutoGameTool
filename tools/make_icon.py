@@ -1,4 +1,4 @@
-"""生成 AutoGameTool 应用图标（多尺寸 ICO + PNG）。
+"""生成 AutoTool 应用图标（多尺寸 ICO + PNG）。
 
 图标含义：深色圆角底板 + 青色「循环」圆弧 + 白色播放三角 = 自动循环执行。
 
@@ -6,8 +6,8 @@
     engine\\.venv\\Scripts\\python tools\\make_icon.py
 
 产物：
-    assets/AutoGameTool.ico            # 多尺寸（16~256），供 exe / 安装包 / 快捷方式使用
-    assets/AutoGameTool.png            # 512px 主图
+    assets/AutoTool.ico            # 多尺寸（16~256），供 exe / 安装包 / 快捷方式使用
+    assets/AutoTool.png            # 512px 主图
     frontend/public/favicon.ico        # 网页标签页图标
     frontend/src-tauri/icons/*         # Tauri 桌面壳图标（覆盖默认 logo）
 """
@@ -129,10 +129,10 @@ def main() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
     # 主图
-    master.resize((512, 512), Image.LANCZOS).save(ASSETS / "AutoGameTool.png")
+    master.resize((512, 512), Image.LANCZOS).save(ASSETS / "AutoTool.png")
 
     # 多尺寸 ICO
-    ico_targets = [ASSETS / "AutoGameTool.ico", PUBLIC / "favicon.ico", TAURI_ICONS / "icon.ico"]
+    ico_targets = [ASSETS / "AutoTool.ico", PUBLIC / "favicon.ico", TAURI_ICONS / "icon.ico"]
     for path in ico_targets:
         master.save(path, format="ICO", sizes=[(s, s) for s in ICO_SIZES])
 
@@ -147,7 +147,7 @@ def main() -> None:
         master.resize((size, size), Image.LANCZOS).save(path)
 
     print("图标已生成：")
-    for p in [ASSETS / "AutoGameTool.ico", ASSETS / "AutoGameTool.png", *ico_targets[1:], *png_targets]:
+    for p in [ASSETS / "AutoTool.ico", ASSETS / "AutoTool.png", *ico_targets[1:], *png_targets]:
         print(f"  {p.relative_to(ROOT)}  {p.stat().st_size} bytes")
 
 

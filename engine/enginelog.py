@@ -20,12 +20,13 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
-import os
 import re
 import sys
 import threading
 import traceback
 from pathlib import Path
+
+import apppaths
 
 _LOG_NAME = "engine.log"
 _DEFAULT_MAX_BYTES = 2 * 1024 * 1024
@@ -39,7 +40,7 @@ _ready = False
 _last_error = ""
 # 防重入标记（见 _StreamToLogger.write）
 _writing = threading.local()
-_logger = logging.getLogger("autogametool")
+_logger = logging.getLogger("autotool")
 # 窗口化打包后 stdout/stderr 是 None；从源码运行/开发时它们存在，需要继续回显到控制台
 _orig_stdout = sys.stdout
 _orig_stderr = sys.stderr
@@ -56,7 +57,7 @@ _secrets: set[str] = set()
 
 
 def log_dir() -> Path:
-    return Path(os.environ.get("APPDATA", str(Path.home()))) / "AutoGameTool"
+    return apppaths.app_dir()
 
 
 def log_path() -> Path:
@@ -267,11 +268,17 @@ def warn(msg: str, *args) -> None:
         pass
 
 
-def error(msg: str, *args) -> None:
+def error(msg: str, *args, exc_info: bool = False) -> None:
+    """写一条 ERROR。`exc_info=True` 时附上当前异常的回溯。
+
+    ⚠️ 为什么必须支持 `exc_info`：main.py 的兜底分支会传它。少了这个参数，
+    「引擎启动失败」这条路上**记录错误的那行本身**会抛 TypeError，
+    于是无控制台的打包版连错误框都弹不出来 —— 表现就是「双击没反应」。
+    """
     if not _ready:
         return
     try:
-        _logger.error(msg, *args)
+        _logger.error(msg, *args, exc_info=exc_info)
     except Exception:
         pass
 

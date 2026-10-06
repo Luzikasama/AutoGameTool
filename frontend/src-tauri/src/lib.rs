@@ -1,10 +1,10 @@
-// AutoGameTool 桌面壳（Tauri 2）
+// AutoTool 桌面壳（Tauri 2）
 //
 // 职责边界（刻意的设计）：
 //   · 界面与业务逻辑仍然完全在 Python 引擎里（FastAPI + 内嵌前端），**一行都没搬**；
 //     壳只做三件事：拉起引擎、等它就绪、开一个原生窗口指向引擎的入口 URL。
 //   · 这样「浏览器模式」与「桌面模式」共用同一份引擎与同一套数据目录
-//     （%APPDATA%\AutoGameTool），老脚本 .agflow 与找图模板零改动可用。
+//     （%APPDATA%\AutoTool），老脚本 .agflow 与找图模板零改动可用。
 //
 // 为什么窗口 URL 指向 http://127.0.0.1:8765 而不是打包进壳的前端产物：
 //   · 前端由引擎同源提供，fetch/WebSocket 天然同源，不需要处理 CORS，
@@ -35,16 +35,16 @@ struct EngineHandle {
     child: Mutex<Option<Child>>,
 }
 
-/// 壳自己的诊断日志（%APPDATA%\AutoGameTool\shell.log）。
+/// 壳自己的诊断日志（%APPDATA%\AutoTool\shell.log）。
 ///
 /// 为什么不用 eprintln：release 是 windows 子系统（没有控制台），
 /// 而调试期从 `pnpm tauri dev` 起时 stderr 又常被上层缓冲住看不到；
 /// 写文件是两种形态下都可靠的取证方式。
 fn shell_log(msg: &str) {
-    // 默认写 %APPDATA%\AutoGameTool\shell.log；
-    // 设了 AUTOGAMETOOL_SHELL_LOG 就写到指定文件（自动化验证时常把日志引到工作区，
+    // 默认写 %APPDATA%\AutoTool\shell.log；
+    // 设了 AUTOTOOL_SHELL_LOG 就写到指定文件（自动化验证时常把日志引到工作区，
     // 因为受限会话里子进程写不了 %APPDATA%）。
-    let path = match std::env::var("AUTOGAMETOOL_SHELL_LOG") {
+    let path = match std::env::var("AUTOTOOL_SHELL_LOG") {
         Ok(p) if !p.trim().is_empty() => PathBuf::from(p),
         _ => token_file().with_file_name("shell.log"),
     };
@@ -62,7 +62,27 @@ fn shell_log(msg: &str) {
 
 fn token_file() -> PathBuf {
     let appdata = std::env::var("APPDATA").unwrap_or_default();
+    PathBuf::from(appdata).join("AutoTool").join("engine.token")
+}
+
+/// 0.1.2 及更早（工具还叫 AutoGameTool）存放令牌的位置。
+///
+/// 升级上来必须能读到它：否则壳会另生成一个令牌，而**真正在跑的引擎**用的是旧令牌，
+/// 页面就永远连不上（正是 v0.8.1 修过的那类「反复提示令牌校验失败」）。
+fn legacy_token_file() -> PathBuf {
+    let appdata = std::env::var("APPDATA").unwrap_or_default();
     PathBuf::from(appdata).join("AutoGameTool").join("engine.token")
+}
+
+/// 读一个令牌文件；内容不够长就当作没有。
+fn read_token(path: &PathBuf) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let t = text.trim().to_string();
+    if t.len() >= 16 {
+        Some(t)
+    } else {
+        None
+    }
 }
 
 /// 读引擎落盘的访问令牌；没有就生成一个并写回，保证「第二次启动」也能连上同一个引擎。
@@ -71,11 +91,17 @@ fn token_file() -> PathBuf {
 /// 这里做的是兜底：万一文件被删了，本次仍要能开出一个可用的窗口。
 fn load_or_create_token() -> String {
     let path = token_file();
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        let t = text.trim().to_string();
-        if t.len() >= 16 {
-            return t;
+    if let Some(t) = read_token(&path) {
+        return t;
+    }
+    // 升级路径：旧目录里有令牌就沿用，并写一份到新位置。
+    // （引擎侧是"按项补齐"式迁移，只补目标缺失的文件，所以这里先写过去不影响其它数据）
+    if let Some(t) = read_token(&legacy_token_file()) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
         }
+        let _ = std::fs::write(&path, &t);
+        return t;
     }
     let token = random_token();
     if let Some(dir) = path.parent() {
@@ -159,13 +185,13 @@ fn engine_command(app: &AppHandle) -> Result<(Command, PathBuf), String> {
         cmd.arg("main.py");
         // 开发模式：免令牌 + 放行 vite 1420 的 CORS（与 run_engine.ps1 一致），
         // 这样窗口可以直接开在 vite dev 上，改前端即时热更新。
-        cmd.env("AUTOGAMETOOL_DEV", "1");
+        cmd.env("AUTOTOOL_DEV", "1");
     } else {
         let res = app
             .path()
             .resource_dir()
             .map_err(|e| format!("拿不到资源目录：{e}"))?;
-        let exe = res.join("engine").join("AutoGameTool.exe");
+        let exe = res.join("engine").join("AutoTool.exe");
         if !exe.is_file() {
             return Err(format!("找不到随包引擎：{}", exe.display()));
         }
@@ -173,8 +199,8 @@ fn engine_command(app: &AppHandle) -> Result<(Command, PathBuf), String> {
         cmd = Command::new(exe);
     }
     cmd.current_dir(cwd.clone())
-        .env("AUTOGAMETOOL_DESKTOP", "1")
-        .env("AUTOGAMETOOL_NO_BROWSER", "1")
+        .env("AUTOTOOL_DESKTOP", "1")
+        .env("AUTOTOOL_NO_BROWSER", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     #[cfg(windows)]
@@ -198,7 +224,7 @@ fn start_engine(app: &AppHandle) -> Result<String, String> {
     let token = load_or_create_token();
     let (mut cmd, cwd) = engine_command(app)?;
     shell_log(&format!("启动引擎：{cmd:?}（工作目录 {cwd:?}）"));
-    cmd.env("AUTOGAMETOOL_TOKEN", &token);
+    cmd.env("AUTOTOOL_TOKEN", &token);
     let child = cmd.spawn().map_err(|e| format!("启动引擎失败：{e}"))?;
     if let Some(state) = app.try_state::<EngineHandle>() {
         if let Ok(mut slot) = state.child.lock() {
@@ -208,7 +234,7 @@ fn start_engine(app: &AppHandle) -> Result<String, String> {
 
     if !wait_ready(HEALTH_TIMEOUT) {
         return Err(format!(
-            "引擎在 {} 秒内没有就绪，请查看日志：%APPDATA%\\AutoGameTool\\engine.log",
+            "引擎在 {} 秒内没有就绪，请查看日志：%APPDATA%\\AutoTool\\engine.log",
             HEALTH_TIMEOUT.as_secs()
         ));
     }
@@ -232,7 +258,7 @@ fn open_main_window(app: &AppHandle, token: &str) -> Result<(), String> {
     shell_log(&format!("创建主窗口：{url}"));
     let parsed = url.parse().map_err(|e| format!("入口地址非法：{e}"))?;
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed))
-        .title("AutoGameTool")
+        .title("AutoTool")
         .inner_size(1360.0, 860.0)
         .min_inner_size(1000.0, 660.0)
         .center()

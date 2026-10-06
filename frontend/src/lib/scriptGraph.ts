@@ -20,7 +20,7 @@ export const ROOT_NODE = '__root__'
 export function collectCalls(flow: { nodes?: any[] } | null | undefined): string[] {
   const out: string[] = []
   for (const n of flow?.nodes || []) {
-    if (n?.data?.stepType !== 'script_call' && n?.type !== 'script_call') continue
+    if (n?.data?.nodeType !== 'script_call' && n?.type !== 'script_call') continue
     const id = String(n?.data?.params?.script_id ?? n?.params?.script_id ?? '').trim()
     if (id && !out.includes(id)) out.push(id)
   }

@@ -4,10 +4,11 @@ import { NButton, NModal, NSelect, NSpin, useMessage } from 'naive-ui'
 import { engine } from '../api/client'
 import type { WindowInfo } from '../types'
 
-const props = defineProps<{ show: boolean; mode?: 'region' | 'point'; initialWindow?: number | null }>()
+const props = defineProps<{ show: boolean; mode?: 'region' | 'point' | 'rect'; initialWindow?: number | null }>()
 const emit = defineEmits<{
   (e: 'captured', id: string): void
   (e: 'picked', x: number, y: number): void
+  (e: 'rect', r: { left: number; top: number; width: number; height: number }): void
   (e: 'cancel'): void
 }>()
 
@@ -31,7 +32,7 @@ const winOptions = computed(() => [
 ])
 
 const selStyle = computed(() => {
-  if (props.mode !== 'region' || !start.value || !current.value) return { display: 'none' }
+  if (props.mode === 'point' || !start.value || !current.value) return { display: 'none' }
   const x = Math.min(start.value.x, current.value.x)
   const y = Math.min(start.value.y, current.value.y)
   const w = Math.abs(current.value.x - start.value.x)
@@ -139,6 +140,21 @@ async function confirmRegion() {
     message.warning('选区太小，请重新框选')
     return
   }
+
+  // rect 模式：只要一块**屏幕坐标**的矩形（供 OCR / 颜色检测 / 区域分析用），不存模板。
+  // 两个角各自过一遍 localToScreen，这样窗口截图与全屏截图都能得到正确的绝对坐标。
+  if (props.mode === 'rect') {
+    const p1 = localToScreen(sx, sy)
+    const p2 = localToScreen(sx + sw, sy + sh)
+    emit('rect', {
+      left: Math.min(p1.x, p2.x),
+      top: Math.min(p1.y, p2.y),
+      width: Math.abs(p2.x - p1.x),
+      height: Math.abs(p2.y - p1.y),
+    })
+    return
+  }
+
   const scaleX = imgEl.value.naturalWidth / imgEl.value.clientWidth
   const scaleY = imgEl.value.naturalHeight / imgEl.value.clientHeight
   const nx = Math.round(sx * scaleX)
@@ -172,7 +188,7 @@ async function confirmRegion() {
   <n-modal
     :show="show"
     preset="card"
-    :title="mode === 'point' ? '拾取屏幕坐标' : '截取识别模板'"
+    :title="mode === 'point' ? '拾取屏幕坐标' : mode === 'rect' ? '框选识别区域' : '截取识别模板'"
     style="width: min(940px, 94vw)"
     :mask-closable="false"
     @update:show="(v: boolean) => !v && emit('cancel')"
@@ -180,7 +196,7 @@ async function confirmRegion() {
     <div class="cap-body">
       <div class="cap-bar">
         <span class="cap-tip">
-          {{ mode === 'point' ? '选择目标窗口后，点击截图中要拾取的点' : '选择目标窗口后，框选出要识别的区域' }}
+          {{ mode === 'point' ? '选择目标窗口后，点击截图中要拾取的点' : mode === 'rect' ? '选择目标窗口后，框选要检测 / 识别的区域' : '选择目标窗口后，框选出要识别的区域' }}
         </span>
         <div class="win-sel">
           <n-select
@@ -212,14 +228,14 @@ async function confirmRegion() {
         @pointerup="onUp"
       >
         <img ref="imgEl" :src="image" alt="screenshot" draggable="false" />
-        <div v-if="mode === 'region'" class="cap-sel" :style="selStyle" />
+        <div v-if="mode === 'region' || mode === 'rect'" class="cap-sel" :style="selStyle" />
         <div v-if="mode === 'point'" class="cap-point" :style="pointStyle" />
       </div>
     </div>
     <template #footer>
       <div class="cap-footer">
         <n-button @click="emit('cancel')">取消</n-button>
-        <n-button v-if="mode === 'region'" type="primary" @click="confirmRegion">保存模板</n-button>
+        <n-button v-if="mode === 'region' || mode === 'rect'" type="primary" @click="confirmRegion">{{ mode === 'rect' ? '使用该区域' : '保存模板' }}</n-button>
       </div>
     </template>
   </n-modal>

@@ -25,7 +25,7 @@ export function normalizeAppearance(value: unknown): Appearance {
 /**
  * 解析出真正要用的主题。
  * 「跟随系统」时用系统偏好；系统偏好取不到（老浏览器 / 无 matchMedia）时按深色处理
- * ——深色是 AutoGameTool 一直以来的外观，宁可维持原样也不要突然刷白。
+ * ——深色是 AutoTool 一直以来的外观，宁可维持原样也不要突然刷白。
  */
 export function resolveTheme(appearance: unknown, systemPrefersDark: boolean | undefined): ResolvedTheme {
   const a = normalizeAppearance(appearance)

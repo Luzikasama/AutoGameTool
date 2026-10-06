@@ -22,7 +22,6 @@ import {
   NRadioButton,
   NRadioGroup,
   NSelect,
-  NSlider,
   NSwitch,
   NTooltip,
   useDialog,
@@ -36,7 +35,18 @@ import { useProjectStore } from '../stores/project'
 import { useDocsStore } from '../stores/docs'
 import { useEngineStore } from '../stores/engine'
 import { useClipboardStore } from '../stores/clipboard'
-import { STEP_META, type FlowFile, type StepType, type WindowInfo } from '../types'
+import {
+  CATEGORY_META,
+  CATEGORY_ORDER,
+  NODE_META,
+  nodesOfCategory,
+  type FlowFile,
+  type NodeCategory,
+  type NodeType,
+  type WindowInfo,
+} from '../types'
+import { CONDITION_OPS, UNARY_OPS, defaultsFor, fieldVisible, mergeWithDefaults, NODE_SCHEMA, type NodeField } from '../lib/nodeSchema'
+import { migrateScript } from '../lib/migrateFlow'
 import {
   canPack,
   COL_PITCH,
@@ -79,7 +89,8 @@ const root = computed(() => {
 const isSub = computed(() => tab.value?.kind === 'sub')
 
 const nodeTypes: any = { step: markRaw(StepNode) }
-const stepTypes = Object.entries(STEP_META) as Array<[StepType, { label: string; icon: string; color: string }]>
+/** 目前 palette 里展开的是哪一类（六大类通过上方切换） */
+const paletteCat = ref<NodeCategory>('input')
 
 const nodes = ref<any[]>([])
 const edges = ref<any[]>([])
@@ -137,7 +148,7 @@ function mirrorToStore() {
 
 // 截图/拾取
 const capVisible = ref(false)
-const capMode = ref<'region' | 'point'>('region')
+const capMode = ref<'region' | 'point' | 'rect'>('region')
 
 // 匹配结果
 const matchVisible = ref(false)
@@ -186,8 +197,8 @@ function flowWindow() {
 
 const selectedNode = computed(() => nodes.value.find((n) => n.id === selectedId.value) || null)
 
-// 画布上所有「键鼠录制」步骤（工具栏的拆分入口据此决定可用状态）
-const macroNodes = computed(() => nodes.value.filter((n) => n.data.stepType === 'macro'))
+// 画布上所有「键鼠录制」节点（工具栏的拆分入口据此决定可用状态）
+const macroNodes = computed(() => nodes.value.filter((n) => n.data.nodeType === 'record'))
 
 // ---------- 子脚本（脚本库）----------
 /** 当前脚本内的子脚本列表（响应式：改名/新增/删除都要立刻反映到下拉框） */
@@ -290,7 +301,7 @@ function onImportSubFile(e: Event) {
   reader.onload = () => {
     try {
       const data = JSON.parse(reader.result as string) as FlowFile
-      if (data.format !== 'agflow') throw new Error('不是有效的 AutoGameTool 脚本文件')
+      if (data.format !== 'agflow') throw new Error('不是有效的 AutoTool 脚本文件')
       const node = nodes.value.find((n) => n.id === scriptPickerTarget.value)
       if (!node) return
       const id = docs.newScriptId(t.rootId)
@@ -309,7 +320,7 @@ function onImportSubFile(e: Event) {
       for (const s of Object.values(imported)) idMap.set(s.id, docs.newScriptId(t.rootId))
       const remap = (arr: any[]) =>
         (arr || []).map((n: any) =>
-          n?.data?.stepType === 'script_call' && idMap.has(n.data.params?.script_id)
+          n?.data?.nodeType === 'script_call' && idMap.has(n.data.params?.script_id)
             ? {
                 ...n,
                 data: {
@@ -378,7 +389,7 @@ async function exportSubScript(scriptId: string) {
 /** 清掉所有指向某个子脚本的调用（删除子脚本时用）。 */
 function clearScriptRefs(scriptId: string) {
   for (const n of nodes.value) {
-    if (n?.data?.stepType === 'script_call' && n.data.params?.script_id === scriptId) {
+    if (n?.data?.nodeType === 'script_call' && n.data.params?.script_id === scriptId) {
       n.data.params.script_id = ''
       n.data.params.name = ''
     }
@@ -389,7 +400,7 @@ function removeSubScript(scriptId: string) {
   const t = tab.value
   if (!t) return
   const used = nodes.value.filter(
-    (n) => n?.data?.stepType === 'script_call' && n.data.params?.script_id === scriptId,
+    (n) => n?.data?.nodeType === 'script_call' && n.data.params?.script_id === scriptId,
   ).length
   if (used) {
     message.warning(`本脚本里还有 ${used} 处调用它，已一并清空这些调用`)
@@ -413,7 +424,7 @@ function openScriptTab(scriptId: string) {
  */
 function onNodeDoubleClick(payload: any) {
   const n = payload?.node
-  if (!n || n?.data?.stepType !== 'script_call') return
+  if (!n || n?.data?.nodeType !== 'script_call') return
   selectedId.value = n.id
   const sid = n.data?.params?.script_id
   if (sid && scriptExists(sid)) openScriptTab(sid)
@@ -422,7 +433,7 @@ function onNodeDoubleClick(payload: any) {
 
 /** 打开调用脚本节点右侧的挑选面板。 */
 function openScriptPicker() {
-  if (!selectedNode.value || selectedNode.value.data.stepType !== 'script_call') return
+  if (!selectedNode.value || selectedNode.value.data.nodeType !== 'script_call') return
   scriptPickerTarget.value = selectedNode.value.id
   scriptPickerVisible.value = true
 }
@@ -447,7 +458,7 @@ function renameScript(scriptId: string, name: string) {
   const subTab = docs.tabs.find((x) => x.kind === 'sub' && x.rootId === t.rootId && x.scriptId === scriptId)
   if (subTab) docs.patchTab(subTab.id, { name })
   for (const n of nodes.value) {
-    if (n?.data?.stepType === 'script_call' && n.data.params?.script_id === scriptId) {
+    if (n?.data?.nodeType === 'script_call' && n.data.params?.script_id === scriptId) {
       n.data.params.name = name
     }
   }
@@ -470,19 +481,19 @@ function doScriptRename() {
   message.success(`子脚本已改名：${name}`)
 }
 
-/** 删除子脚本前先确认：它会连同里面的所有步骤一起消失，而且调用点会被清空。 */
+/** 删除子脚本前先确认：它会连同里面的所有节点一起消失，而且调用点会被清空。 */
 function confirmRemoveSubScript(scriptId: string) {
   const id = String(scriptId || '')
   if (!id) return
   const used = nodes.value.filter(
-    (n) => n?.data?.stepType === 'script_call' && n.data.params?.script_id === id,
+    (n) => n?.data?.nodeType === 'script_call' && n.data.params?.script_id === id,
   ).length
   dialog.warning({
     title: '删除这个子脚本？',
     content:
-      `「${scriptName(id)}」会从本脚本里删除，里面的所有步骤一起丢失。` +
+      `「${scriptName(id)}」会从本脚本里删除，里面的所有节点一起丢失。` +
       (used ? `本脚本里还有 ${used} 处调用它，那些调用会被一并清空。` : '') +
-      '删除子脚本不在撤销范围内（Ctrl+Z 只覆盖画布上的步骤增删改），请先导出备份。',
+      '删除子脚本不在撤销范围内（Ctrl+Z 只覆盖画布上的节点增删改），请先导出备份。',
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: () => removeSubScript(id),
@@ -495,7 +506,7 @@ const missingScripts = computed(() => {
   const known = new Set(scriptList.value.map((s) => s.id))
   const ids = new Set<string>()
   for (const n of nodes.value) {
-    if (n?.data?.stepType !== 'script_call') continue
+    if (n?.data?.nodeType !== 'script_call') continue
     const id = String(n.data.params?.script_id || '')
     if (id && !known.has(id)) ids.add(id)
   }
@@ -507,30 +518,71 @@ const winOptions = computed(() => [
   ...eng.windows.map((w) => ({ label: w.title.slice(0, 40), value: w.hwnd })),
 ])
 
-const DEFAULTS: Record<StepType, Record<string, any>> = {
-  delay: { ms: 1000 },
-  find_image: { template: '', threshold: 0.85, timeout_ms: 5000, click: false, on_timeout: 'skip' },
-  click: { x: 0, y: 0, button: 'left', clicks: 1 },
-  key: { key: '' },
-  text: { text: '' },
-  judge: { template: '', threshold: 0.85, timeout_ms: 5000 },
-  terminate: {},
-  macro: { events: [], speed: 1.0 },
-  // 连点器：interval_ms 是两次点击之间的间隔（频率越低间隔越大）
-  autoclick: { x: 0, y: 0, button: 'left', interval_ms: 100, count: 10 },
-  // 调用脚本：script_id 是「脚本库」里的稳定标识（不是名字）
-  script_call: { script_id: '', name: '' },
-}
-
+/**
+ * 取节点的展示信息（标题 / 图标 / 配色）。
+ *
+ * 0.1.3 起**颜色不再是每个节点一个**，而是"同类节点同色"——六类各一个色，
+ * 一眼就能看出一段流程在干什么（输入=蓝 / 视觉=绿 / 流程=青 / 工具=橙 / 数据=紫 / 系统=灰）。
+ */
 function metaOf(type: string) {
-  return STEP_META[type as StepType] ?? { label: type, icon: '❓', color: '#888' }
+  const m = NODE_META[type as NodeType]
+  if (!m) return { label: type, icon: '❓', color: '#888' }
+  return { label: m.label, icon: m.icon, color: CATEGORY_META[m.category].color }
 }
 
-/** 连点器：把「间隔毫秒」换算成「次/秒」，对着"频率"更好理解 */
-function clickRate(intervalMs: number): string {
-  const ms = Number(intervalMs)
-  if (!ms || ms <= 0) return '不限速（尽可能快）'
-  return `约 ${(1000 / ms).toFixed(1)} 次/秒`
+// ---------- 属性面板（由参数模式表驱动）----------
+
+/** 当前选中节点的参数模式 */
+const currentSchema = computed(() => {
+  const t = selectedNode.value?.data?.nodeType as NodeType | undefined
+  return t ? NODE_SCHEMA[t] : undefined
+})
+
+/** 当前参数下应当显示的字段（按字段自己的 showIf 过滤——同一个节点按模式显示不同参数） */
+const visibleFields = computed<NodeField[]>(() => {
+  const n = selectedNode.value
+  const schema = currentSchema.value
+  if (!n || !schema) return []
+  return schema.fields.filter((f) => fieldVisible(f, n.data.params || {}))
+})
+
+/** 条件参数拆开读（左值 / 运算符 / 右值） */
+function condPart(key: string, part: 'left' | 'op' | 'right'): any {
+  const c = selectedNode.value?.data?.params?.[key]
+  if (c && typeof c === 'object') return c[part] ?? ''
+  return part === 'op' ? '==' : ''
+}
+
+/** 条件参数拆开写；缺字段时补成标准三件套，避免写出半个对象 */
+function setCondPart(key: string, part: 'left' | 'op' | 'right', v: any) {
+  const n = selectedNode.value
+  if (!n) return
+  const p = n.data.params
+  const c = p[key] && typeof p[key] === 'object' ? { ...p[key] } : { left: '', op: '==', right: '' }
+  c[part] = v
+  p[key] = c
+}
+
+/** 区域参数的显示文本 */
+function regionText(key: string): string {
+  const r = selectedNode.value?.data?.params?.[key]
+  if (!r || typeof r !== 'object') return '未选择区域'
+  return `${r.left}, ${r.top}  ·  ${r.width}×${r.height}`
+}
+
+/** 正在为哪个参数框选区域（ScreenCapture 回调时写回它） */
+const regionFieldKey = ref('')
+
+function openRegionPick(key: string) {
+  regionFieldKey.value = key
+  capMode.value = 'rect'
+  capVisible.value = true
+}
+
+function onRect(r: { left: number; top: number; width: number; height: number }) {
+  capVisible.value = false
+  const n = selectedNode.value
+  if (n && regionFieldKey.value) n.data.params[regionFieldKey.value] = { ...r }
 }
 
 // ---------- 画布控制 ----------
@@ -553,8 +605,8 @@ function pan(dx: number, dy: number) {
 }
 
 // ---------- 节点操作 ----------
-function addStep(type: StepType) {
-  const meta = STEP_META[type]
+function addStep(type: NodeType) {
+  const meta = metaOf(type)
   const id = `n${++nodeSeq}`
   let pos = { x: 60, y: 80 }
   if (vf && typeof vf.screenToFlowCoordinate === 'function') {
@@ -569,7 +621,7 @@ function addStep(type: StepType) {
     id,
     type: 'step',
     position: pos,
-    data: { stepType: type, label: meta.label, params: { ...DEFAULTS[type] }, once: false },
+    data: { nodeType: type, label: meta.label, params: defaultsFor(type), once: false },
   }
   nodes.value.push(node)
   selectedId.value = id
@@ -601,7 +653,7 @@ function removeSelected() {
 function deleteSelected() {
   const ids = selectionIds()
   if (!ids.length) {
-    message.warning('请先在画布上选中要删除的步骤（左键拖拽框选，或 Ctrl+点击逐个加选）')
+    message.warning('请先在画布上选中要删除的节点（左键拖拽框选，或 Ctrl+点击逐个加选）')
     return
   }
   const idSet = new Set(ids)
@@ -609,7 +661,7 @@ function deleteSelected() {
   edges.value = edges.value.filter((e) => !idSet.has(e.source) && !idSet.has(e.target))
   selectedId.value = null
   selIds.value = []
-  message.success(`已删除 ${ids.length} 个步骤`)
+  message.success(`已删除 ${ids.length} 个节点`)
 }
 
 // ---------- 复制 / 剪切 / 粘贴（可跨编辑器）----------
@@ -617,19 +669,19 @@ function deleteSelected() {
 function copySelection(quiet = false): boolean {
   const ids = selectionIds()
   if (!ids.length) {
-    if (!quiet) message.warning('请先选中要复制的步骤')
+    if (!quiet) message.warning('请先选中要复制的节点')
     return false
   }
   const frag = extractFragment(nodes.value, edges.value, ids)
   if (!frag) return false
   clip.put(frag, flowName.value)
-  if (!quiet) message.success(`已复制 ${ids.length} 个步骤（可切到另一个编辑器粘贴）`)
+  if (!quiet) message.success(`已复制 ${ids.length} 个节点（可切到另一个编辑器粘贴）`)
   return true
 }
 
 function cutSelection() {
   if (!copySelection(true)) {
-    message.warning('请先选中要剪切的步骤')
+    message.warning('请先选中要剪切的节点')
     return
   }
   deleteSelected()
@@ -652,7 +704,7 @@ function pasteAnchor(): { x: number; y: number } {
 function pasteClipboard() {
   const frag = clip.take()
   if (!frag) {
-    message.warning('剪贴板里还没有内容：先在画布上选中步骤并复制')
+    message.warning('剪贴板里还没有内容：先在画布上选中节点并复制')
     return
   }
   const at = pasteAnchor()
@@ -661,7 +713,7 @@ function pasteClipboard() {
   edges.value = [...edges.value, ...newEdges]
   selectedId.value = newNodes[0]?.id ?? null
   selIds.value = newNodes.map((n) => n.id)
-  message.success(`已粘贴 ${newNodes.length} 个步骤${clip.source && clip.source !== flowName.value ? `（来自「${clip.source}」）` : ''}`)
+  message.success(`已粘贴 ${newNodes.length} 个节点${clip.source && clip.source !== flowName.value ? `（来自「${clip.source}」）` : ''}`)
 }
 
 // ---------- 画布右键菜单 ----------
@@ -966,6 +1018,40 @@ function onHistoryKey(e: KeyboardEvent) {
   }
 }
 
+/**
+ * 节点上"放识别模板"的参数键名（没有则为空串）。
+ *
+ * 0.1.3 里有好几个节点都带模板：图像识别(template)、等待-等图片(template)、
+ * 区域分析-对比参考图(reference)。模板的拾取 / 重命名 / 删除都要**同时**照顾到它们，
+ * 所以按「参数模式」推导键名，而不是硬编码 `nodeType === 'find_image'`
+ * （0.1.2 就是这么写的，拆出「判断」节点后就漏掉了）。
+ */
+function templateKeyOf(n: any): string {
+  const t = n?.data?.nodeType as NodeType | undefined
+  const schema = t ? NODE_SCHEMA[t] : undefined
+  if (!schema) return ''
+  for (const f of schema.fields) {
+    if (f.key !== 'template' && f.key !== 'reference') continue
+    if (fieldVisible(f, n.data.params || {})) return f.key
+  }
+  return ''
+}
+
+/** 节点是否带坐标参数（能被「拾取坐标」写入） */
+function hasXY(n: any): boolean {
+  const t = n?.data?.nodeType as NodeType | undefined
+  const schema = t ? NODE_SCHEMA[t] : undefined
+  if (!schema) return false
+  const keys = schema.fields.map((f) => f.key)
+  return keys.includes('x') && keys.includes('y')
+}
+
+/** 读出节点当前引用的模板 id（无则空串） */
+function nodeTemplateId(n: any): string {
+  const k = templateKeyOf(n)
+  return k ? String(n.data.params[k] || '') : ''
+}
+
 // ---------- 模板 / 坐标拾取 ----------
 // 模板列表是全局的（一台机器一份），维护在 engine store 里，多个标签共用一份缓存
 function refreshTemplates() {
@@ -974,7 +1060,8 @@ function refreshTemplates() {
   })
 }
 
-function openCapture(mode: 'region' | 'point') {
+
+function openCapture(mode: 'region' | 'point' | 'rect') {
   capMode.value = mode
   capVisible.value = true
 }
@@ -982,9 +1069,10 @@ function openCapture(mode: 'region' | 'point') {
 async function onCaptured(tplId: string) {
   capVisible.value = false
   await eng.refreshTemplates(true)
-  const st = selectedNode.value?.data.stepType
-  if (st === 'find_image' || st === 'judge') {
-    selectedNode.value.data.params.template = tplId
+  const node = selectedNode.value
+  const key = templateKeyOf(node)
+  if (node && key) {
+    node.data.params[key] = tplId
     previewTemplate(tplId)
   }
 }
@@ -992,10 +1080,10 @@ async function onCaptured(tplId: string) {
 function onPicked(x: number, y: number) {
   if (!pickingVisible.value) return
   pickingVisible.value = false
-  const st = selectedNode.value?.data.stepType
-  if (selectedNode.value && (st === 'click' || st === 'autoclick')) {
-    selectedNode.value.data.params.x = x
-    selectedNode.value.data.params.y = y
+  const node = selectedNode.value
+  if (node && hasXY(node)) {
+    node.data.params.x = x
+    node.data.params.y = y
     message.success(`已拾取坐标 (${x}, ${y})`)
   }
 }
@@ -1012,14 +1100,15 @@ function cancelPicking() {
 
 async function testMatch() {
   const node = selectedNode.value
-  if (!node || node.data.stepType !== 'find_image') return
-  if (!node.data.params.template) {
+  const key = templateKeyOf(node)
+  if (!node || !key) return
+  if (!node.data.params[key]) {
     message.warning('请先选择模板')
     return
   }
   try {
     const win = boundWindow.value?.hwnd ?? null
-    const r = await engine.match(node.data.params.template, node.data.params.threshold, win)
+    const r = await engine.match(node.data.params[key], node.data.params.threshold, win)
     if (r.found) {
       message.success(`找到目标：(${r.x}, ${r.y})，相似度 ${(r.score * 100).toFixed(1)}%`)
       if (r.annotated) {
@@ -1052,14 +1141,14 @@ async function previewTemplate(id: string) {
 }
 
 function openRename() {
-  const id = selectedNode.value?.data.params.template || tplPreviewId.value
+  const id = nodeTemplateId(selectedNode.value) || tplPreviewId.value
   if (!id) return
   renameText.value = id
   renameVisible.value = true
 }
 
 async function doRename() {
-  const id = selectedNode.value?.data.params.template || tplPreviewId.value
+  const id = nodeTemplateId(selectedNode.value) || tplPreviewId.value
   if (!id || !renameText.value.trim()) return
   const newId = renameText.value.trim()
   try {
@@ -1068,9 +1157,9 @@ async function doRename() {
     renameVisible.value = false
     // 更新所有引用旧模板名的节点
     for (const n of nodes.value) {
-      const st = n.data?.stepType
-      if ((st === 'find_image' || st === 'judge') && n.data?.params?.template === id) {
-        n.data.params.template = r.id
+      const k = templateKeyOf(n)
+      if (k && n.data?.params?.[k] === id) {
+        n.data.params[k] = r.id
       }
     }
     await refreshTemplates()
@@ -1082,7 +1171,7 @@ async function doRename() {
 }
 
 async function doDeleteTemplate() {
-  const id = selectedNode.value?.data.params.template || tplPreviewId.value
+  const id = nodeTemplateId(selectedNode.value) || tplPreviewId.value
   if (!id) return
   try {
     await engine.deleteTemplate(id)
@@ -1091,9 +1180,9 @@ async function doDeleteTemplate() {
     tplPreviewId.value = ''
     // 清空所有引用该模板的节点
     for (const n of nodes.value) {
-      const st = n.data?.stepType
-      if ((st === 'find_image' || st === 'judge') && n.data?.params?.template === id) {
-        n.data.params.template = ''
+      const k = templateKeyOf(n)
+      if (k && n.data?.params?.[k] === id) {
+        n.data.params[k] = ''
       }
     }
     await refreshTemplates()
@@ -1104,7 +1193,11 @@ async function doDeleteTemplate() {
 }
 
 // ---------- 按键录制 ----------
-function startKeyRecord() {
+/** 正在为哪个参数键录入按键（属性面板里每个 keys 字段各有自己的录入按钮） */
+const keyTarget = ref('')
+
+function startKeyRecord(fieldKey = 'keys') {
+  keyTarget.value = fieldKey
   keyRecording.value = true
   window.addEventListener('keydown', onKeyRecordKey)
 }
@@ -1120,8 +1213,9 @@ function onKeyRecordKey(e: KeyboardEvent) {
   if (e.shiftKey) parts.push('shift')
   parts.push(k === ' ' ? 'space' : k)
   const keyName = parts.join('+')
-  if (selectedNode.value && selectedNode.value.data.stepType === 'key') {
-    selectedNode.value.data.params.key = keyName
+  const n = selectedNode.value
+  if (n && keyTarget.value) {
+    n.data.params[keyTarget.value] = keyName
     message.success('已录入按键：' + keyName)
   }
   finishKeyRecord()
@@ -1129,14 +1223,15 @@ function onKeyRecordKey(e: KeyboardEvent) {
 
 function finishKeyRecord() {
   keyRecording.value = false
+  keyTarget.value = ''
   window.removeEventListener('keydown', onKeyRecordKey)
 }
 
 // 选中节点变化时自动预览模板
 watch(selectedNode, (n) => {
-  if (n && (n.data.stepType === 'find_image' || n.data.stepType === 'judge')) {
-    previewTemplate(n.data.params.template)
-  } else {
+  const id = n ? nodeTemplateId(n) : ''
+  if (id) previewTemplate(id)
+  else {
     tplPreview.value = ''
     tplPreviewId.value = ''
   }
@@ -1189,7 +1284,7 @@ async function saveJsonToFile(data: FlowFile) {
     try {
       const handle = await w.showSaveFilePicker({
         suggestedName: `${baseName}.agflow`,
-        types: [{ description: 'AutoGameTool 脚本', accept: { 'application/json': ['.agflow'] } }],
+        types: [{ description: 'AutoTool 脚本', accept: { 'application/json': ['.agflow'] } }],
       })
       const writable = await handle.createWritable()
       await writable.write(json)
@@ -1240,7 +1335,7 @@ function onLoadFile(e: Event) {
   reader.onload = () => {
     try {
       const data = JSON.parse(reader.result as string) as FlowFile
-      if (data.format !== 'agflow') throw new Error('不是有效的 AutoGameTool 脚本文件')
+      if (data.format !== 'agflow') throw new Error('不是有效的 AutoTool 脚本文件')
       // 脚本名：优先用文件内记录的名字；若为空或是占位名「未命名脚本」，则退回用文件名。
       // （没改名就保存的文件，内部记的就是占位名，此时用文件名才对应你给脚本起的名字）
       const innerName = String(data.name ?? '').trim()
@@ -1256,7 +1351,7 @@ function onLoadFile(e: Event) {
   input.value = ''
 }
 
-/** 当前标签能不能被"取代"：必须是根脚本标签，且画布上还没有任何步骤 */
+/** 当前标签能不能被"取代"：必须是根脚本标签，且画布上还没有任何节点 */
 function canReplaceCurrent() {
   const t = tab.value
   return !!t && t.kind === 'root' && nodes.value.length === 0 && edges.value.length === 0
@@ -1267,7 +1362,7 @@ function askSaveBeforeReplace(name: string): Promise<'save' | 'discard' | 'cance
   return new Promise((resolve) => {
     dialog.warning({
       title: '当前空白脚本有改动',
-      content: `「${name}」画布上还没有步骤，但有未保存的改动痕迹。加载新脚本前要先保存它吗？`,
+      content: `「${name}」画布上还没有节点，但有未保存的改动痕迹。加载新脚本前要先保存它吗？`,
       positiveText: '保存',
       negativeText: '不保存',
       onPositiveClick: () => resolve('save'),
@@ -1279,6 +1374,14 @@ function askSaveBeforeReplace(name: string): Promise<'save' | 'discard' | 'cance
 
 /** 加载进来的脚本：落到当前空白标签（取代）或新开一个标签。 */
 async function openLoaded(data: FlowFile, name: string, hadWindow: boolean) {
+  // 0.1.2 及更早的脚本在这里升级到 0.1.3 的节点体系：
+  // 字段改名（stepType→nodeType）、类型改名（click→mouse…）、以及按规范拆开的
+  // 「找图判断」。升级是幂等的，所以再打开一次也不会变样。
+  const migrated = migrateScript(data)
+  data = migrated.data as FlowFile
+  if (migrated.notes.length) {
+    message.info('已按 0.1.3 的新规范升级这份脚本：' + migrated.notes.join('；'), { duration: 9000 })
+  }
   const init = {
     name,
     repeat: data.repeat || 1,
@@ -1338,7 +1441,7 @@ async function openLoaded(data: FlowFile, name: string, hadWindow: boolean) {
 function toGraphNodes(ns: any[]) {
   return ns.map((n) => ({
     id: n.id,
-    type: (n.data as any)?.stepType,
+    type: (n.data as any)?.nodeType,
     params: (n.data as any)?.params || {},
     once: !!(n.data as any)?.once,
   }))
@@ -1413,7 +1516,7 @@ function checkCycles(): boolean {
 
 async function run() {
   if (nodes.value.length === 0) {
-    message.warning('请先添加步骤')
+    message.warning('请先添加节点')
     return
   }
   if (!checkCycles()) return
@@ -1502,11 +1605,11 @@ function onRecorded(events: any[]) {
     id,
     type: 'step',
     position: pos,
-    data: { stepType: 'macro', label: '键鼠录制', params: { events, speed: 1.0 }, once: false },
+    data: { nodeType: 'record', label: '键鼠录制', params: mergeWithDefaults('record', { events, speed: 1.0 }), once: false },
   } as any)
   selectedId.value = id
   message.success(
-    `已录制 ${events.length} 个事件，并生成一个录制步骤（可点顶栏「✂ 拆分录制」拆成可编辑节点）`,
+    `已录制 ${events.length} 个事件，并生成一个录制节点（可点顶栏「✂ 拆分录制」拆成可编辑节点）`,
     { duration: 6000 },
   )
   loadFlowToEngine()
@@ -1532,7 +1635,7 @@ function viewportFlowHeight(): number {
 // nodeArg 省略时作用于当前选中的录制节点（属性面板按钮的用法）。
 function splitMacro(nodeArg?: any) {
   const node = nodeArg || selectedNode.value
-  if (!node || node.data.stepType !== 'macro') return
+  if (!node || node.data.nodeType !== 'record') return
   const events: any[] = node.data.params?.events || []
   if (!events.length) {
     message.warning('录制内容为空，无法拆分')
@@ -1562,7 +1665,12 @@ function splitMacro(nodeArg?: any) {
       id: nid,
       type: 'step',
       position: { x: base.x + slots[i].x, y: base.y + slots[i].y },
-      data: { stepType: s.stepType, label: STEP_META[s.stepType].label, params: s.params, once: false },
+      data: {
+        nodeType: s.nodeType,
+        label: metaOf(s.nodeType).label,
+        params: mergeWithDefaults(s.nodeType, s.params),
+        once: false,
+      },
     })
     ids.push(nid)
   }
@@ -1589,7 +1697,7 @@ function splitMacro(nodeArg?: any) {
   }
 
   nodes.value.push(...created)
-  // 步骤之间依次相连（i → i+1），蛇形走位保证这些连线都很短、不交叉
+  // 节点之间依次相连（i → i+1），蛇形走位保证这些连线都很短、不交叉
   for (let i = 0; i + 1 < ids.length; i++) {
     edges.value.push({ id: `e-${ids[i]}-${ids[i + 1]}`, source: ids[i], target: ids[i + 1], sourceHandle: null })
   }
@@ -1602,25 +1710,25 @@ function splitMacro(nodeArg?: any) {
   }
 
   selectedId.value = ids[0]
-  message.success(`已拆分为 ${ids.length} 个可编辑步骤（${cols} 列 × ${rows} 行）`)
+  message.success(`已拆分为 ${ids.length} 个可编辑节点（${cols} 列 × ${rows} 行）`)
   loadFlowToEngine()
   nextTick(() => fitView())
 }
 
 // 工具栏上的「✂ 拆分录制」入口。
 // 之所以要有它：拆分按钮原先只在「选中录制节点」时出现在右侧属性面板里，
-// 不在工具栏、也不在左侧步骤面板，用户根本找不到。现在流程里只要有录制步骤，
+// 不在工具栏、也不在左侧节点面板，用户根本找不到。现在流程里只要有录制节点，
 // 顶栏就有一个常驻可见的入口。
 function splitMacroFromToolbar() {
   const sel = selectedNode.value
-  if (sel && sel.data.stepType === 'macro') return splitMacro(sel)
+  if (sel && sel.data.nodeType === 'record') return splitMacro(sel)
   const list = macroNodes.value
   if (!list.length) {
-    message.warning('流程里还没有「键鼠录制」步骤：先点「⏺ 开始录制」录一段操作')
+    message.warning('流程里还没有「键鼠录制」节点：先点「⏺ 开始录制」录一段操作')
     return
   }
   if (list.length > 1) {
-    message.warning(`流程里有 ${list.length} 个录制步骤，请先在画布上选中要拆分的那个`)
+    message.warning(`流程里有 ${list.length} 个录制节点，请先在画布上选中要拆分的那个`)
     return
   }
   return splitMacro(list[0])
@@ -1651,38 +1759,38 @@ function currentSelection(): any[] {
   return selNodes.value
 }
 
-/** 打包合并：把选中的一串相邻步骤合并成一个「键鼠录制」步骤。 */
+/** 打包合并：把选中的一串相邻节点合并成一个「键鼠录制」节点。 */
 function mergeSelected() {
   const sel = currentSelection()
   if (sel.length < 2) {
-    message.warning('请先在画布上选中至少 2 个相邻步骤（左键拖拽框选，或 Ctrl+点击逐个加选）')
+    message.warning('请先在画布上选中至少 2 个相邻节点（左键拖拽框选，或 Ctrl+点击逐个加选）')
     return
   }
   const chain = orderSelectedChain(sel)
   if (!chain) {
-    message.warning('只能打包**连成一串**的相邻步骤：请确认选中的步骤首尾相接、且中间没有分支')
+    message.warning('只能打包连成一串的相邻节点：请确认选中的节点首尾相接、且中间没有分支')
     return
   }
-  const badTypes = [...new Set(chain.filter((n) => !canPack(n.data.stepType)).map((n) => n.data.stepType))]
+  const badTypes = [...new Set(chain.filter((n) => !canPack(n.data.nodeType)).map((n) => n.data.nodeType))]
   if (badTypes.length) {
     message.warning(
-      '这些步骤没法打包进录制：' +
-        badTypes.map((t) => STEP_META[t as StepType]?.label || t).join('、') +
+      '这些节点没法打包进录制：' +
+        badTypes.map((t) => NODE_META[t as NodeType]?.label || t).join('、') +
         '（录制只表达键鼠动作）',
     )
     return
   }
   const onceOn = chain.filter((n) => n.data.once)
   if (onceOn.length) {
-    message.warning(`选中的步骤里有 ${onceOn.length} 个勾了「单次执行」，录制步骤表达不了，请先取消勾选`)
+    message.warning(`选中的节点里有 ${onceOn.length} 个勾了「单次执行」，录制节点表达不了，请先取消勾选`)
     return
   }
 
   const res = packStepsToMacro(
-    chain.map((n) => ({ stepType: n.data.stepType, params: n.data.params || {} })),
+    chain.map((n) => ({ nodeType: n.data.nodeType, params: n.data.params || {} })),
   )
   if (!res.ok) {
-    message.warning(res.badTypes.length ? '选中的步骤里没有可打包的键鼠动作' : '选中的步骤打包后没有任何事件')
+    message.warning(res.badTypes.length ? '选中的节点里没有可打包的键鼠动作' : '选中的节点打包后没有任何事件')
     return
   }
 
@@ -1699,7 +1807,7 @@ function mergeSelected() {
     id: newId,
     type: 'step',
     position: { x: head.position?.x ?? 0, y: head.position?.y ?? 0 },
-    data: { stepType: 'macro', label: '键鼠录制', params: { events: res.events, speed: 1.0 }, once: false },
+    data: { nodeType: 'record', label: '键鼠录制', params: mergeWithDefaults('record', { events: res.events, speed: 1.0 }), once: false },
   })
   for (const e of incoming) {
     edges.value.push({ ...e, id: `e-${e.source}-${newId}`, target: newId })
@@ -1710,7 +1818,7 @@ function mergeSelected() {
 
   selectedId.value = newId
   refreshSelection()
-  message.success(`已把 ${chain.length} 个步骤打包成一个录制步骤（${res.events.length} 个键鼠事件）`)
+  message.success(`已把 ${chain.length} 个节点打包成一个录制节点（${res.events.length} 个键鼠事件）`)
   loadFlowToEngine()
   nextTick(() => fitView())
 }
@@ -1718,7 +1826,7 @@ function mergeSelected() {
 // 以引擎为唯一事实来源同步运行状态的轮询放在 engine store（eng.syncRunState）：
 // 它是全应用一份的状态，多个标签各轮询一次纯属浪费，也容易互相打架。
 
-// ---------- 悬浮框（由引擎创建的原生置顶小窗，显示循环进度与当前步骤）----------
+// ---------- 悬浮框（由引擎创建的原生置顶小窗，显示循环进度与当前节点）----------
 // 开关是全局的（引擎侧一份），状态放在 engine store；按钮在外壳的底部控制条上
 // （views/Editor.vue），这里不再重复放一个。
 
@@ -1870,7 +1978,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="editor">
     <header class="topbar">
-      <!-- 左侧：文件操作 + 脚本名。不再放 Logo/品牌名——桌面窗口的标题栏已经写了 AutoGameTool，
+      <!-- 左侧：文件操作 + 脚本名。不再放 Logo/品牌名——桌面窗口的标题栏已经写了 AutoTool，
            顶栏那块位置留给真正高频的操作。 -->
       <n-button size="small" @click="newFlow">＋ 新建</n-button>
       <n-button size="small" @click="triggerLoad">📂 加载</n-button>
@@ -1919,7 +2027,7 @@ onBeforeUnmount(() => {
 
     <!-- 脚本库有问题的提示：缺失的子脚本 / 循环依赖都属于"早点说清楚"的事 -->
     <n-alert v-if="missingScripts.length" type="warning" class="pane-alert" :show-icon="true">
-      有 {{ missingScripts.length }} 个「调用脚本」步骤指向的子脚本不存在：{{ missingScripts.join('、') }}。
+      有 {{ missingScripts.length }} 个「调用脚本」节点指向的子脚本不存在：{{ missingScripts.join('、') }}。
       请重新选择子脚本，或把它从流程里删掉。
     </n-alert>
 
@@ -1950,7 +2058,7 @@ onBeforeUnmount(() => {
               🗑 删除{{ selNodes.length > 1 ? ` (${selNodes.length})` : '' }}
             </n-button>
           </template>
-          删除所有选中的步骤（Delete 键）。先在画布上左键拖拽框选，或按住 Ctrl 逐个点击加选
+          删除所有选中的节点（Delete 键）。先在画布上左键拖拽框选，或按住 Ctrl 逐个点击加选
         </n-tooltip>
         <n-tooltip trigger="hover">
           <template #trigger>
@@ -1988,9 +2096,9 @@ onBeforeUnmount(() => {
           </template>
           {{
             macroNodes.length
-              ? '把「键鼠录制」步骤拆成可单独编辑的鼠标点击 / 键盘按键 / 延时节点' +
-                (macroNodes.length > 1 ? '；流程里有多个录制步骤，先在画布上选中要拆的那个' : '')
-              : '流程里还没有「键鼠录制」步骤：先用「⏺ 开始录制」录一段操作'
+              ? '把「键鼠录制」节点拆成可单独编辑的鼠标点击 / 键盘按键 / 延时节点' +
+                (macroNodes.length > 1 ? '；流程里有多个录制节点，先在画布上选中要拆的那个' : '')
+              : '流程里还没有「键鼠录制」节点：先用「⏺ 开始录制」录一段操作'
           }}
         </n-tooltip>
         <n-tooltip trigger="hover">
@@ -2001,8 +2109,8 @@ onBeforeUnmount(() => {
           </template>
           {{
             selNodes.length >= 2
-              ? `把选中的 ${selNodes.length} 个相邻步骤合并成一个「键鼠录制」步骤（拆分的逆操作）`
-              : '先选中至少 2 个相邻步骤：在画布上左键拖拽框选，或按住 Ctrl 逐个点击加选'
+              ? `把选中的 ${selNodes.length} 个相邻节点合并成一个「键鼠录制」节点（拆分的逆操作）`
+              : '先选中至少 2 个相邻节点：在画布上左键拖拽框选，或按住 Ctrl 逐个点击加选'
           }}
         </n-tooltip>
       </div>
@@ -2010,9 +2118,33 @@ onBeforeUnmount(() => {
 
     <div class="main">
       <aside class="palette">
-        <div class="palette-title">步骤类型</div>
-        <div v-for="[t, meta] in stepTypes" :key="t" class="palette-item" @click="addStep(t)">
-          <span class="palette-icon" :style="{ background: meta.color }">{{ meta.icon }}</span>
+        <div class="palette-title">节点</div>
+        <!-- 六大类：上方切换类目，下方列出该类目的节点。
+             类目按钮在选中时用该类颜色描边，和画布上节点的配色一一对应。 -->
+        <div class="cat-tabs">
+          <button
+            v-for="c in CATEGORY_ORDER"
+            :key="c"
+            type="button"
+            class="cat-tab"
+            :class="{ active: paletteCat === c }"
+            :style="paletteCat === c ? { borderColor: CATEGORY_META[c].color, color: CATEGORY_META[c].color } : undefined"
+            :title="CATEGORY_META[c].desc"
+            @click="paletteCat = c"
+          >
+            <span class="cat-tab-icon">{{ CATEGORY_META[c].icon }}</span>
+            <span class="cat-tab-label">{{ CATEGORY_META[c].label }}</span>
+          </button>
+        </div>
+        <div class="palette-cat-desc">{{ CATEGORY_META[paletteCat].desc }}</div>
+        <div
+          v-for="[t, meta] in nodesOfCategory(paletteCat)"
+          :key="t"
+          class="palette-item"
+          :title="meta.hint"
+          @click="addStep(t)"
+        >
+          <span class="palette-icon" :style="{ background: CATEGORY_META[meta.category].color }">{{ meta.icon }}</span>
           <span>{{ meta.label }}</span>
         </div>
       </aside>
@@ -2056,7 +2188,7 @@ onBeforeUnmount(() => {
         </VueFlow>
         <div v-if="nodes.length === 0" class="canvas-empty">
           <div class="empty-emoji">🧩</div>
-          <div>从左侧点击步骤类型开始搭建脚本流程</div>
+          <div>从左侧点击节点开始搭建脚本流程</div>
         </div>
 
         <div class="flow-controls">
@@ -2096,32 +2228,141 @@ onBeforeUnmount(() => {
         <template v-if="selectedNode">
           <div class="inspector-head">
             <span class="inspector-title">
-              {{ metaOf(selectedNode.data.stepType).icon }}
-              {{ metaOf(selectedNode.data.stepType).label }}
+              {{ metaOf(selectedNode.data.nodeType).icon }}
+              {{ metaOf(selectedNode.data.nodeType).label }}
             </span>
             <n-button size="tiny" quaternary type="error" @click="removeSelected">删除</n-button>
           </div>
 
-          <template v-if="!['judge', 'terminate'].includes(selectedNode.data.stepType)">
+          <template v-if="!['judge', 'terminate'].includes(selectedNode.data.nodeType)">
             <div class="field">
               <label>单次执行（仅第一轮循环）</label>
               <n-switch v-model:value="selectedNode.data.once" />
             </div>
           </template>
 
-          <template v-if="selectedNode.data.stepType === 'delay'">
-            <div class="field">
-              <label>延时（毫秒）</label>
-              <n-input-number v-model:value="selectedNode.data.params.ms" :min="0" :step="100" />
-            </div>
-          </template>
+          <!-- ============ 参数面板 ============
+               0.1.3 起不再为每个节点手写一段 v-if，而是由 lib/nodeSchema.ts 的
+               参数模式表驱动（字段类型 → 控件）。新增节点只要往模式表里加一条即可，
+               默认值 / 面板 / 节点摘要 / 迁移补参全部同源，不会再出现"三处各写一遍"。 -->
+          <div v-if="currentSchema?.help" class="schema-help">{{ currentSchema.help }}</div>
 
-          <template v-else-if="selectedNode.data.stepType === 'find_image' || selectedNode.data.stepType === 'judge'">
-            <div class="field">
-              <label>识别模板</label>
+          <template v-for="f in visibleFields" :key="f.key">
+            <!-- 文本 -->
+            <div v-if="f.type === 'text'" class="field">
+              <label>{{ f.label }}</label>
+              <n-input v-model:value="selectedNode.data.params[f.key]" :placeholder="f.placeholder" />
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
+            </div>
+
+            <!-- 多行文本 -->
+            <div v-else-if="f.type === 'textarea'" class="field">
+              <label>{{ f.label }}</label>
+              <n-input
+                v-model:value="selectedNode.data.params[f.key]"
+                type="textarea"
+                :rows="3"
+                :placeholder="f.placeholder"
+              />
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
+            </div>
+
+            <!-- 命令行 -->
+            <div v-else-if="f.type === 'command'" class="field">
+              <label>{{ f.label }}</label>
+              <n-input
+                v-model:value="selectedNode.data.params[f.key]"
+                type="textarea"
+                :rows="3"
+                class="mono"
+                placeholder="要执行的命令，支持 {{变量名}}"
+              />
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
+            </div>
+
+            <!-- 数字 -->
+            <div v-else-if="f.type === 'number'" class="field">
+              <label>{{ f.label }}</label>
+              <n-input-number
+                v-model:value="selectedNode.data.params[f.key]"
+                :min="f.min"
+                :max="f.max"
+                :step="f.step ?? 1"
+              />
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
+            </div>
+
+            <!-- 开关 -->
+            <div v-else-if="f.type === 'switch'" class="field">
+              <label>{{ f.label }}</label>
+              <n-switch v-model:value="selectedNode.data.params[f.key]" />
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
+            </div>
+
+            <!-- 下拉 -->
+            <div v-else-if="f.type === 'select'" class="field">
+              <label>{{ f.label }}</label>
+              <n-select v-model:value="selectedNode.data.params[f.key]" :options="f.options || []" />
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
+            </div>
+
+            <!-- 颜色 -->
+            <div v-else-if="f.type === 'color'" class="field">
+              <label>{{ f.label }}</label>
+              <div class="row">
+                <input v-model="selectedNode.data.params[f.key]" type="color" class="color-input" />
+                <n-input v-model:value="selectedNode.data.params[f.key]" style="flex: 1" />
+              </div>
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
+            </div>
+
+            <!-- 按键（点「录制」后按下组合键录入） -->
+            <div v-else-if="f.type === 'keys'" class="field">
+              <label>{{ f.label }}</label>
+              <div class="row">
+                <n-input :value="selectedNode.data.params[f.key]" placeholder="未设置" readonly style="flex: 1" />
+                <n-button
+                  size="small"
+                  :type="keyRecording ? 'error' : 'primary'"
+                  @click="keyRecording ? finishKeyRecord() : startKeyRecord(f.key)"
+                >
+                  {{ keyRecording ? '按下按键…' : '录制' }}
+                </n-button>
+              </div>
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
+            </div>
+
+            <!-- 条件：左值 / 运算符 / 右值 -->
+            <div v-else-if="f.type === 'condition'" class="field">
+              <label>{{ f.label }}</label>
+              <div class="cond-row">
+                <n-input
+                  :value="condPart(f.key, 'left')"
+                  placeholder="左值（变量名）"
+                  @update:value="(v: string) => setCondPart(f.key, 'left', v)"
+                />
+                <n-select
+                  :value="condPart(f.key, 'op')"
+                  :options="CONDITION_OPS"
+                  class="cond-op"
+                  @update:value="(v: string) => setCondPart(f.key, 'op', v)"
+                />
+                <n-input
+                  v-if="!UNARY_OPS.includes(condPart(f.key, 'op'))"
+                  :value="condPart(f.key, 'right')"
+                  placeholder="右值"
+                  @update:value="(v: string) => setCondPart(f.key, 'right', v)"
+                />
+              </div>
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
+            </div>
+
+            <!-- 识别模板 -->
+            <div v-else-if="f.type === 'template'" class="field">
+              <label>{{ f.label }}</label>
               <div class="row">
                 <n-select
-                  v-model:value="selectedNode.data.params.template"
+                  v-model:value="selectedNode.data.params[f.key]"
                   :options="eng.templates"
                   placeholder="选择模板"
                   filterable
@@ -2130,7 +2371,31 @@ onBeforeUnmount(() => {
                 />
                 <n-button size="small" @click="openCapture('region')">截取</n-button>
               </div>
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
             </div>
+
+            <!-- 矩形区域 -->
+            <div v-else-if="f.type === 'region'" class="field">
+              <label>{{ f.label }}</label>
+              <div class="row">
+                <span class="region-text">{{ regionText(f.key) }}</span>
+                <n-button size="small" @click="openRegionPick(f.key)">框选</n-button>
+                <n-button size="small" quaternary @click="selectedNode.data.params[f.key] = null">清除</n-button>
+              </div>
+              <p v-if="f.hint" class="terminate-hint">{{ f.hint }}</p>
+            </div>
+          </template>
+
+          <!-- 带坐标参数的节点：拾取屏幕坐标 -->
+          <div v-if="hasXY(selectedNode)" class="field">
+            <n-button size="small" block @click="startPicking">🎯 拾取屏幕坐标</n-button>
+            <p class="terminate-hint" style="margin-top: 6px">
+              点「拾取」后切到目标画面，按拾取快捷键（默认 alt+F3）再单击左键，坐标会自动填进来。
+            </p>
+          </div>
+
+          <!-- 带识别模板的节点：预览 / 重命名 / 删除 / 测试识别 -->
+          <template v-if="nodeTemplateId(selectedNode)">
             <div v-if="tplPreview" class="field">
               <label>模板预览</label>
               <img :src="tplPreview" class="tpl-preview" alt="模板预览" />
@@ -2140,161 +2405,28 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="field">
-              <label>相似度阈值：{{ (selectedNode.data.params.threshold * 100).toFixed(0) }}%</label>
-              <n-slider v-model:value="selectedNode.data.params.threshold" :min="0.5" :max="1" :step="0.01" />
-            </div>
-            <div class="field">
-              <label>超时（毫秒）</label>
-              <n-input-number v-model:value="selectedNode.data.params.timeout_ms" :min="0" :step="500" />
-            </div>
-            <template v-if="selectedNode.data.stepType === 'find_image'">
-              <div class="field">
-                <label>超时处理</label>
-                <n-select
-                  v-model:value="selectedNode.data.params.on_timeout"
-                  :options="[
-                    { label: '跳过（继续下一步）', value: 'skip' },
-                    { label: '退出（停止整个脚本）', value: 'exit' },
-                  ]"
-                />
-              </div>
-              <div class="field">
-                <label>找到后自动点击</label>
-                <n-switch v-model:value="selectedNode.data.params.click" />
-              </div>
-              <div class="field">
-                <n-button size="small" block @click="testMatch">测试识别</n-button>
-              </div>
-            </template>
-          </template>
-
-          <template v-else-if="selectedNode.data.stepType === 'click'">
-            <div class="field">
-              <label>坐标（X, Y）</label>
-              <div class="row">
-                <n-input-number v-model:value="selectedNode.data.params.x" :step="1" style="flex: 1" />
-                <n-input-number v-model:value="selectedNode.data.params.y" :step="1" style="flex: 1" />
-              </div>
-              <n-button size="small" block style="margin-top: 6px" @click="startPicking">🎯 拾取屏幕坐标</n-button>
-            </div>
-            <div class="field">
-              <label>按键</label>
-              <n-select
-                v-model:value="selectedNode.data.params.button"
-                :options="[
-                  { label: '左键', value: 'left' },
-                  { label: '右键', value: 'right' },
-                  { label: '中键', value: 'middle' },
-                ]"
-              />
-            </div>
-            <div class="field">
-              <label>点击次数</label>
-              <n-input-number v-model:value="selectedNode.data.params.clicks" :min="1" :max="10" />
+              <n-button size="small" block @click="testMatch">测试识别</n-button>
             </div>
           </template>
 
-          <template v-else-if="selectedNode.data.stepType === 'autoclick'">
-            <div class="field">
-              <label>连点坐标（X, Y）</label>
-              <div class="row">
-                <n-input-number v-model:value="selectedNode.data.params.x" :step="1" style="flex: 1" />
-                <n-input-number v-model:value="selectedNode.data.params.y" :step="1" style="flex: 1" />
-              </div>
-              <n-button size="small" block style="margin-top: 6px" @click="startPicking">🎯 采集点击坐标</n-button>
-              <p class="terminate-hint" style="margin-top: 6px">
-                点「采集」后切到游戏画面，按拾取快捷键（默认 alt+F3）再单击左键，坐标会自动填进来。
-              </p>
-            </div>
-            <div class="field">
-              <label>点击频率：{{ clickRate(selectedNode.data.params.interval_ms) }}</label>
-              <n-slider
-                v-model:value="selectedNode.data.params.interval_ms"
-                :min="0"
-                :max="2000"
-                :step="1"
-                :format-tooltip="(v: number) => `${v} ms（${clickRate(v)}）`"
-              />
-            </div>
-            <div class="field">
-              <label>间隔（毫秒，两次点击之间；0 = 不限速）</label>
-              <n-input-number
-                v-model:value="selectedNode.data.params.interval_ms"
-                :min="0"
-                :max="600000"
-                :step="10"
-              />
-            </div>
-            <div class="field">
-              <label>点击次数</label>
-              <n-input-number v-model:value="selectedNode.data.params.count" :min="1" :max="100000" :step="10" />
-            </div>
-            <div class="field">
-              <label>按键</label>
-              <n-select
-                v-model:value="selectedNode.data.params.button"
-                :options="[
-                  { label: '左键', value: 'left' },
-                  { label: '右键', value: 'right' },
-                  { label: '中键', value: 'middle' },
-                ]"
-              />
-            </div>
-            <div class="field">
-              <p class="terminate-hint">
-                连点过程中可以随时暂停 / 停止：每次点击前都会查一次状态，长连点也不会卡住「停止」。
-                整个过程算作一个步骤，循环轮数照常生效。
-              </p>
-            </div>
-          </template>
-
-          <template v-else-if="selectedNode.data.stepType === 'key'">
-            <div class="field">
-              <label>按键（点「录制」后按下按键）</label>
-              <div class="row">
-                <n-input :value="selectedNode.data.params.key" placeholder="未设置" readonly style="flex: 1" />
-                <n-button size="small" :type="keyRecording ? 'error' : 'primary'" @click="keyRecording ? finishKeyRecord() : startKeyRecord()">
-                  {{ keyRecording ? '按下按键…' : '录制' }}
-                </n-button>
-              </div>
-            </div>
-          </template>
-
-          <template v-else-if="selectedNode.data.stepType === 'text'">
-            <div class="field">
-              <label>文本内容</label>
-              <n-input v-model:value="selectedNode.data.params.text" type="textarea" :rows="3" placeholder="要输入的文本" />
-            </div>
-          </template>
-
-          <template v-else-if="selectedNode.data.stepType === 'terminate'">
-            <div class="field">
-              <p class="terminate-hint">执行到此节点时，无论脚本或循环是否完成，立即停止整个运行。</p>
-            </div>
-          </template>
-
-          <template v-else-if="selectedNode.data.stepType === 'macro'">
+          <template v-else-if="selectedNode.data.nodeType === 'record'">
             <div class="field">
               <label>录制内容</label>
               <p class="terminate-hint">
-                共 {{ (selectedNode.data.params.events || []).length }} 个事件（鼠标点击、滚轮、键盘按下/抬起；不再记录鼠标轨迹）
+                共 {{ (selectedNode.data.params.events || []).length }} 个事件（鼠标点击、滚轮、键盘按下/抬起；不记录鼠标轨迹）
               </p>
             </div>
             <div class="field">
-              <label>回放速度：x{{ selectedNode.data.params.speed }}</label>
-              <n-slider v-model:value="selectedNode.data.params.speed" :min="0.25" :max="4" :step="0.25" />
-            </div>
-            <div class="field">
-              <label>拆分为可编辑步骤</label>
+              <label>拆分为可编辑节点</label>
               <n-popconfirm @positive-click="splitMacro()">
                 <template #trigger>
-                  <n-button size="small" block type="warning">✂ 拆分为可编辑步骤</n-button>
+                  <n-button size="small" block type="warning">✂ 拆分为可编辑节点</n-button>
                 </template>
-                拆分会把这一步替换成一串「鼠标点击 / 键盘按键 / 滚轮 / 延时」节点，原录制节点将被删除（间隔 ≥80ms 会插入延时以保留节奏）。确定？
+                拆分会把这一步替换成一串「鼠标操作 / 键盘按键 / 延时」节点，原录制节点将被删除（间隔 ≥80ms 会插入延时以保留节奏）。确定？
               </n-popconfirm>
               <p class="terminate-hint">
-                顶栏也有常驻入口「✂ 拆分录制」，不必先选中本节点（流程里只有一个录制步骤时直接生效）。
-                想把拆开的步骤再合回去：选中它们后点顶栏「📦 打包合并」。
+                顶栏也有常驻入口「✂ 拆分录制」，不必先选中本节点（流程里只有一个录制节点时直接生效）。
+                想把拆开的节点再合回去：选中它们后点顶栏「📦 打包合并」。
               </p>
             </div>
             <div class="field">
@@ -2309,14 +2441,14 @@ onBeforeUnmount(() => {
             </div>
             <div class="field">
               <p class="terminate-hint">
-                提示：录制会覆盖当前步骤内容；录制时请切换到目标窗口操作，再按一次录制快捷键（默认 alt+F2）结束。
-                拆分后每个动作都是独立节点，可以单独删除/改坐标/改按键；长按某个键会被化简为单击（如需长按可在其后手动加延时）。
+                提示：录制会覆盖当前节点内容；录制时请切换到目标窗口操作，再按一次录制快捷键（默认 alt+F2）结束。
+                拆分后每个动作都是独立节点，可以单独删除/改坐标/改按键；长按某个键会被化简为单击（如需长按可用「键盘按键」的按下 / 松开两个节点表达）。
               </p>
             </div>
           </template>
 
           <!-- ============ 调用脚本（子脚本）============ -->
-          <template v-else-if="selectedNode.data.stepType === 'script_call'">
+          <template v-else-if="selectedNode.data.nodeType === 'script_call'">
             <div class="field">
               <label>要调用的子脚本</label>
               <div class="row">
@@ -2378,6 +2510,7 @@ onBeforeUnmount(() => {
       :initial-window="boundWindow?.hwnd ?? null"
       @captured="onCaptured"
       @picked="onPicked"
+      @rect="onRect"
       @cancel="capVisible = false"
     />
 
@@ -2538,7 +2671,7 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 .palette {
-  width: 150px;
+  width: 164px;
   flex: none;
   border-right: 1px solid var(--border);
   background: var(--bg-soft);
@@ -2546,7 +2679,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  /* 步骤类型多于可用高度时在**自己内部**滚动，不能溢出去压到画布/日志上 */
+  /* 节点多于可用高度时在**自己内部**滚动，不能溢出去压到画布/日志上 */
   min-height: 0;
   overflow-y: auto;
 }
@@ -2555,6 +2688,50 @@ onBeforeUnmount(() => {
   color: var(--text-dim);
   font-weight: 600;
   margin-bottom: 2px;
+}
+/* ---------- 六大类切换 ----------
+   3 × 2 网格。选中态用该类自己的颜色描边 + 淡色底：
+   和画布上的节点配色一一对应，扫一眼就知道"当前在挑哪一类的节点"。 */
+.cat-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+.cat-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 2px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.1;
+  cursor: pointer;
+  transition: 0.15s;
+  font-family: inherit;
+}
+.cat-tab:hover {
+  background: var(--bg-panel);
+}
+.cat-tab.active {
+  background: var(--bg-panel);
+  font-weight: 600;
+}
+.cat-tab-icon {
+  font-size: 14px;
+}
+.cat-tab-label {
+  white-space: nowrap;
+}
+.palette-cat-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  padding: 0 2px 4px;
+  border-bottom: 1px solid var(--border);
 }
 .palette-item {
   display: flex;
@@ -2744,6 +2921,58 @@ onBeforeUnmount(() => {
   color: var(--text-dim);
   font-size: 12px;
   line-height: 1.5;
+}
+/* 参数面板顶部的用法说明（来自 NODE_SCHEMA.help） */
+.schema-help {
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  background: var(--bg-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+/* 条件编辑：左值弹性、运算符定宽、右值弹性 */
+.cond-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.cond-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.cond-row > :last-child {
+  flex: 1;
+  min-width: 0;
+}
+.cond-op {
+  width: 96px;
+  flex: none !important;
+}
+/* 原生取色器：去掉两侧默认留白，跟输入框等高 */
+.color-input {
+  width: 34px;
+  height: 34px;
+  padding: 2px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  flex: none;
+}
+.region-text {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mono :deep(textarea),
+.mono :deep(input) {
+  font-family: Consolas, 'Cascadia Mono', 'Courier New', monospace;
 }
 
 /* 运行日志面板已移到外壳（views/Editor.vue）的右下角浮层，相关样式随之搬走 */

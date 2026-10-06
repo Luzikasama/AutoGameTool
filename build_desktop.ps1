@@ -1,9 +1,9 @@
-﻿# AutoGameTool 桌面版构建（Tauri 2 + Python sidecar）
+﻿# AutoTool 桌面版构建（Tauri 2 + Python sidecar）
 #
 # 步骤：
 #   1. 前端构建（vue-tsc + vite build）
-#   2. 引擎打包成 onedir（AutoGameTool-app\，复用 build_exe.ps1 的 PyInstaller 部分）
-#   3. tauri build：壳 + 把 AutoGameTool-app\ 作为 resources 一起塞进安装包
+#   2. 引擎打包成 onedir（AutoTool-app\，复用 build_exe.ps1 的 PyInstaller 部分）
+#   3. tauri build：壳 + 把 AutoTool-app\ 作为 resources 一起塞进安装包
 #
 # 为什么引擎用 onedir（而不是 onefile）：
 #   onefile 每次启动都要往 %TEMP% 解压，%TEMP% 一旦不可用就会弹
@@ -51,16 +51,16 @@ try {
 } finally { Pop-Location }
 
 # ---------------------------------------------------------------- 2. 引擎
-if ($SkipEngine -and (Test-Path (Join-Path $root 'AutoGameTool-app\AutoGameTool.exe'))) {
+if ($SkipEngine -and (Test-Path (Join-Path $root 'AutoTool-app\AutoTool.exe'))) {
     Step 2 '引擎打包（已存在，跳过）'
 } else {
-    Step 2 '引擎打包（PyInstaller onedir → AutoGameTool-app\）'
+    Step 2 '引擎打包（PyInstaller onedir → AutoTool-app\）'
     & (Join-Path $root 'build_exe.ps1')
     if ($LASTEXITCODE -ne 0) { throw "引擎打包失败（exit $LASTEXITCODE）" }
 }
-$engineDir = Join-Path $root 'AutoGameTool-app'
-if (-not (Test-Path (Join-Path $engineDir 'AutoGameTool.exe'))) {
-    throw "缺少引擎产物：$engineDir\AutoGameTool.exe"
+$engineDir = Join-Path $root 'AutoTool-app'
+if (-not (Test-Path (Join-Path $engineDir 'AutoTool.exe'))) {
+    throw "缺少引擎产物：$engineDir\AutoTool.exe"
 }
 
 # ---------------------------------------------------------------- 3. 壳 + 安装包
@@ -77,7 +77,7 @@ try {
 # ---------------------------------------------------------------- 4. 汇总
 $nsis = Get-ChildItem $env:CARGO_TARGET_DIR -Recurse -Filter '*setup.exe' -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
-$shell = Get-ChildItem $env:CARGO_TARGET_DIR -Recurse -Filter 'autogametool.exe' -ErrorAction SilentlyContinue |
+$shell = Get-ChildItem $env:CARGO_TARGET_DIR -Recurse -Filter 'autotool.exe' -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
 
 Write-Host ''

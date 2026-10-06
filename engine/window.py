@@ -285,12 +285,12 @@ _BROWSER_EXES = {
 _BROWSER_CLASSES = ("Chrome_WidgetWin", "MozillaWindowClass")
 
 # 明确不是浏览器的宿主：控制台 / 终端 / 解释器。
-# 这些窗口的标题经常带上项目名（例如承载后端的终端窗口标题就是 AutoGameTool），
+# 这些窗口的标题经常带上项目名（例如承载后端的终端窗口标题就是 AutoTool），
 # 一旦被当成 WebUI，点「界面」就会把后端控制台弹到前台。
 _NON_BROWSER_EXES = {
     "explorer.exe", "conhost.exe", "openconsole.exe", "windowsterminal.exe", "wt.exe",
     "cmd.exe", "powershell.exe", "pwsh.exe", "python.exe", "pythonw.exe",
-    "autogametool.exe", "mintty.exe", "bash.exe", "wsl.exe", "code.exe",
+    "autotool.exe", "mintty.exe", "bash.exe", "wsl.exe", "code.exe",
 }
 _NON_BROWSER_CLASSES = (
     "ConsoleWindowClass",
@@ -312,7 +312,7 @@ def find_webui_window(page_title: str, exclude_pids: set[int] | None = None) -> 
     """定位 WebUI 所在的**浏览器**窗口；找不到就返回 None。
 
     为什么不能只按标题匹配：项目目录经常被资源管理器打开着，其窗口标题恰好就是
-    「AutoGameTool」。因此这里要求窗口**必须真的是浏览器**：
+    「AutoTool」。因此这里要求窗口**必须真的是浏览器**：
 
     1. 类名（`Chrome_WidgetWin*` / `MozillaWindowClass`）或进程名看起来像浏览器；
     2. 显式排除控制台/终端/解释器（它们的标题里也常带项目名，例如承载后端的终端）；
@@ -387,7 +387,7 @@ def find_window_of_pid(pid: int, hint: str = "") -> dict | None:
     """按进程号找它的**主窗口**（桌面壳的原生窗口）。
 
     桌面版里悬浮框的「回到界面」要切回的是壳创建的 Tauri 窗口。它的进程名是
-    `autogametool.exe`，被 `find_webui_window` 的「必须像浏览器」规则明确排除，
+    `autotool.exe`，被 `find_webui_window` 的「必须像浏览器」规则明确排除，
     所以走另一条路：直接按**父进程 pid** 枚举窗口，不再猜进程名。
 
     只认「可见 + 有标题 + 没有 owner」的顶层窗口（有 owner 的是对话框/工具窗），
@@ -487,3 +487,199 @@ def focus_window(hwnd: int) -> bool:
         return bool(user32.SetForegroundWindow(hwnd))
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# 「窗口」节点需要的动作
+# ---------------------------------------------------------------------------
+
+SW_MINIMIZE = 6
+SW_MAXIMIZE = 3
+
+
+def find_window_by_title(keyword: str) -> dict | None:
+    """按标题关键字找窗口（不区分大小写），优先未最小化、面积最大的那个。
+
+    刻意**不**要求目标像浏览器 —— 「窗口」节点的用途就是"找到任意一个窗口"，
+    与找 WebUI 那套规则完全无关。关键字为空时返回 None（由调用方退回绑定窗口）。
+    """
+    kw = str(keyword or '').strip().lower()
+    if not kw:
+        return None
+    matched: list[dict] = []
+    proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = buf.value
+        if kw not in title.lower():
+            return True
+        rect = get_window_rect(hwnd)
+        if rect['width'] <= 0 or rect['height'] <= 0:
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        matched.append(
+            {
+                'hwnd': hwnd,
+                'title': title,
+                'pid': int(pid.value),
+                'rect': rect,
+                'minimized': bool(user32.IsIconic(hwnd)),
+            }
+        )
+        return True
+
+    try:
+        user32.EnumWindows(proc_type(_cb), 0)
+    except Exception:
+        return None
+    if not matched:
+        return None
+    matched.sort(key=lambda w: (w['minimized'], -(w['rect']['width'] * w['rect']['height'])))
+    return matched[0]
+
+
+def window_rect_with_offset(hwnd: int) -> dict:
+    """窗口矩形 + 客户区原点在屏幕上的位置。
+
+    截屏坐标自窗口左上角算起，而 mss 抓的是屏幕区域 —— 两者差一个 rect.left/top。
+    统一由这里提供，避免每一处调用各算一遍（旧代码里就漏过 offset）。
+    """
+    rect = get_window_rect(hwnd)
+    return {
+        **rect,
+        'offset_x': rect['left'],
+        'offset_y': rect['top'],
+    }
+
+
+def minimize_window(hwnd: int) -> bool:
+    try:
+        return bool(user32.ShowWindow(hwnd, SW_MINIMIZE))
+    except Exception:
+        return False
+
+
+def maximize_window(hwnd: int) -> bool:
+    try:
+        return bool(user32.ShowWindow(hwnd, SW_MAXIMIZE))
+    except Exception:
+        return False
+
+
+def restore_window(hwnd: int) -> bool:
+    """还原（不抢前台）。用 SW_SHOWNOACTIVATE 避免把用户正在看的窗口顶掉。"""
+    try:
+        return bool(user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE))
+    except Exception:
+        return False
+
+
+def move_window(hwnd: int, x: int, y: int, width: int, height: int) -> bool:
+    try:
+        return bool(user32.MoveWindow(hwnd, int(x), int(y), int(width), int(height), True))
+    except Exception:
+        return False
+
+
+def close_window(hwnd: int) -> bool:
+    """请求关闭窗口（发 WM_CLOSE，程序可以弹"是否保存"对话框，不会硬杀）。"""
+    try:
+        return bool(user32.PostMessageW(hwnd, 0x0010, 0, 0))  # WM_CLOSE
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 进程（「进程」节点 / 「命令」节点用）
+# ---------------------------------------------------------------------------
+
+TH32CS_SNAPPROCESS = 0x00000002
+PROCESS_TERMINATE = 0x0001
+
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ('dwSize', wintypes.DWORD),
+        ('cntUsage', wintypes.DWORD),
+        ('th32ProcessID', wintypes.DWORD),
+        ('th32DefaultHeapID', ctypes.POINTER(ctypes.c_ulong)),
+        ('th32ModuleID', wintypes.DWORD),
+        ('cntThreads', wintypes.DWORD),
+        ('th32ParentProcessID', wintypes.DWORD),
+        ('pcPriClassBase', ctypes.c_long),
+        ('dwFlags', wintypes.DWORD),
+        ('szExeFile', ctypes.c_wchar * 260),
+    ]
+
+
+def list_processes() -> list[dict]:
+    """枚举进程：返回 [{pid, name}]（name 为小写文件名）。"""
+    out: list[dict] = []
+    try:
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return out
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            if kernel32.Process32FirstW(snap, ctypes.byref(entry)):
+                while True:
+                    out.append({'pid': int(entry.th32ProcessID), 'name': str(entry.szExeFile).lower()})
+                    if not kernel32.Process32NextW(snap, ctypes.byref(entry)):
+                        break
+        finally:
+            kernel32.CloseHandle(snap)
+    except Exception:
+        return out
+    return out
+
+
+def find_pids_by_name(name: str) -> list[int]:
+    """按进程名（大小写不敏感，可带或不带 .exe）找 pid。"""
+    target = str(name or '').strip().lower()
+    if not target:
+        return []
+    if not target.endswith('.exe'):
+        target_exe = target + '.exe'
+    else:
+        target_exe = target
+    return [p['pid'] for p in list_processes() if p['name'] in (target, target_exe)]
+
+
+def is_process_running(name: str) -> bool:
+    return bool(find_pids_by_name(name))
+
+
+def kill_process(name: str) -> int:
+    """按名字结束所有同名进程，返回成功结束的个数。"""
+    done = 0
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    for pid in find_pids_by_name(name):
+        handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, int(pid))
+        if not handle:
+            continue
+        try:
+            if kernel32.TerminateProcess(handle, 1):
+                done += 1
+        finally:
+            kernel32.CloseHandle(handle)
+    return done
+

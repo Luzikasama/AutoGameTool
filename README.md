@@ -1,8 +1,8 @@
-# AutoGameTool
+# AutoTool
 
 > 轻量级游戏自动化脚本工具 —— **零代码可视化编排** + **本地 Python 引擎**
 >
-> 像搭积木一样"画"出游戏脚本：找图、点击、按键、判断分支、循环挂机，全程不写一行代码。
+> 像搭积木一样"画"出游戏脚本：图像识别、点击、按键、判断、循环挂机，全程不写一行代码。
 
 ## 前言
 
@@ -15,11 +15,11 @@
 
 | 方式 | 说明 |
 |---|---|
-| **[⬇ 安装包（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool-Setup.exe`，Windows 10 / 11，免管理员，双击即装，约 55 MB |
-| **[⬇ 免安装绿色版（Releases）](https://github.com/Luzikasama/AutoGameTool/releases/latest)** | `AutoGameTool_0.1.2_portable_x64.zip`，解压即用、不写注册表，约 80 MB |
+| **[⬇ 安装包（Releases）](https://github.com/Luzikasama/AutoTool/releases/latest)** | `AutoTool-Setup.exe`，Windows 10 / 11，免管理员，双击即装，约 55 MB |
+| **[⬇ 免安装绿色版（Releases）](https://github.com/Luzikasama/AutoTool/releases/latest)** | `AutoTool_0.1.3_portable_x64.zip`，解压即用、不写注册表，约 80 MB |
 | 从源码构建 | 见 [9. 打包与发布](#9-打包与发布)：`.\build_desktop.ps1`（前端 → 引擎 onedir → Tauri 壳 → NSIS 安装包） |
 
-> **当前形态：桌面版 v0.1.2** —— 原生窗口（Tauri 2）+ 本地 Python 引擎。
+> **当前形态：桌面版 v0.1.3** —— 原生窗口（Tauri 2）+ 本地 Python 引擎。
 > 版本号自 `0.1.0` 起**按桌面版单独计数**，更新日志从桌面版 `0.1.0` 开始（见 [14. 更新日志](#14-更新日志)）。
 
 两个包都**未做代码签名**。从浏览器下载后首次运行时，Windows 会弹蓝色的「Windows 已保护你的电脑」（SmartScreen）—— 这是**未签名程序的通用提示，不是报毒**，点 **「更多信息」→「仍要运行」** 即可，之后不再出现。
@@ -52,7 +52,7 @@
 
 ## 1. 项目简介
 
-AutoGameTool 是一款面向 **Windows** 的轻量级游戏自动化（类 RPA）工具。核心思路：
+AutoTool 是一款面向 **Windows** 的轻量级游戏自动化（类 RPA）工具。核心思路：
 
 - **用户画流程，引擎跑流程**。用户在可视化编辑器里拖拽节点、连线、填参数，产出的是一个 **JSON 工程文件**（`.agflow`），而不是代码。
 - 运行时由内置的 **Python 引擎**解释这份 JSON，调用底层能力（截图 / 图像识别 / 键鼠控制 / OCR）。
@@ -76,19 +76,64 @@ AutoGameTool 是一款面向 **Windows** 的轻量级游戏自动化（类 RPA�
 | 撤销 / 重做 | **Ctrl+Z / Ctrl+Y**（顶栏 ↶ ↷ 按钮），覆盖增删节点、连线、拖动、改参数、拆分、打包、加载等所有改动 |
 | 新建 / 加载 / 保存 | 集中在顶栏**最左侧**：**＋ 新建**（二次确认，误删可 `Ctrl+Z` 找回）、**📂 加载**、**💾 保存**；自定义格式 `.agflow`，保存时弹出**原生保存对话框**（可覆盖 / 另存） |
 
-### 2.2 节点类型
+### 2.2 节点类型（6 大类 · 25 个核心节点）
+
+**0.1.3 起，「步骤」升级为「节点」**：25 个核心节点按能力分成 **6 大类**，**同一类共用一种配色**（输入蓝 / 视觉绿 / 流程青 / 工具橙 / 数据紫 / 系统灰），左侧节点面板按类别分页 —— 画布上光看颜色就知道这段流程在干什么。0.1.2 及更早的 `.agflow` 打开时会**自动升级**到这套节点（见 [14. 更新日志](#14-更新日志)）。
+
+**① 输入（蓝）—— 执行动作：鼠标、键盘、文本、剪贴板**
 
 | 节点 | 图标 | 说明 |
 |---|---|---|
-| 延时 | ⏱ | 分段延时，每 1000ms 输出一次进度日志 |
-| 找图 | 🎯 | OpenCV 模板匹配；可设阈值、超时、**超时处理（跳过/退出）**、找到后自动点击 |
-| 判断分支 | 🔀 | 识图条件二分支，**双出口（成功 / 失败）**，按结果走不同连线 |
-| 鼠标点击 | 🖱 | 坐标可**屏幕点选拾取**；左/右/中键、点击次数 |
+| 鼠标操作 | 🖱 | 点击 / 双击 / 右键 / 移动 / 按下松开 / 滚轮；坐标可**屏幕点选拾取**（0.1.2 的「鼠标点击」并入此节点） |
+| 键盘按键 | ⌨ | 单键 / 组合键 / 按下 / 松开；**按键录制**：点「录制」后直接按下按键即可识别 |
+| 文本输入 | 📝 | 输入任意文本到当前窗口（可走剪贴板，兼顾输入法） |
+| 剪贴板 | 📋 | 写入 / 读取 / 清空 |
+
+**② 视觉（绿）—— 看到什么：图像、文字、颜色、像素、区域**
+
+| 节点 | 图标 | 说明 |
+|---|---|---|
+| 图像识别 | 🎯 | OpenCV 模板匹配；可设阈值、超时、**超时处理（跳过/退出）**，找到后可选自动点击（0.1.2 的「找图」） |
+| 文字识别 | 🔍 | 对指定区域做 OCR（RapidOCR），输出文本 |
+| 颜色检测 | 🎨 | 区域内是否出现指定颜色 |
+| 像素检测 | 📍 | 精确比对一个点（或小方块）的颜色 |
+| 区域分析 | 🖼 | 区域是否变化 / 平均颜色 / 截图 |
+
+**③ 流程（青）—— 控制执行：判断、循环、延时、等待、终止**
+
+| 节点 | 图标 | 说明 |
+|---|---|---|
+| 判断 | 🔀 | 按条件走「是 / 否」**双出口**（0.1.2 的「判断分支」；现在条件与识图已拆成两个节点，可自由组合） |
+| 循环 | 🔁 | 固定次数 / 条件循环 / 无限循环；**「循环体」出口**走进循环体，**连回循环节点自身＝这一轮结束、进入下一轮**，**「结束」出口**在循环结束后往下走 |
+| 延时 | ⏱ | 无条件等待指定时间，每 1000ms 输出一次进度日志 |
+| 等待 | ⏳ | 等到条件满足（图片出现、变量达标…）再继续 |
+| 终止 | 🛑 | 三级语义：终止当前**循环** / 当前**脚本** / 整个**工作流** |
+
+**④ 工具（橙）—— 组合与外部能力：录制、连点、脚本调用、外部工具**
+
+| 节点 | 图标 | 说明 |
+|---|---|---|
+| 键鼠录制 | ⏺ | **alt+F2**（可改）开始/停止，录制鼠标(点击/滚轮)与键盘(按下/抬起)，打包为**一个节点**，支持 0.25x~4x 变速回放；可**一键拆分为可编辑节点**，也可把相邻节点**打包合并**回来（见 [10.12](#1012-录制模型的拆分与打包)）。连点器是独立节点，不参与打包合并 |
 | 连点器 | ⚡ | **高频连点**：坐标可 **🎯 屏幕点选采集**，左/右/中键，**点击次数**与**间隔（频率）**可调；间隔低至 `0 ms` 时按"不限速、尽可能快"执行。界面实时显示换算出的**约 N 次/秒**；执行中照常响应暂停 / 停止 |
-| 键盘按键 | ⌨ | **按键录制**：点「录制」后直接按下按键即可识别（支持组合键） |
-| 输入文本 | 📝 | 输入任意文本 |
-| 键鼠录制 | ⏺ | **alt+F2**（可改）开始/停止，录制鼠标(点击/滚轮)与键盘(按下/抬起)，打包为**一个步骤**，支持 0.25x~4x 变速回放；可**一键拆分为可编辑节点**，也可把相邻步骤**打包合并**回来（见 [10.12](#1012-录制模型的拆分与打包)）。连点器是独立步骤，不参与打包合并 |
-| 终止条件 | 🛑 | 执行到此节点立即停止整个脚本（无论循环是否完成） |
+| 调用脚本 | 📦 | 执行本脚本内的一个**子脚本**（脚本嵌套），可单独编辑 / 导出 / 被多个节点复用（见 [10.21](#1021-子脚本嵌套与防递归)） |
+| 外部工具 | 🔌 | 调用外部程序 / HTTP 接口 / 插件 |
+
+**⑤ 数据（紫）—— 信息本身：变量、运算、文本处理**
+
+| 节点 | 图标 | 说明 |
+|---|---|---|
+| 变量 | 🏷 | 新建 / 赋值 / 读取 / 删除；写好后可在任意节点参数里用 `{{变量名}}` 插值 |
+| 运算 | 🧮 | 数学、比较、逻辑、赋值 |
+| 文本处理 | 🔤 | 拼接、截取、替换、正则、转数字… |
+
+**⑥ 系统（灰）—— 操作系统资源：窗口、进程、文件、命令**
+
+| 节点 | 图标 | 说明 |
+|---|---|---|
+| 窗口 | 🪟 | 查找 / 激活 / 最小化 / 移动 / 取信息 |
+| 进程 | ⚙ | 启动 / 关闭 / 是否在运行 / 取信息 |
+| 文件 | 📁 | 读 / 写 / 复制 / 移动 / 删除 / 存在性 |
+| 命令 | ⌘ | 执行 CMD / PowerShell / Bash 命令并取回输出 |
 
 ### 2.3 图像识别
 
@@ -118,13 +163,13 @@ AutoGameTool 是一款面向 **Windows** 的轻量级游戏自动化（类 RPA�
 - **运行状态自愈**：前端每秒以 `/run/state` 为准校正按钮，引擎侧另有 1 秒看门狗把真实状态推给悬浮框，两边不会再出现"一个显示运行中、一个显示已停止"
 - **单步容错**：单个节点失败只记日志，不中断整个流程（挂机更稳）
 - **单实例保护**：重复启动会被拦截并把已有窗口提到前台；编辑器页面也只允许**一个**连接，多开的那个会被以 **4409** 拒绝（桌面壳本身也只有一个窗口，见 [10.19](#1019-为什么只允许一个编辑器页面)）
-- **引擎生命周期由桌面壳负责**：桌面模式下引擎**不会因为「页面没了」而退出** —— 刷新页面、WebView 崩溃、改窗口大小都由壳兜着，**关窗即结束引擎与悬浮框**。前端在桌面模式也不再发告别信号（不会误退出）；`AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1` 仅对源码/浏览器方式运行有效（见 [10.14](#1014-页面离开时后端怎么办)）
-- **录制可拆分**：录完的「键鼠录制」步骤，点**顶栏常驻**的 **✂ 拆分录制**（或选中该节点后在右侧属性面板点 **✂ 拆分为可编辑步骤**），自动变成 点击 / 按键 / 延时 / 滚轮 等独立节点，可单独改坐标、改键、调顺序
-- **步骤可打包**：反向操作。**左键拖拽框选**（或 `Ctrl`+点击）选中一串**相邻**步骤，点顶栏 **📦 打包合并**，合并回一个「键鼠录制」步骤
-- **拆分后自动排版**：按编辑区大小铺成蛇形网格（不是一列排到底），相邻步骤首尾相接、连线不交叉；会被压到的原有节点整体让位
+- **引擎生命周期由桌面壳负责**：桌面模式下引擎**不会因为「页面没了」而退出** —— 刷新页面、WebView 崩溃、改窗口大小都由壳兜着，**关窗即结束引擎与悬浮框**。前端在桌面模式也不再发告别信号（不会误退出）；`AUTOTOOL_EXIT_ON_PAGE_LOSS=1` 仅对源码/浏览器方式运行有效（见 [10.14](#1014-页面离开时后端怎么办)）
+- **录制可拆分**：录完的「键鼠录制」节点，点**顶栏常驻**的 **✂ 拆分录制**（或选中该节点后在右侧属性面板点 **✂ 拆分为可编辑节点**），自动变成 点击 / 按键 / 延时 / 滚轮 等独立节点，可单独改坐标、改键、调顺序
+- **节点可打包**：反向操作。**左键拖拽框选**（或 `Ctrl`+点击）选中一串**相邻**节点，点顶栏 **📦 打包合并**，合并回一个「键鼠录制」节点
+- **拆分后自动排版**：按编辑区大小铺成蛇形网格（不是一列排到底），相邻节点首尾相接、连线不交叉；会被压到的原有节点整体让位
 - **多脚本编辑器（浏览器式标签页）**：可以**同时打开多个脚本**，每个标签页是一个独立的编辑器实例 —— 各自保留画布、选中状态与撤销历史。标签上有未保存标记（小圆点）与类型图标（📄 主脚本 / 📦 子脚本），关闭有未保存改动的标签会先确认（见 [10.20](#1020-多标签编辑器与跨编辑器搬流程)）
-- **跨编辑器搬流程**：在画布上框选一批步骤 → `Ctrl+C`（或 `Ctrl+X`）→ 切到另一个标签 → `Ctrl+V`，整段流程带内部连线一起粘过去，位置自动落在鼠标处（见 [10.20](#1020-多标签编辑器与跨编辑器搬流程)）
-- **子脚本（脚本嵌套）**：步骤里可以放一个「📦 调用脚本」，指向本脚本文件内部的一个**子脚本**。子脚本在**新标签页**里编辑，可以**新建空白**、也可以**从文件导入已有脚本**；运行时被**就地展开**，效果与「打包合并」基本一致，区别是子脚本能单独编辑、单独导出、被多个步骤复用（见 [10.21](#1021-子脚本嵌套与防递归)）
+- **跨编辑器搬流程**：在画布上框选一批节点 → `Ctrl+C`（或 `Ctrl+X`）→ 切到另一个标签 → `Ctrl+V`，整段流程带内部连线一起粘过去，位置自动落在鼠标处（见 [10.20](#1020-多标签编辑器与跨编辑器搬流程)）
+- **子脚本（脚本嵌套）**：节点里可以放一个「📦 调用脚本」，指向本脚本文件内部的一个**子脚本**。子脚本在**新标签页**里编辑，可以**新建空白**、也可以**从文件导入已有脚本**；运行时被**就地展开**，效果与「打包合并」基本一致，区别是子脚本能单独编辑、单独导出、被多个节点复用（见 [10.21](#1021-子脚本嵌套与防递归)）
 - **防递归三道防线**：编辑时拦截（选到会成环的组合直接拒绝并给出完整调用链）、运行前整图校验（有环 / 脚本缺失 / 嵌套过深都拒绝执行）、运行时调用栈 + 层数上限。三处的报错都是中文，且带完整链路（例如 `打怪 → 回城 → 打怪`）
 - **工具栏「删除」**：一键删除**所有选中**的流程（批量框选后按一下，或直接按 `Delete` / `Backspace`）
 - **设置面板重做**：改成**左侧分组导航 + 右侧卡片式设置行**（通用 / 外观 / 快捷键 / 数据与安全 / 关于），找设置不用再往下翻；**「关于」从顶栏移入设置**（版本、运行形态、连接状态、项目主页与发布页）
@@ -167,9 +212,9 @@ AutoGameTool 是一款面向 **Windows** 的轻量级游戏自动化（类 RPA�
 | 分类 | 选型 | 说明 |
 |---|---|---|
 | 桌面壳 | **Tauri 2**（Rust + WebView2） | 当前形态（桌面版 v0.1.0 起）：原生窗口显示编辑器，Python 引擎作为 sidecar/资源随包分发 |
-| 当前发行方式 | **PyInstaller `--onedir`**（引擎）+ **Tauri NSIS 安装包**（桌面版 v0.1.0 起） | 引擎产出 `AutoGameTool-app\`（exe + `_internal\`），由 `build_desktop.ps1` 串起壳与安装包。<br>选文件夹形态是为了**不依赖系统临时目录**：onefile 每次启动都要往 `%TEMP%` 解压，`%TEMP%` 一旦不可用就会弹 `could not create temporary directory` 而起不来 |
-| 安装包 | **NSIS**（由 Tauri bundler 内置下载与调用） | 生成带向导、快捷方式、卸载器的 `AutoGameTool-Setup.exe`；不再依赖手工维护的 `.nsi` 与 `build_installer.ps1` |
-| 桌面壳工程 | `frontend/src-tauri/` | `tauri.conf.json` 里 `bundle.targets=["nsis"]`、`installMode="currentUser"`，并把 `../../AutoGameTool-app/` 作为 `resources` 打进安装包的 `engine/` |
+| 当前发行方式 | **PyInstaller `--onedir`**（引擎）+ **Tauri NSIS 安装包**（桌面版 v0.1.0 起） | 引擎产出 `AutoTool-app\`（exe + `_internal\`），由 `build_desktop.ps1` 串起壳与安装包。<br>选文件夹形态是为了**不依赖系统临时目录**：onefile 每次启动都要往 `%TEMP%` 解压，`%TEMP%` 一旦不可用就会弹 `could not create temporary directory` 而起不来 |
+| 安装包 | **NSIS**（由 Tauri bundler 内置下载与调用） | 生成带向导、快捷方式、卸载器的 `AutoTool-Setup.exe`；不再依赖手工维护的 `.nsi` 与 `build_installer.ps1` |
+| 桌面壳工程 | `frontend/src-tauri/` | `tauri.conf.json` 里 `bundle.targets=["nsis"]`、`installMode="currentUser"`，并把 `../../AutoTool-app/` 作为 `resources` 打进安装包的 `engine/` |
 | 图标生成 | **Pillow 12** | `tools/make_icon.py` 生成多尺寸 `.ico` 与 favicon |
 
 ### 3.4 关键依赖版本（实测）
@@ -177,6 +222,7 @@ AutoGameTool 是一款面向 **Windows** 的轻量级游戏自动化（类 RPA�
 ```
 fastapi 0.141.1      uvicorn 0.52.4      opencv-python 5.0.0.93
 numpy 2.5.3          mss 10.2.0          pynput 1.8.2
+rapidocr-onnxruntime 1.2.3   onnxruntime 1.29.0
 pyinstaller 6.22.2   vue 3.5.42          naive-ui 2.45.3
 pillow 12.3.0        pnpm 11.4.0         tauri-cli 2.x
 ```
@@ -187,7 +233,7 @@ pillow 12.3.0        pnpm 11.4.0         tauri-cli 2.x
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│              AutoGameTool.exe + _internal\（文件夹形态）        │
+│              AutoTool.exe + _internal\（文件夹形态）        │
 │                                                              │
 │  ┌────────────────────────┐      ┌─────────────────────────┐  │
 │  │  前端（Vue 3 静态包）    │      │  Python 引擎（FastAPI）  │  │
@@ -219,21 +265,21 @@ pillow 12.3.0        pnpm 11.4.0         tauri-cli 2.x
 ## 5. 目录结构
 
 ```
-AutoGameTool/
-├─ AutoGameTool-Setup.exe     # 安装包（Tauri bundler → NSIS 产物，不入库）
+AutoTool/
+├─ AutoTool-Setup.exe     # 安装包（Tauri bundler → NSIS 产物，不入库）
 ├─ README.md
 ├─ build_desktop.ps1          # ★ 一键出安装包：前端 → 引擎 onedir → Tauri 壳 → NSIS
-├─ build_exe.ps1              # 只打引擎：前端构建 + PyInstaller（--onedir）→ AutoGameTool-app\
+├─ build_exe.ps1              # 只打引擎：前端构建 + PyInstaller（--onedir）→ AutoTool-app\
 ├─ run_engine.ps1             # 开发：只启动引擎
 ├─ run_frontend.ps1           # 开发：只启动前端
 │
-├─ AutoGameTool-app/          # 引擎产物（PyInstaller onedir，不入库）
-│  ├─ AutoGameTool.exe        #   引擎主程序（约 8.4 MB）
+├─ AutoTool-app/          # 引擎产物（PyInstaller onedir，不入库）
+│  ├─ AutoTool.exe        #   引擎主程序（约 8.4 MB）
 │  └─ _internal/              #   运行库（Python、OpenCV、Tk 等，约 190 MB）
 │
 ├─ assets/
-│  ├─ AutoGameTool.ico        # 应用图标（多尺寸 16~256，exe / 安装包 / 快捷方式共用）
-│  └─ AutoGameTool.png        # 512px 主图
+│  ├─ AutoTool.ico        # 应用图标（多尺寸 16~256，exe / 安装包 / 快捷方式共用）
+│  └─ AutoTool.png        # 512px 主图
 │
 ├─ tools/
 │  ├─ make_icon.py            # 用 Pillow 生成图标（同时输出前端 favicon 与 Tauri 图标）
@@ -257,7 +303,7 @@ AutoGameTool/
 │  │  ├─ types.ts             # 节点 / 流程 / 子脚本 / 日志类型
 │  │  ├─ router/index.ts      # 路由
 │  │  ├─ api/client.ts        # 引擎 HTTP 客户端
-│  │  ├─ lib/macroSplit.ts    # ★ 录制拆分：把录制事件编译成可编辑步骤（纯函数）
+│  │  ├─ lib/macroSplit.ts    # ★ 录制拆分：把录制事件编译成可编辑节点（纯函数）
 │  │  ├─ lib/bgCrop.ts        # ★ 自定义背景的截取几何（纯函数，界面与导出共用）
 │  │  ├─ lib/appearance.ts    # ★ 外观三态（浅色/深色/跟随系统）判定（纯函数）
 │  │  ├─ lib/scriptGraph.ts   # ★ 脚本调用图：环检测 / 可达性（前端防线 1，纯函数）
@@ -276,7 +322,7 @@ AutoGameTool/
 │  │     ├─ ScriptPickerModal.vue # 子脚本选择器（选已有 / 新建 / 从文件导入）
 │  │     └─ SettingsModal.vue # 设定面板（左侧分组导航 + 右侧卡片式设置行）
 │  └─ src-tauri/              # 桌面壳（Rust）
-│     ├─ tauri.conf.json      #   Tauri 2 配置：NSIS 目标、把 AutoGameTool-app\ 作为 resources 打进 engine/
+│     ├─ tauri.conf.json      #   Tauri 2 配置：NSIS 目标、把 AutoTool-app\ 作为 resources 打进 engine/
 │     ├─ Cargo.toml           #   壳版本号（与 package.json / tauri.conf.json / engine/main.py 同步）
 │     ├─ build.rs
 │     └─ src/lib.rs           #   ★ 壳逻辑：拉引擎 → 等 /health 就绪 → 开窗（失败退回浏览器并写 shell.log）
@@ -295,13 +341,13 @@ AutoGameTool/
    ├─ hotkey.py               # ★ 全局快捷键注册表（全部可改键 + 启用开关）
    ├─ picker.py               # 坐标拾取（快捷键由 hotkey.py 统一匹配）
    ├─ recorder.py             # 键鼠录制（快捷键由 hotkey.py 统一匹配）
-   ├─ overlay.py              # ★ 悬浮框（tkinter 置顶小窗，显示循环进度与当前步骤）
-   ├─ appconfig.py            # 用户配置读写（%APPDATA%\AutoGameTool\config.json）
+   ├─ overlay.py              # ★ 悬浮框（tkinter 置顶小窗，显示循环进度与当前节点）
+   ├─ appconfig.py            # 用户配置读写（%APPDATA%\AutoTool\config.json）
    ├─ enginelog.py            # ★ 运行日志落盘（轮转 + 令牌掩码 + 接管 stdout/stderr）
    └─ ws_manager.py           # WebSocket 广播（含「日志同时落盘」的钩子）
 ```
 
-> 运行时用户数据（模板、配置）位于 `%APPDATA%\AutoGameTool\`。
+> 运行时用户数据（模板、配置）位于 `%APPDATA%\AutoTool\`。
 
 ---
 
@@ -311,15 +357,15 @@ AutoGameTool/
 
 **方式 A：安装包**
 
-1. 双击 `AutoGameTool-Setup.exe`，按向导安装（默认安装到 `%LOCALAPPDATA%\AutoGameTool`）
+1. 双击 `AutoTool-Setup.exe`，按向导安装（默认安装到 `%LOCALAPPDATA%\AutoTool`）
 2. 从开始菜单或桌面快捷方式启动
 3. 壳会先拉起引擎、等 `/health` 就绪，然后**在原生窗口里打开编辑器**（不再需要浏览器；建窗失败时会退回系统默认浏览器并把原因写进 `shell.log`，见 [11](#11-常见问题与排错)）
 
 **方式 B：免安装（绿色）**
 
-下载 `AutoGameTool_0.1.2_portable_x64.zip`，解压出 `AutoGameTool\` 目录后双击里面的 `AutoGameTool\autogametool.exe` 即可（建议解压路径不含中文）。目录内容就是 `autogametool.exe`（桌面壳）+ `engine\`（Python 引擎）—— **不写注册表、不建快捷方式，删掉目录即卸载**。配置与模板同样写入 `%APPDATA%\AutoGameTool`。
+下载 `AutoTool_0.1.3_portable_x64.zip`，解压出 `AutoTool\` 目录后双击里面的 `AutoTool\autotool.exe` 即可（建议解压路径不含中文）。目录内容就是 `autotool.exe`（桌面壳）+ `engine\`（Python 引擎）—— **不写注册表、不建快捷方式，删掉目录即卸载**。配置与模板同样写入 `%APPDATA%\AutoTool`。
 
-> 也可以自己动手做绿色版：把安装目录里的 `autogametool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可。
+> 也可以自己动手做绿色版：把安装目录里的 `autotool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可。
 
 > 🔸 **只能运行一个实例**。重复启动会提示"程序已在运行"并退出——这是为了避免多开导致键盘钩子冲突。
 
@@ -351,7 +397,7 @@ pnpm dev            # → http://localhost:1420
 ```
 
 > 开发时两个都跑起来，前端通过 Vite 访问引擎的 8765 端口；打包版则由引擎同源托管前端静态文件，因此只需要一个 exe。
-> 开发模式需先设 `$env:AUTOGAMETOOL_DEV='1'` 再启动引擎（放行 1420 端口 CORS 并跳过令牌校验），否则 vite 页面调引擎会 401。
+> 开发模式需先设 `$env:AUTOTOOL_DEV='1'` 再启动引擎（放行 1420 端口 CORS 并跳过令牌校验），否则 vite 页面调引擎会 401。
 > 若 pnpm 因依赖状态检查中止（`ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`），见 [9.4 关于 pnpm 11](#94-关于-pnpm-11)。
 
 ---
@@ -373,7 +419,7 @@ pnpm dev            # → http://localhost:1420
 > 改键规则：支持 `ctrl` / `alt` / `shift` / `win` + 字母、数字、`f1`–`f12`（例如 `alt+f1`、`ctrl+shift+a`）。
 > 同一组按键不能给两个功能用，保存时引擎会**直接拒绝并说明冲突**；启用中的功能必须有键，清空后想启用会被拦下来。
 > 停用某个快捷键**不影响界面按钮**（「开始录制」按钮照样能点），只是那组按键不再触发。
-> 改键结果写在 `%APPDATA%\AutoGameTool\config.json` 的 `hotkeys` 里，升级/重装都保留。
+> 改键结果写在 `%APPDATA%\AutoTool\config.json` 的 `hotkeys` 里，升级/重装都保留。
 
 > 撤销/重做只在画布上生效；光标在输入框里时 `Ctrl+Z` 交给浏览器做文本撤销。
 
@@ -388,7 +434,7 @@ pnpm dev            # → http://localhost:1420
 
 ### 7.3 模板管理
 
-在「找图」或「判断分支」节点中：
+在「图像识别」或「判断」节点中：
 
 1. 点「截取」→ 弹窗内**选择窗口**（可切换目标，含刷新）→ 框选区域 → 保存
 2. 选中模板后下方显示**预览图**，可**重命名 / 删除**
@@ -525,18 +571,18 @@ pnpm dev            # → http://localhost:1420
 
 > **形态变更（桌面版 v0.1.0）**：本项目已从「浏览器 WebUI」迁移为 **Tauri 2 桌面版 + Python sidecar**：
 > 界面在原生窗口里显示，引擎仍以本地 HTTP/WS 提供服务（`127.0.0.1:8765`），
-> 用户数据目录与脚本格式完全不变（`%APPDATA%\AutoGameTool`、`.agflow`、找图模板按 id 引用）。
+> 用户数据目录与脚本格式完全不变（`%APPDATA%\AutoTool`、`.agflow`、图像识别模板按 id 引用）。
 >
 > - 开发：`pnpm tauri dev`（壳会用 venv 里的解释器拉起引擎源码，并开 DEV 模式免令牌 + 放行 vite 的 CORS）
 > - 构建：`.\build_desktop.ps1`（前端 → 引擎 onedir → `tauri build` → NSIS 安装包）
-> - **随迁移下线的东西**：WebUI 期的独立安装器（`build_installer.ps1` + `installer\AutoGameTool.nsi`）、便携版（`dist-desktop\` 与 `-便携版.zip`）、NSIS 工具链副本 `tools\nsis\`，以及 WebUI 期的回归测试脚本（`tools\test_*.py/ps1/js`、`smoke_test.ps1` 等）。
+> - **随迁移下线的东西**：WebUI 期的独立安装器（`build_installer.ps1` + `installer\AutoTool.nsi`）、便携版（`dist-desktop\` 与 `-便携版.zip`）、NSIS 工具链副本 `tools\nsis\`，以及 WebUI 期的回归测试脚本（`tools\test_*.py/ps1/js`、`smoke_test.ps1` 等）。
 >   安装包改由 Tauri bundler 内置的 NSIS 产出；需要老脚本时仍可从 git 历史取回。
 >   下面 9.3 起的若干小节为迁移前的历史说明，保留供查阅，不再对应仓库里的文件。
 
 ### 9.1 打包发行版（文件夹形态）
 
 ```powershell
-# 一键（推荐）：类型检查 + 前端构建 + PyInstaller 打包 + 复制到 AutoGameTool-app\
+# 一键（推荐）：类型检查 + 前端构建 + PyInstaller 打包 + 复制到 AutoTool-app\
 .\build_exe.ps1
 ```
 
@@ -545,16 +591,16 @@ pnpm dev            # → http://localhost:1420
 1. `vue-tsc --noEmit` 类型检查
 2. **`tools\check_ui_imports.mjs` 静态检查**：`.vue` 里用到的 `<n-xxx>` 是否都在该文件里 import 了
 3. `vite build` 产出 `frontend\dist`
-4. 用 `python -m PyInstaller`（**不是** `engine\.venv\Scripts\pyinstaller.exe`，原因见 `AGENTS.local.md` 第六节）打成**文件夹形态**（带应用图标），并整体复制到 `AutoGameTool-app\`
+4. 用 `python -m PyInstaller`（**不是** `engine\.venv\Scripts\pyinstaller.exe`，原因见 `AGENTS.local.md` 第六节）打成**文件夹形态**（带应用图标），并整体复制到 `AutoTool-app\`
 
-> 第 2 步为什么必须有（真实事故）：Naive UI 是按需 import 的，没有全局注册。如果某个 `<n-xxx>` 忘了 import，Vue 会把它当未知元素渲染，**具名插槽里的内容被整个丢掉**——那个按钮在界面上根本不存在。而 `vue-tsc` 只查类型、`vite build` 只做打包，**两者都不报错**，功能就这么无声无息地消失了（当时是 `NPopconfirm` 漏了，顶栏「＋ 新建」和属性面板的「✂ 拆分为可编辑步骤」都不显示）。现在构建期会直接失败并指出缺哪个组件。
+> 第 2 步为什么必须有（真实事故）：Naive UI 是按需 import 的，没有全局注册。如果某个 `<n-xxx>` 忘了 import，Vue 会把它当未知元素渲染，**具名插槽里的内容被整个丢掉**——那个按钮在界面上根本不存在。而 `vue-tsc` 只查类型、`vite build` 只做打包，**两者都不报错**，功能就这么无声无息地消失了（当时是 `NPopconfirm` 漏了，顶栏「＋ 新建」和属性面板的「✂ 拆分为可编辑节点」都不显示）。现在构建期会直接失败并指出缺哪个组件。
 
 等价的 PyInstaller 命令：
 
 ```powershell
 cd engine
-.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onedir --noconsole --name AutoGameTool `
-  --icon ..\assets\AutoGameTool.ico `
+.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onedir --noconsole --name AutoTool `
+  --icon ..\assets\AutoTool.ico `
   --add-data "..\frontend\dist;frontend_dist" `
   --hidden-import uvicorn.logging `
   --hidden-import uvicorn.loops.auto `
@@ -564,7 +610,7 @@ cd engine
   main.py
 ```
 
-产物：`engine\dist\AutoGameTool\` → 复制为 `AutoGameTool-app\`（exe 8.4 MB + `_internal\`，整目录约 199 MB）
+产物：`engine\dist\AutoTool\` → 复制为 `AutoTool-app\`（exe 8.4 MB + `_internal\`，整目录约 199 MB）
 
 **打包要点**
 
@@ -572,7 +618,7 @@ cd engine
 - opencv / onnxruntime 等含动态库的包建议加 `--collect-all`
 - **用 `--onedir` 而不是 `--onefile`**：单文件版每次启动都要往 `%TEMP%` 解压 `_MEIxxxx`，而 `%TEMP%` 可能不可用（被清理掉、或从 SmartScreen 点「仍要运行」拉起时环境异常），此时 Windows 的 `GetTempPath` 会退回「当前目录」（往往是 `C:\Windows\System32`）→ 弹 `could not create temporary directory` 起不来。文件夹形态没有解压这一步，启动也更快
 - 分发时必须**整个目录一起给**（不能只复制 exe）；安装包已处理好
-- 图标取自 `assets\AutoGameTool.ico`，缺失时脚本会先调用 `tools\make_icon.py` 生成
+- 图标取自 `assets\AutoTool.ico`，缺失时脚本会先调用 `tools\make_icon.py` 生成
 
 ### 9.2 制作安装包（Tauri bundler + NSIS）
 
@@ -580,17 +626,17 @@ cd engine
 # 一键（推荐）：前端 → 引擎 onedir → Tauri 壳 → NSIS 安装包
 .\build_desktop.ps1
 
-# 引擎产物已存在（AutoGameTool-app\AutoGameTool.exe）时，只重建壳与安装包
+# 引擎产物已存在（AutoTool-app\AutoTool.exe）时，只重建壳与安装包
 .\build_desktop.ps1 -SkipEngine
 ```
 
-产物：`AutoGameTool-Setup.exe`（由 `tauri build` 输出到 `<CARGO_TARGET_DIR>\release\bundle\nsis\`，根目录那份是分发副本）
+产物：`AutoTool-Setup.exe`（由 `tauri build` 输出到 `<CARGO_TARGET_DIR>\release\bundle\nsis\`，根目录那份是分发副本）
 
 `build_desktop.ps1` 的行为：
 
 1. `pnpm build` 构建前端（`vue-tsc` 类型检查 + `check_ui_imports.mjs` + `vite build`）
-2. 引擎打成 onedir → `AutoGameTool-app\`（等价于单独跑 `.\build_exe.ps1`；`-SkipEngine` 用于跳过这一步）
-3. `pnpm tauri build`：编译壳，把 `AutoGameTool-app\` 作为 `resources` 打进安装包的 `engine\`，最后调用 Tauri 内置的 NSIS 产出安装包
+2. 引擎打成 onedir → `AutoTool-app\`（等价于单独跑 `.\build_exe.ps1`；`-SkipEngine` 用于跳过这一步）
+3. `pnpm tauri build`：编译壳，把 `AutoTool-app\` 作为 `resources` 打进安装包的 `engine\`，最后调用 Tauri 内置的 NSIS 产出安装包
 4. 打印壳与安装包的路径、体积与 SHA256
 
 安装包行为全部由 `frontend\src-tauri\tauri.conf.json` 的 `bundle` 段决定（`targets: ["nsis"]`、`installMode: "currentUser"`）。
@@ -599,21 +645,21 @@ cd engine
 
 | 项 | 说明 |
 |---|---|
-| 安装目录 | `%LOCALAPPDATA%\AutoGameTool`（当前用户，**不触发 UAC**） |
+| 安装目录 | `%LOCALAPPDATA%\AutoTool`（当前用户，**不触发 UAC**） |
 | 快捷方式 | 开始菜单 + 桌面（安装向导里可选） |
 | 卸载入口 | 设置 → 应用 → 已安装的应用（注册标准 `Uninstall` 键） |
-| 用户数据 | `%APPDATA%\AutoGameTool`（模板 / 配置 / 运行日志，**卸载不动**） |
+| 用户数据 | `%APPDATA%\AutoTool`（模板 / 配置 / 运行日志，**卸载不动**） |
 | 版本升级 | 直接覆盖安装；卸载项里的 `DisplayVersion` 取自 `tauri.conf.json` 的 `version` |
-| 静默安装 | `AutoGameTool-Setup.exe /S`（`/D=路径` 可指定目录，须置于最后且不加引号） |
-| 静默卸载 | `"%LOCALAPPDATA%\AutoGameTool\Uninstall.exe" /S` |
-| 免安装绿色版 | Release 附带 `AutoGameTool_0.1.2_portable_x64.zip`；也可直接把安装目录里的 `autogametool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可，数据同样写入 `%APPDATA%\AutoGameTool` |
+| 静默安装 | `AutoTool-Setup.exe /S`（`/D=路径` 可指定目录，须置于最后且不加引号） |
+| 静默卸载 | `"%LOCALAPPDATA%\AutoTool\Uninstall.exe" /S` |
+| 免安装绿色版 | Release 附带 `AutoTool_0.1.3_portable_x64.zip`；也可直接把安装目录里的 `autotool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可，数据同样写入 `%APPDATA%\AutoTool` |
 | WebView2 运行时 | 安装包**内嵌引导程序**（`embedBootstrapper`）：目标机器缺 WebView2 时安装器自行补齐，不需要安装期单独下载 |
 
-> **关于体积**（0.1.2 实测）：`AutoGameTool-app\` 整目录约 199 MB（1084 个文件），其中大量未压缩的 DLL 会由 NSIS 以 LZMA 压掉大部分，安装包 **55.02 MiB**（57,690,093 字节，SHA256 `1E81B491…8341`）；绿色版 zip 为 **79.41 MiB**（83,266,271 字节，SHA256 `5DFC5822…3E625`）。0.1.1 对应为 55.23 MiB / 73.25 MiB。
+> **关于体积**（0.1.2 实测）：`AutoTool-app\` 整目录约 199 MB（1084 个文件），其中大量未压缩的 DLL 会由 NSIS 以 LZMA 压掉大部分，安装包 **55.02 MiB**（57,690,093 字节，SHA256 `1E81B491…8341`）；绿色版 zip 为 **79.41 MiB**（83,266,271 字节，SHA256 `5DFC5822…3E625`）。0.1.1 对应为 55.23 MiB / 73.25 MiB。
 >
 > 安装包比 0.1.0 大约 1.7 MB，是**内嵌 WebView2 引导程序**（`webviewInstallMode: embedBootstrapper`）带来的 —— 换掉默认的 `downloadBootstrapper` 后，目标机器缺 WebView2 时安装器不必先联网单独去下载一个引导程序。
 
-> 安装前建议先退出正在运行的 AutoGameTool（覆盖安装时旧进程会占用主程序文件）。
+> 安装前建议先退出正在运行的 AutoTool（覆盖安装时旧进程会占用主程序文件）。
 
 ### 9.3 源码编码约定（重要）
 
@@ -644,17 +690,17 @@ ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY
 
 ```powershell
 .\tools\smoke_test.ps1                                                             # 测根目录 exe
-.\tools\smoke_test.ps1 -ExePath "$env:LOCALAPPDATA\AutoGameTool\AutoGameTool.exe"  # 测安装后的 exe
+.\tools\smoke_test.ps1 -ExePath "$env:LOCALAPPDATA\AutoTool\AutoTool.exe"  # 测安装后的 exe
 ```
 
-> 安装目录以注册表 `HKCU\Software\AutoGameTool\InstallDir` 为准：安装脚本里有 `InstallDirRegKey`，**装过一次之后就会沿用那个目录**（比如你当初装到了 `E:\Apps\AutoGameTool`，升级不会把它搬回 `%LOCALAPPDATA%`）。`.\tools\test_installer.ps1` 也是按这个规则解析安装位置的。
+> 安装目录以注册表 `HKCU\Software\AutoTool\InstallDir` 为准：安装脚本里有 `InstallDirRegKey`，**装过一次之后就会沿用那个目录**（比如你当初装到了 `E:\Apps\AutoTool`，升级不会把它搬回 `%LOCALAPPDATA%`）。`.\tools\test_installer.ps1` 也是按这个规则解析安装位置的。
 
 脚本会启动 exe，逐项校验 `/health`、`/debug/kb`（键盘钩子是否存活）、`/windows/list`、`/vision/templates`、`/config/hotkey`、`POST /flow/load` 以及内嵌前端页面与 favicon，最后关闭进程并输出 PASS/FAIL（有失败项时返回 1，可直接用于 CI）。
 
 它顺带处理了两个常见的"假失败"：
 
 - 把 `TEMP` / `TMP` 指向一个**可写的解压目录**（优先系统临时目录，不可写时才退到 exe 同级的 `.smoketmp`，并在结束时清理）——`--onefile` 需要一个可写的解压目录，受限环境下会报 `Failed to extract VCRUNTIME140.dll: ... Permission denied` 并秒退
-- 设置 `AUTOGAMETOOL_NO_BROWSER=1`，避免测试期间弹出浏览器
+- 设置 `AUTOTOOL_NO_BROWSER=1`，避免测试期间弹出浏览器
 
 ### 9.6 录制拆分与打包算法回归测试
 
@@ -668,9 +714,9 @@ ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY
 
 - **拆分**：轨迹丢弃、左右键坐标、组合键合并、`ctrl` 连配两键、延时插入、空输入
 - **打包**：点击/按键/延时/嵌套录制、双击、不可打包类型整体拒绝
-- **往返等价**：`打包 → 再拆分` 后步骤序列、坐标、组合键、延时长度都不变
-- **网格排版**：12 步铺成 3 列 × 4 行、相邻步骤必定只差一个行距或列距（无长对角线）、位置不重叠、小批量仍是单列
-- **链序判定**：隔着没选的步骤 / 成环 / 有分支 / 两条独立链 都应被拒绝
+- **往返等价**：`打包 → 再拆分` 后节点序列、坐标、组合键、延时长度都不变
+- **网格排版**：12 步铺成 3 列 × 4 行、相邻节点必定只差一个行距或列距（无长对角线）、位置不重叠、小批量仍是单列
+- **链序判定**：隔着没选的节点 / 成环 / 有分支 / 两条独立链 都应被拒绝
 
 ### 9.7 引擎行为回归测试
 
@@ -697,11 +743,11 @@ engine\.venv\Scripts\python.exe tools\test_overlay_edit.py
 
 - `test_engine_state.py`（89 条）：按住 `alt` 连按两次 `f1` 必须触发两次；长按 `f1` 只触发一次；两条便捷键互不干扰；停用的绑定不触发也不占锁；**快捷键绑定表**（默认 alt+F1/F2/F3、旧配置 `hotkey` 迁移到新表并落盘、改键后锁清空、重复组合与「启用却没键」被拒、键名别名 `ArrowUp→up`）；**录制收尾清理**（按录制快捷键本身产生的按键要被剔掉，但录制中段/开头的合法 `alt` 组合不能误删）；**访问令牌持久化**（两次调用同一令牌、落盘、过短令牌重生成、环境变量优先）；**「启动」不依赖页面**（页面没响应时用缓存流程兜底、页面正常响应时不重复启动）；悬浮框状态去重（值没变不重绘）；`overlay` 模块级 API 完整性；Executor 暂停状态机（空闲暂停无效、停止清暂停、任务结束后 `reconcile` 复位）；**WebUI 窗口定位只认浏览器**（造一个标题唯一的非浏览器窗口，断言它必须被拒绝——旧版会返回它）；循环轮数直接输入的夹取与同步
 - `test_state_sync.py`（32 条）：`/run` 之后 `/run/state` 与 `/overlay/state` 必须同时为「运行中」；`/run/stop` 后两边都回到「未运行」；长延时能被立刻中断；反复停止幂等；**暂停必须真的冻住流程**（暂停 6.5 秒后 5 秒的延时仍未结束）、继续后正常跑完、暂停中也能停止、空闲暂停不产生假状态
-- `test_webui_close.py`（17 条）：从未有页面连接过 → 永不退出；**静默掉线 → 不退出**（挂机不中断，`/health` 仍可用、重连可成功）；刷新式重连 → 不退出；**主动告别 → 宽限期后退出**（且 `/goodbye` 无令牌 401）；**流程运行中告别 → 也不退出**；`AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1` 时才恢复旧行为
+- `test_webui_close.py`（17 条）：从未有页面连接过 → 永不退出；**静默掉线 → 不退出**（挂机不中断，`/health` 仍可用、重连可成功）；刷新式重连 → 不退出；**主动告别 → 宽限期后退出**（且 `/goodbye` 无令牌 401）；**流程运行中告别 → 也不退出**；`AUTOTOOL_EXIT_ON_PAGE_LOSS=1` 时才恢复旧行为
 - `test_single_page.py`（19 条）：`/config/hotkeys` 默认值 / 改键 / 停用 / 冲突与空键被 400 拒绝；第二个 WebSocket 被 **4409** 拒绝且**不影响已连接的页面**；原窗口关闭后新连接能接管（刷新页面不会被锁死）
 - `test_overlay_edit.py`（19 条）：点击数字进入编辑态（`WS_EX_NOACTIVATE` 被临时解除）；点击 / 回车 / 小键盘回车 / Esc / 失焦**都绑了处理函数**；输入框宽度能显示 5 位数字；提交发出 `repeat_set:<n>`、提交后恢复「不抢焦点」；越界夹到 1–99999、非法输入不产生动作；`Esc` 放弃、恢复显示并恢复「不抢焦点」；运行中禁用且点击不进入编辑态；**激活期内（窗口拿不到前台时）的延时判定绝不能抢跑提交**——把前台窗口固定为 0 并手动触发那次判定，断言编辑态与用户已敲进去的内容都不丢
 
-> 端到端脚本会真起一个引擎进程，并把 `APPDATA` 指向项目内 `.tmp\`，因此**不会碰你自己的 `%APPDATA%\AutoGameTool` 配置**（顺带保证测试期间悬浮框是关的、不弹窗）。它们需要 8765 端口空闲：先退出正在运行的 AutoGameTool。
+> 端到端脚本会真起一个引擎进程，并把 `APPDATA` 指向项目内 `.tmp\`，因此**不会碰你自己的 `%APPDATA%\AutoTool` 配置**（顺带保证测试期间悬浮框是关的、不弹窗）。它们需要 8765 端口空闲：先退出正在运行的 AutoTool。
 >
 > `test_overlay_edit.py` 会在屏幕上短暂出现一个悬浮框窗口，但**只用 Tk 内部合成事件驱动**——不移动你的鼠标、不模拟按键。这是刻意的：早期版本用真实点击 + 真实按键去测，那会劫持用户的鼠标键盘（还把字符打进当时的前台窗口），而且只要用户此刻在用电脑就必然测不稳。
 >
@@ -750,46 +796,46 @@ engine\.venv\Scripts\python.exe tools\test_overlay_edit.py
 
 脚本按真实用户路径跑一遍完整闭环，共 25 项断言：
 
-1. 静默安装（`/S`）：安装位置为注册表记录的 `InstallDir`（首次安装即 `%LOCALAPPDATA%\AutoGameTool`）
+1. 静默安装（`/S`）：安装位置为注册表记录的 `InstallDir`（首次安装即 `%LOCALAPPDATA%\AutoTool`）
 2. 校验主程序 / README / Uninstall.exe 是否落盘
 3. 校验开始菜单 3 个快捷方式与桌面快捷方式
 4. 校验注册表：`DisplayName`、`DisplayVersion`（期望值从 `frontend/src-tauri/tauri.conf.json` 的 `version` 读出，不写死）、`UninstallString`、`QuietUninstallString`、`InstallLocation`、`DisplayIcon`、`EstimatedSize`、`App Paths`
 5. 对**已安装的 exe** 跑一遍 `smoke_test.ps1`
 6. 静默卸载，校验安装目录 / 快捷方式 / 注册表项均已清理，且**用户数据被保留**
 
-> 注意：该脚本会写注册表与「开始菜单 / 桌面」，需要相应权限；它不会删除 `%APPDATA%\AutoGameTool`（模板与配置）。
+> 注意：该脚本会写注册表与「开始菜单 / 桌面」，需要相应权限；它不会删除 `%APPDATA%\AutoTool`（模板与配置）。
 >
-> 它**会先卸载本机已安装的副本再重装**（安装包自身的行为就是升级前先静默卸载旧版）。只想在已装好的副本上跑冒烟测试、不动安装的话，用 `.\tools\smoke_test.ps1 -ExePath <安装目录>\AutoGameTool.exe`。
+> 它**会先卸载本机已安装的副本再重装**（安装包自身的行为就是升级前先静默卸载旧版）。只想在已装好的副本上跑冒烟测试、不动安装的话，用 `.\tools\smoke_test.ps1 -ExePath <安装目录>\AutoTool.exe`。
 
 ### 9.12 打包产物核验（无控制台 + 日志落盘）
 
 ```powershell
-.\tools\test_noconsole_log.ps1                    # 默认测 AutoGameTool-app\AutoGameTool.exe
+.\tools\test_noconsole_log.ps1                    # 默认测 AutoTool-app\AutoTool.exe
 .\tools\test_noconsole_log.ps1 -ExePath <路径>     # 测别的副本
 ```
 
 针对「无控制台窗口 + 日志落盘」两条硬要求，在**打包产物**上核验（10 项检查）：
 
-1. `AutoGameTool.exe` 是 **GUI 子系统**（PE 头 `Subsystem = 2`），不会分配控制台。同一段检测代码对 `engine\.venv\Scripts\python.exe` 读出 `3`（控制台）作为阳性对照——否则「没看到控制台窗口」可能只是检测本身失效
+1. `AutoTool.exe` 是 **GUI 子系统**（PE 头 `Subsystem = 2`），不会分配控制台。同一段检测代码对 `engine\.venv\Scripts\python.exe` 读出 `3`（控制台）作为阳性对照——否则「没看到控制台窗口」可能只是检测本身失效
 2. 启动产物后枚举它的**全部顶层窗口**（文件夹形态只有一个进程；若拿到的是旧单文件版，会同时存在「父 bootloader」与「真正跑 Python 的子进程」两个同名进程，两个都查），断言没有任何控制台类窗口（`ConsoleWindowClass` / `CASCADIA_HOSTING_WINDOW_CLASS` 等），并且确实看到了悬浮框的 `TkTopLevel`
-3. `%APPDATA%\AutoGameTool\engine.log` 被创建、含带版本号的启动记录，且日志里的 `token=` 已掩成 `***`、**不含启动时传入的真实令牌**
+3. `%APPDATA%\AutoTool\engine.log` 被创建、含带版本号的启动记录，且日志里的 `token=` 已掩成 `***`、**不含启动时传入的真实令牌**
 
-> 脚本用固定令牌（`AUTOGAMETOOL_TOKEN`）启动产物，才能断言「真令牌没有落盘」；它不注入任何真实鼠标 / 键盘，只在开始时把已有的 `engine.log` 备份到 `.tmp\`。运行前需 8765 端口空闲。
+> 脚本用固定令牌（`AUTOTOOL_TOKEN`）启动产物，才能断言「真令牌没有落盘」；它不注入任何真实鼠标 / 键盘，只在开始时把已有的 `engine.log` 备份到 `.tmp\`。运行前需 8765 端口空闲。
 
 ### 9.13 发布 Release
 
 安装包构建完成后，用 GitHub CLI 上传到 Releases：
 
 ```powershell
-gh release create v0.1.0-desktop .\AutoGameTool-Setup.exe --title "v0.1.0-desktop —— ..." --notes-file .\notes.md
-gh release upload v0.1.0-desktop .\AutoGameTool-Setup.exe --clobber   # 补传 / 覆盖已有资产
+gh release create v0.1.0-desktop .\AutoTool-Setup.exe --title "v0.1.0-desktop —— ..." --notes-file .\notes.md
+gh release upload v0.1.0-desktop .\AutoTool-Setup.exe --clobber   # 补传 / 覆盖已有资产
 ```
 
 约定：
 
-- **版本号必须四处一致**：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`frontend/src-tauri/tauri.conf.json`（决定安装包文件名与卸载项 `DisplayVersion`）、`frontend/src-tauri/Cargo.toml`（同步 `Cargo.lock` 里 `autogametool` 的版本行）
+- **版本号必须四处一致**：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`frontend/src-tauri/tauri.conf.json`（决定安装包文件名与卸载项 `DisplayVersion`）、`frontend/src-tauri/Cargo.toml`（同步 `Cargo.lock` 里 `autotool` 的版本行）
 - **Release 说明直接取自本 README 的「更新日志」对应章节**，保持单一事实来源，不在别处另写一份
-- `AutoGameTool.exe` 与 `AutoGameTool-Setup.exe` **不入库**（见 `.gitignore`），只随 Release 分发；仓库里始终只有源码
+- `AutoTool.exe` 与 `AutoTool-Setup.exe` **不入库**（见 `.gitignore`），只随 Release 分发；仓库里始终只有源码
 - 补传资产用 `--clobber` 覆盖同名文件，避免留下 `state=starter` 的僵尸资产
 
 ---
@@ -850,36 +896,36 @@ buf.tofile(path)
 
 ### 10.7 无人值守启动
 
-引擎启动后默认会自动打开浏览器到 `http://127.0.0.1:8765`。设置环境变量后可以跳过（桌面壳拉起引擎时自带 `AUTOGAMETOOL_NO_BROWSER=1`，所以桌面版不会另外弹浏览器）：
+引擎启动后默认会自动打开浏览器到 `http://127.0.0.1:8765`。设置环境变量后可以跳过（桌面壳拉起引擎时自带 `AUTOTOOL_NO_BROWSER=1`，所以桌面版不会另外弹浏览器）：
 
 ```powershell
-$env:AUTOGAMETOOL_NO_BROWSER = '1'
-.\AutoGameTool.exe
+$env:AUTOTOOL_NO_BROWSER = '1'
+.\AutoTool.exe
 ```
 
 适用于自动化测试、开机自启、由其他程序拉起的场景；界面上仍可手动访问该地址。
 
-> 注意：**桌面模式下引擎永不自行退出**（窗口由壳持有，关窗由壳收尾）。源码/浏览器方式运行时：**页面静默掉线不再关后端**（挂机安全），只有用户**主动关页面**（前端发告别信号）才会在 5 秒宽限后退出，流程运行中一律不退。详见 [10.14](#1014-页面离开时后端怎么办)。想恢复旧行为设 `AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1`，想永不退出设 `AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1`。
+> 注意：**桌面模式下引擎永不自行退出**（窗口由壳持有，关窗由壳收尾）。源码/浏览器方式运行时：**页面静默掉线不再关后端**（挂机安全），只有用户**主动关页面**（前端发告别信号）才会在 5 秒宽限后退出，流程运行中一律不退。详见 [10.14](#1014-页面离开时后端怎么办)。想恢复旧行为设 `AUTOTOOL_EXIT_ON_PAGE_LOSS=1`，想永不退出设 `AUTOTOOL_KEEP_ALIVE_ON_CLOSE=1`。
 
 ### 10.8 本地访问令牌
 
 引擎具备操控键鼠、截屏的能力，而浏览器里任何网页都能向 `127.0.0.1` 发请求。为防止恶意网页把引擎当"RPA 后门"：
 
-- **令牌持久化**：首次启动生成随机令牌并保存到 `%APPDATA%\AutoGameTool\engine.token`，之后每次启动复用同一串——这样「程序已在运行时再启动一次」打开的页面也能连上（旧版每次新生成，那个页面永远 401）
+- **令牌持久化**：首次启动生成随机令牌并保存到 `%APPDATA%\AutoTool\engine.token`，之后每次启动复用同一串——这样「程序已在运行时再启动一次」打开的页面也能连上（旧版每次新生成，那个页面永远 401）
 - 自动打开的浏览器地址形如 `http://127.0.0.1:8765/?token=xxx`，前端存 sessionStorage 后自动从地址栏抹除
 - 所有 API（`/run`、`/input/*`、`/screen/*`、`/vision/*`、`/goodbye` 等）必须携带 `Authorization: Bearer <token>` 或 `?token=`；WebSocket 同样校验；无令牌一律 401
 - 校验 `Host` 头白名单（仅 127.0.0.1/localhost），防 DNS rebinding
-- 打包版与前端同源，**默认关闭 CORS**；仅 `AUTOGAMETOOL_DEV=1` 时放行 vite 调试端口并跳过令牌（开发用）
+- 打包版与前端同源，**默认关闭 CORS**；仅 `AUTOTOOL_DEV=1` 时放行 vite 调试端口并跳过令牌（开发用）
 
 相关环境变量：
 
 | 变量 | 作用 |
 |---|---|
-| `AUTOGAMETOOL_TOKEN` | 固定令牌（自动化测试用，如 `smoke_test.ps1`），优先级高于落盘的令牌 |
-| `AUTOGAMETOOL_DEV` | `=1` 开启开发模式：放行 `localhost:1420` CORS 且跳过令牌校验 |
-| `AUTOGAMETOOL_NO_BROWSER` | `=1` 不自动打开浏览器 |
-| `AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE` | `=1` 页面离开时**永不退出**后端（无人值守挂机） |
-| `AUTOGAMETOOL_EXIT_ON_PAGE_LOSS` | `=1` 恢复旧行为：静默掉线也在 6 秒后退出 |
+| `AUTOTOOL_TOKEN` | 固定令牌（自动化测试用，如 `smoke_test.ps1`），优先级高于落盘的令牌 |
+| `AUTOTOOL_DEV` | `=1` 开启开发模式：放行 `localhost:1420` CORS 且跳过令牌校验 |
+| `AUTOTOOL_NO_BROWSER` | `=1` 不自动打开浏览器 |
+| `AUTOTOOL_KEEP_ALIVE_ON_CLOSE` | `=1` 页面离开时**永不退出**后端（无人值守挂机） |
+| `AUTOTOOL_EXIT_ON_PAGE_LOSS` | `=1` 恢复旧行为：静默掉线也在 6 秒后退出 |
 
 > 直接手动访问 `http://127.0.0.1:8765`（不带 token）时页面能打开但 API 全部 401。请使用引擎控制台打印的带 token 地址，或由程序自动打开的页面进入。
 
@@ -902,9 +948,9 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 **界面**
 
 ```
-● AutoGameTool                    ↗▣  ✕
+● AutoTool                    ↗▣  ✕
 第 2/3 轮
-当前：找图 任务
+当前：图像识别
 [▶ 启动] [⏸ 暂停] [● 录制]    循环 [－][[3]][＋]
                                         ↑ 可直接输入
 ```
@@ -931,15 +977,15 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 
 **可靠性**：`tkinter` 缺失或窗口创建失败时自动降级为「空实现」（`/overlay/state` 的 `available=false`，前端按钮置灰），**绝不影响流程执行**；执行器侧对悬浮框更新也做了兜底捕获。
 
-开关会记录在 `%APPDATA%\AutoGameTool\config.json` 的 `overlay` 字段，下次启动沿用。
+开关会记录在 `%APPDATA%\AutoTool\config.json` 的 `overlay` 字段，下次启动沿用。
 
 ### 10.11 窗口最小化与截图
 
-`capture_window` 旧版会在窗口最小化时**无条件** `ShowWindow(SW_RESTORE)` 把它弹到前台。挂机时用户常常故意最小化游戏/浏览器，于是每个找图/判断节点都会把它弹回来，表现为"最小化失败"。
+`capture_window` 旧版会在窗口最小化时**无条件** `ShowWindow(SW_RESTORE)` 把它弹到前台。挂机时用户常常故意最小化游戏/浏览器，于是每个图像识别/判断节点都会把它弹回来，表现为"最小化失败"。
 
 现在改为：
 
-- **流程执行（找图 / 判断）**：`restore_minimized=False`，窗口最小化时直接报 `目标窗口已最小化…` 并结束该节点，**不弹窗**
+- **流程执行（图像识别 / 判断）**：`restore_minimized=False`，窗口最小化时直接报 `目标窗口已最小化…` 并结束该节点，**不弹窗**
 - **用户主动操作（界面「截取」/ 测试匹配）**：显式传 `restore_minimized=True`，照旧把窗口恢复出来，方便取模板
 
 > 提示：多数游戏/浏览器在最小化后会停止渲染，此时截图本来也拿不到有效画面；所以"报错而不弹窗"既保住了你的窗口，也避免了无意义的轮询。
@@ -963,18 +1009,18 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 
 | 入口 | 位置 | 作用对象 |
 |---|---|---|
-| **✂ 拆分录制** | **顶栏设置条常驻**（「⏺ 开始录制」右侧） | 当前选中的录制步骤；流程里只有一个录制步骤时直接生效，无需先选中；有多个且未选中时会提示先选 |
-| **✂ 拆分为可编辑步骤** | 选中录制步骤后，右侧属性面板 | 该录制步骤 |
+| **✂ 拆分录制** | **顶栏设置条常驻**（「⏺ 开始录制」右侧） | 当前选中的录制节点；流程里只有一个录制节点时直接生效，无需先选中；有多个且未选中时会提示先选 |
+| **✂ 拆分为可编辑节点** | 选中录制节点后，右侧属性面板 | 该录制节点 |
 
-> 为什么要加顶栏入口：早先只有属性面板那一个按钮，而它**只在选中「键鼠录制」节点时才出现**——不在工具栏、也不在左侧步骤面板，结果就是"功能明明做了却找不到"。顶栏入口没这个前提：流程里只要有录制步骤，按钮就亮着；一个都没有时置灰并提示先录一段。
+> 为什么要加顶栏入口：早先只有属性面板那一个按钮，而它**只在选中「键鼠录制」节点时才出现**——不在工具栏、也不在左侧节点面板，结果就是"功能明明做了却找不到"。顶栏入口没这个前提：流程里只要有录制节点，按钮就亮着；一个都没有时置灰并提示先录一段。
 
 拆分把一段录制编译成普通节点：
 
 | 录制事件 | 拆分结果 |
 |---|---|
-| `mousedown` + 紧随同键 `mouseup` | 一个 **鼠标点击**节点（保留按下时的坐标、按键） |
+| `mousedown` + 紧随同键 `mouseup` | 一个 **鼠标操作**节点（保留按下时的坐标、按键） |
 | 连续按键（如先后按下 `ctrl`/`shift`/`a` 再抬起） | 一个 **键盘按键**节点，键名为 `ctrl+shift+a` |
-| 连续的 `scroll` | 一个 **键鼠录制**节点（引擎暂无独立滚轮节点，故保留原样回放） |
+| 连续的 `scroll` | 一个 **键鼠录制**节点（滚轮是逐事件的增量，拆开反而失真，故按原样保留回放） |
 | 相邻动作间隔 ≥ 80 ms | 中间插入一个 **延时**节点，保留原有节奏 |
 | 孤立 `mouseup`、空输入 | 直接丢弃 |
 
@@ -997,24 +1043,24 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 
 #### 打包合并：拆分的逆操作
 
-选中一串**相邻**步骤 → 顶栏 **📦 打包合并**，合并回一个「键鼠录制」步骤。
+选中一串**相邻**节点 → 顶栏 **📦 打包合并**，合并回一个「键鼠录制」节点。
 
-| 选中的步骤 | 打包成的事件 |
+| 选中的节点 | 打包成的事件 |
 |---|---|
-| 鼠标点击 | `mousedown` + `mouseup`（保留坐标与按键；`clicks>1` 按时重复若干下） |
+| 鼠标操作 | `mousedown` + `mouseup`（保留坐标与按键；`clicks>1` 按时重复若干下） |
 | 键盘按键 | 组合键按顺序按下、**逆序**抬起 |
 | 延时 | 时间轴向前推进（不产生事件） |
 | 键鼠录制 | 其事件按自身 `speed` 折算成真实时间后**内联**进来（支持多段录制并成一段） |
-| 找图 / 判断 / 文本 / 终止 / 连点器 | **无法**表达成键鼠事件 → 整体拒绝并说明原因 |
+| 图像识别 / 判断 / 文本输入 / 终止 / 连点器 / 调用脚本 等 | **无法**表达成键鼠事件 → 整体拒绝并说明原因 |
 
 选择方式：在画布上**左键拖拽框选**，或按住 `Ctrl` 逐个点击加选（画布下方有提示；平移画布改用**右键拖拽**）。
 
 几条刻意的取舍：
 
 - **只接受"一条连续链"**：选中集合内必须恰好有一个没有入边的头；成环、有分支（判断节点两条出边）、或者隔着没选的节点（选 A、C 而漏掉 B）都会被拒绝并提示
-- **不做部分打包**：只要有一个步骤不能打包就整体拒绝，避免悄悄丢掉动作
-- **勾了「单次执行」的步骤拒绝打包**：录制步骤表达不了"仅第一轮"，请先取消勾选
-- 拆分是**有损**的——点击节点没有"按时长"字段，按下→抬起之间的间隔被丢弃，所以反向打包统一按 60 ms 约定值补齐。**"拆分→打包"能还原步骤序列、坐标、按键与延时长度**；只有"按住多久"这一项是约定值
+- **不做部分打包**：只要有一个节点不能打包就整体拒绝，避免悄悄丢掉动作
+- **勾了「单次执行」的节点拒绝打包**：录制节点表达不了"仅第一轮"，请先取消勾选
+- 拆分是**有损**的——点击节点没有"按时长"字段，按下→抬起之间的间隔被丢弃，所以反向打包统一按 60 ms 约定值补齐。**"拆分→打包"能还原节点序列、坐标、按键与延时长度**；只有"按住多久"这一项是约定值
 - `mousemove` 会被丢弃（本来也不再录），所以打包不会把轨迹写回去
 
 > 拆分与打包共用同一套纯函数（`packStepsToMacro` / `orderChain`），往返等价与"非连续选择应被拒绝"都有断言覆盖。
@@ -1054,13 +1100,13 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 
 | 情形 | 行为 |
 |---|---|
-| **桌面模式**（`AUTOGAMETOOL_DESKTOP=1`，由桌面壳拉起） | **永不因页面消失退出**：刷新、WebView 崩溃、改窗口大小都由壳兜着；**关窗 = 壳结束引擎进程**。前端在此模式下也不再发 `/goodbye`（该请求会直接返回 `{ok, grace:0, ignored:"desktop"}`），避免误触发退出 |
+| **桌面模式**（`AUTOTOOL_DESKTOP=1`，由桌面壳拉起） | **永不因页面消失退出**：刷新、WebView 崩溃、改窗口大小都由壳兜着；**关窗 = 壳结束引擎进程**。前端在此模式下也不再发 `/goodbye`（该请求会直接返回 `{ok, grace:0, ignored:"desktop"}`），避免误触发退出 |
 | 页面**主动告别**（关标签页/跳转离开，前端 `pagehide` 时 `sendBeacon` 打 `/goodbye`） | 5 秒宽限后若没有页面重连 → 停止流程并优雅退出（走 lifespan 清理：关悬浮框、注销钩子）。**仅源码/浏览器方式运行** |
 | 页面**静默掉线**（浏览器挂起/丢弃后台标签页、崩溃、网络抖动） | **不退出**：后端与悬浮框继续跑，页面回来随时重连 |
 | 收到告别但**流程仍在运行** | **不退出**（挂机优先），只记一条日志 |
-| 从未有页面连过（`AUTOGAMETOOL_NO_BROWSER=1` 无人值守、冒烟测试） | 永不自动退出 |
-| `AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1` | 永远不退出（连告别也不退） |
-| `AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1` | 恢复旧行为：静默掉线也在 6 秒后退出（桌面模式下此开关不生效） |
+| 从未有页面连过（`AUTOTOOL_NO_BROWSER=1` 无人值守、冒烟测试） | 永不自动退出 |
+| `AUTOTOOL_KEEP_ALIVE_ON_CLOSE=1` | 永远不退出（连告别也不退） |
+| `AUTOTOOL_EXIT_ON_PAGE_LOSS=1` | 恢复旧行为：静默掉线也在 6 秒后退出（桌面模式下此开关不生效） |
 
 为什么必须区分（实测事故）：浏览器会把长时间在后台的标签页**挂起甚至丢弃**（Edge 的睡眠标签页）。挂起时 WebSocket 仍由浏览器网络层代答 ping，连接能撑很久；真正被丢弃时 socket 断开，而**页面只有在用户回到浏览器时才会重新加载并重连**——挂机时用户不在，旧的 6 秒宽限期必然不够，于是每次都会「后端与悬浮框一起消失」。日志里那 9 次 `编辑器页面已断开` + `引擎退出：…6 秒内没有重连` 就是这么来的（这也是后来改由桌面壳接管生命周期的原因）。
 
@@ -1100,12 +1146,12 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 | **节点边界**（每个节点开始前） | 这里不存在"做到一半"的状态，恢复后从当前节点继续即可，**不会重复执行已完成的动作** |
 | **延时的小睡之间**（每 250ms） | 挂机脚本里单个延时动辄几十秒；暂停期间余下的延时**不再流逝**，恢复后把剩余时间睡完 |
 
-刻意**不**放进找图 / 判断的轮询与宏回放里：
+刻意**不**放进图像识别 / 判断的轮询与宏回放里：
 
-- 找图/判断的超时是按 `time.time()` 算的。在里面停住会把暂停时长也算进超时，恢复后立刻误判超时——那是个很难查的怪 bug
+- 图像识别/判断的超时是按 `time.time()` 算的。在里面停住会把暂停时长也算进超时，恢复后立刻误判超时——那是个很难查的怪 bug
 - 宏回放的时序基准是一次性算好的 `base`，中途停住再恢复会试图"追帧"，把剩余事件一次性倾倒出去
 
-代价是：暂停在**当前节点结束后**才真正停下（找图/判断最长等它的超时窗口，宏回放等这一段放完）。这两类节点都是有界的，不像延时那样可以任意长，所以这个取舍是划算的。
+代价是：暂停在**当前节点结束后**才真正停下（图像识别/判断最长等它的超时窗口，宏回放等这一段放完）。这两类节点都是有界的，不像延时那样可以任意长，所以这个取舍是划算的。
 
 状态一致性沿用同一套单一事实来源：`/run/state`、`/overlay/state` 都带 `paused`，`_sync_run_state()` 与 1 秒看门狗保证界面和悬浮框同时看到「已暂停」。边界情况也一并处理了：空闲时 `pause()` 不生效（不会出现"已暂停但空闲"的矛盾状态）、`stop()` 会清掉暂停（否则暂停等待循环会一直挂着）、恢复后 `reconcile()` 不会误清正在跑的暂停。
 
@@ -1131,7 +1177,7 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 入口在 **⚙ 设定 → 外观**，三个选项：**跟随系统（默认）** / 浅色 / 深色。
 
 - **默认跟随系统**，跟的是 Windows 的浅色/深色设置（`prefers-color-scheme`），系统切换时界面**立刻**跟着变（监听 `matchMedia` 的 `change`，不是只在启动时读一次）
-- **取不到系统偏好时按深色处理**：深色是 AutoGameTool 一直以来的外观，宁可维持原样也不要突然刷白
+- **取不到系统偏好时按深色处理**：深色是 AutoTool 一直以来的外观，宁可维持原样也不要突然刷白
 - **显式选择优先于系统**，并且**只存本机浏览器**（`localStorage` 的 `agt.appearance`，默认值不写盘）——与自定义背景同一个理由：这是"这台电脑这个浏览器"的显示偏好，跟脚本内容无关，不该随 `.agflow` 换机变样
 - 实现上分两层：**Naive UI 的浅色/深色主题**（组件库自带，见 `App.vue` 的 `n-config-provider`）+ **自己的 CSS token**（`style.css` 里 `:root` 是深色，`:root[data-theme='light']` 只覆盖变量）。组件样式一律只用这些变量，避免出现"浅色下某块还是黑的"这种半吊子主题
 - 判定逻辑抽成纯函数 `frontend/src/lib/appearance.ts`，用 `.\tools\test_appearance.ps1` 断言（28 条）；界面层用无头浏览器跑 `.\tools\test_ui_appearance.py`（28 项）
@@ -1213,25 +1259,26 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 
 | 现象 | 原因 / 解决 |
 |---|---|
-| 桌面版**双击后没有窗口** | 桌面版 v0.1.0 起：壳会先拉引擎、就绪后才开窗。若窗口创建失败（例如系统处于**锁屏/非活动桌面**时 WebView2 会报 `拒绝访问`），壳**不会退出**：它会写日志并**退回系统默认浏览器**打开同一个界面，引擎与悬浮框继续可用。看 `%APPDATA%\AutoGameTool\shell.log` 确认走到哪一步 |
-| 想看桌面壳的诊断日志 | `%APPDATA%\AutoGameTool\shell.log`（可用环境变量 `AUTOGAMETOOL_SHELL_LOG` 改路径）。里面逐条记录：启动引擎 → 引擎就绪 → 创建窗口 → 结果 |
+| 桌面版**双击后没有窗口** | 桌面版 v0.1.0 起：壳会先拉引擎、就绪后才开窗。若窗口创建失败（例如系统处于**锁屏/非活动桌面**时 WebView2 会报 `拒绝访问`），壳**不会退出**：它会写日志并**退回系统默认浏览器**打开同一个界面，引擎与悬浮框继续可用。看 `%APPDATA%\AutoTool\shell.log` 确认走到哪一步 |
+| 想看桌面壳的诊断日志 | `%APPDATA%\AutoTool\shell.log`（可用环境变量 `AUTOTOOL_SHELL_LOG` 改路径）。里面逐条记录：启动引擎 → 引擎就绪 → 创建窗口 → 结果 |
 | 关掉桌面窗口后引擎还在吗 | 不在：关窗即结束引擎与悬浮框（壳在退出时负责收尾）。想挂机就别关窗口；最小化即可 |
-| 双击 exe 提示"程序已在运行" | 已有实例在跑。检查任务管理器结束残留 `AutoGameTool.exe` |
+| 双击 exe 提示"程序已在运行" | 已有实例在跑。检查任务管理器结束残留 `AutoTool.exe` |
 | 手动打开 8765 页面后功能全部 401 | API 需要令牌。用引擎控制台打印的带 `?token=` 地址进入（见 [10.8](#108-本地访问令牌)） |
 | 「悬浮框」按钮置灰 | 当前运行环境缺少 `tkinter`。源码运行请安装带 Tcl/Tk 的 Python；官方发行版已内置 |
 | 悬浮框没有盖在游戏上 | 独占全屏（DirectX exclusive）下任何窗口都无法置顶，请把游戏改成「无边界窗口 / 窗口化」 |
 | 最小化浏览器偶尔失败/被弹回 | 已修正过两处：截图不再无条件恢复最小化窗口（见 [10.11](#1011-窗口最小化与截图)），悬浮框也不再每 2 秒重写 Z 序；悬浮框的周期性 topmost 重写也已移除，改用不激活恢复。若仍复发，请把日志面板里 `…目标窗口原本处于最小化，已恢复显示…` 那条发出来定位 |
 | 录制的宏里没有鼠标移动轨迹了 | **有意变更**：轨迹点既无法编辑又拖慢回放，改为只记点击坐标（回放时直接落到该点）。旧脚本的轨迹事件仍可正常回放，见 [10.12](#1012-录制模型的拆分与打包) |
-| 「📦 打包合并」按钮是灰的 | 需要先选中 **≥2 个相邻步骤**：在画布上**左键拖拽框选**，或按住 `Ctrl` 逐个点击加选（画布下方有提示）。选中后按钮上会显示数量 |
-| 打包合并提示"只能打包连成一串的相邻步骤" | 选中的步骤必须首尾相接。隔着没选的步骤、成环、或有分支（判断节点两条出边）都会被拒绝 |
-| 打包合并提示"没法打包进录制" | 找图 / 判断 / 输入文本 / 终止条件不是键鼠动作，录制步骤表达不了；或某些步骤勾了「单次执行」，请先取消 |
-| **看不到「拆分录制」入口** | 顶栏有常驻的 **✂ 拆分录制** 按钮（无录制步骤时置灰）。若界面上没有，多半是页面缓存了旧 JS —— 按 `Ctrl+F5` 强制刷新（引擎重启不会让已打开的页面换掉旧 JS）。 |
-| 悬浮框点右上角图标没反应 | **桌面模式**：按父进程 PID 认壳的窗口，正常一定找得到（找不到会在日志面板留一条提示）；**源码/浏览器方式运行**：只认真正的浏览器窗口且标题需含 `AutoGameTool`，确认标签页还开着。鼠标移上去图标会变成青色，说明可点击 |
-| 点右上角图标把后端控制台弹出来了 | 已修：早先的实现把「像不像浏览器」只当排序键、没有过滤，一个浏览器都没匹配上时会退而返回任意同名窗口（承载后端的终端标题里就含 `AutoGameTool`）。现在只接受真正的浏览器窗口，并且显式排除控制台/终端/解释器进程与窗口类 |
-| 关掉页面后程序也退出了 | **桌面模式不会**：关窗即结束引擎（正常行为），而刷新/崩溃都不会退。源码/浏览器方式运行时的规则：**你主动关页面**（5 秒宽限内没重连）才会退；页面只是**静默掉线**（被系统挂起/丢弃、浏览器崩了）**不会退**。想永不退出设 `AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1`；想恢复旧行为设 `AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1`。见 [10.14](#1014-页面离开时后端怎么办) |
+| 「📦 打包合并」按钮是灰的 | 需要先选中 **≥2 个相邻节点**：在画布上**左键拖拽框选**，或按住 `Ctrl` 逐个点击加选（画布下方有提示）。选中后按钮上会显示数量 |
+| 打包合并提示"只能打包连成一串的相邻节点" | 选中的节点必须**首尾相接成一条链**。隔着没选的节点、成环、或有分支（判断节点两条出边）都会被拒绝 |
+| 打包合并提示"这些节点没法打包进录制：…（录制只表达键鼠动作）" | 图像识别 / 判断 / 文本输入 / 终止 / 连点器不是键鼠动作，录制节点表达不了（提示里会列出具体是哪几个） |
+| 打包合并提示"选中的节点里有 N 个勾了「单次执行」…请先取消勾选" | 录制节点表达不了"仅第一轮"，先取消这些节点的「单次执行」再打包 |
+| **看不到「拆分录制」入口** | 顶栏有常驻的 **✂ 拆分录制** 按钮（无录制节点时置灰）。若界面上没有，多半是页面缓存了旧 JS —— 按 `Ctrl+F5` 强制刷新（引擎重启不会让已打开的页面换掉旧 JS）。 |
+| 悬浮框点右上角图标没反应 | **桌面模式**：按父进程 PID 认壳的窗口，正常一定找得到（找不到会在日志面板留一条提示）；**源码/浏览器方式运行**：只认真正的浏览器窗口且标题需含 `AutoTool`，确认标签页还开着。鼠标移上去图标会变成青色，说明可点击 |
+| 点右上角图标把后端控制台弹出来了 | 已修：早先的实现把「像不像浏览器」只当排序键、没有过滤，一个浏览器都没匹配上时会退而返回任意同名窗口（承载后端的终端标题里就含 `AutoTool`）。现在只接受真正的浏览器窗口，并且显式排除控制台/终端/解释器进程与窗口类 |
+| 关掉页面后程序也退出了 | **桌面模式不会**：关窗即结束引擎（正常行为），而刷新/崩溃都不会退。源码/浏览器方式运行时的规则：**你主动关页面**（5 秒宽限内没重连）才会退；页面只是**静默掉线**（被系统挂起/丢弃、浏览器崩了）**不会退**。想永不退出设 `AUTOTOOL_KEEP_ALIVE_ON_CLOSE=1`；想恢复旧行为设 `AUTOTOOL_EXIT_ON_PAGE_LOSS=1`。见 [10.14](#1014-页面离开时后端怎么办) |
 | 挂机时后端和悬浮框突然消失 | 成因：浏览器把后台标签页挂起/丢弃 → socket 断开 → 6 秒宽限内页面回不来 → 引擎按「关页面」处理而退出。现在已改为**静默掉线不退后端**，日志里会写「后端继续运行，等待页面重连」 |
 | 悬浮框点「启动」没反应 | 早先启动被委托给页面，页面被系统挂起时连点也没用。现在会等 1.2 秒后**用引擎侧缓存的流程兜底启动**，日志里会写「编辑器页面没有响应启动请求…」 |
-| 再次启动程序后，新页面显示已断开/一直重连 | 早先的令牌问题（每次启动新令牌，旧引擎不认）。现在令牌持久化在 `%APPDATA%\AutoGameTool\engine.token`，任何一次启动打开的页面都能连上 |
+| 再次启动程序后，新页面显示已断开/一直重连 | 早先的令牌问题（每次启动新令牌，旧引擎不认）。现在令牌持久化在 `%APPDATA%\AutoTool\engine.token`，任何一次启动打开的页面都能连上 |
 | 悬浮框和界面的启停状态对不上 | 引擎为唯一事实来源 + 1 秒看门狗（见 [10.13](#1013-启停状态为什么不会再分叉)），两者只认同一份状态 |
 | 反复点「停止」没反应 | 同上。另一个成因：`delay` 节点整段睡死不检查停止标志，长延时期间点了要等它走完；现已改为每 250ms 检查一次 |
 | 循环结束后右上角仍显示「停止」 | 前端每秒自愈，引擎侧看门狗让悬浮框也一起自愈 |
@@ -1247,29 +1294,29 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 | 想同时打开多个脚本 | 点「新建 / 加载 / 保存」那一行**下面**标签栏右侧的 **`＋`**。每个标签是一份独立的画布与撤销历史，切标签**不丢状态**；标签可以**拖拽调整前后顺序**。见 [10.20](#1020-多标签编辑器与跨编辑器搬流程) |
 | 加载脚本时又开出一个空标签 | 不会：当前标签是**空白脚本**时，「加载」直接取代它（反而会问要不要先保存那个空白脚本上的改动）。只有当前标签里已经有流程时才会新开一个 |
 | 「运行日志」面板找不到了 | **打开应用时默认收起**（先给画布留满），点底部右侧的 **日志** 图标展开 —— 展开后它贴在底部控制条上方、把画布顶上去，拖它的上边沿可改高度。底栏右侧还有**悬浮框**开关、左下角是**设定**（⚙）。这三个按钮都**只有图标**，鼠标悬停会显示名称 |
-| 在 A 标签复制、到 B 标签粘不出来 | 跨编辑器用的是**程序内剪贴板**（不占用系统剪贴板，也不会把你正在别处复制的东西冲掉）：在 A 标签**右键选中步骤 → 复制**（或 `Ctrl+C`），切到 B 标签**右键空白处 → 粘贴**（或 `Ctrl+V`）即可 |
+| 在 A 标签复制、到 B 标签粘不出来 | 跨编辑器用的是**程序内剪贴板**（不占用系统剪贴板，也不会把你正在别处复制的东西冲掉）：在 A 标签**右键选中节点 → 复制**（或 `Ctrl+C`），切到 B 标签**右键空白处 → 粘贴**（或 `Ctrl+V`）即可 |
 | 「复制 / 剪切 / 粘贴」按钮在哪 | 不在顶栏，在**画布右键菜单**里：右键**节点**给三项，右键**空白画布**只给「粘贴」（落点是鼠标位置）。剪贴板为空时「粘贴」是灰的。键盘 `Ctrl+C` / `Ctrl+X` / `Ctrl+V` 同样可用 |
 | 粘贴后的流程位置/形状不对 | 有意的：片段只存**相对坐标**（相对选区外接框的左上角），所以内部布局与连线会完整保留，但整体落点由目标画布决定。想贴近原来的相对方位，先把目标画布拖到大致位置再粘 |
-| 想删除多个步骤 | 先在画布上**左键拖拽框选**（或按住 `Ctrl` 逐个加选），再点顶栏 **🗑 删除**（就在「撤销」左边）。误删直接 `Ctrl+Z` |
+| 想删除多个节点 | 先在画布上**左键拖拽框选**（或按住 `Ctrl` 逐个加选），再点顶栏 **🗑 删除**（就在「撤销」左边）。误删直接 `Ctrl+Z` |
 | 「删除」按钮是灰的 | 需要**至少选中一个节点**；画布下方会显示当前选中数量。框选为空时按钮自动置灰 |
-| 步骤里的「调用脚本」列表是空的 | 只能选**本脚本内已存在**的子脚本。先建子脚本：脚本面板 → **新建子脚本**（或**导入已有脚本**），再回步骤里选。也可以直接**双击画布上的「调用脚本」节点**打开对应子脚本的编辑器（还没选子脚本时双击等于打开选择框） |
-| 加了子脚本却提示「脚本不存在」 | 该「调用脚本」步骤指向的子脚本被**删除或改名**了。改名/删除**不会自动更新**引用，重新选一次即可。注意这类错误在**运行前**就会被拦下，不会跑到一半才失效。见 [10.21](#1021-子脚本嵌套与防递归) |
+| 节点里的「调用脚本」列表是空的 | 只能选**本脚本内已存在**的子脚本。先建子脚本：脚本面板 → **新建子脚本**（或**导入已有脚本**），再回节点里选。也可以直接**双击画布上的「调用脚本」节点**打开对应子脚本的编辑器（还没选子脚本时双击等于打开选择框） |
+| 加了子脚本却提示「脚本不存在」 | 该「调用脚本」节点指向的子脚本被**删除或改名**了。改名/删除**不会自动更新**引用，重新选一次即可。注意这类错误在**运行前**就会被拦下，不会跑到一半才失效。见 [10.21](#1021-子脚本嵌套与防递归) |
 | 添加子脚本时提示「会形成循环调用」 | 有意拦截（**编辑期环检测**）：一旦让 A 调用 B，B 就**不能再直接或间接调用 A**，否则运行时会无限递归。按提示里的调用链换一种拆法（例如把公共部分抽成第三个脚本，让 A、B 都调用它）。见 [10.21](#1021-子脚本嵌套与防递归) |
 | 运行前报「存在循环调用」或「嵌套过深」 | 加载/运行前会对**整张脚本图**做校验（不只看当前脚本）。循环会给出完整链路；「嵌套过深」是调用层数超过 **16 层**，请拆分。见 [10.21](#1021-子脚本嵌套与防递归) |
-| 子脚本能单独拿走吗 | 能。选中子脚本 → **导出**，得到一份独立 `.agflow`，可直接在别的工程导入。这也是它和「📦 打包合并」的关键差别：合并是**一次性展开**成步骤（不可还原），子脚本是**独立可编辑、可复用**的单元 |
+| 子脚本能单独拿走吗 | 能。选中子脚本 → **导出**，得到一份独立 `.agflow`，可直接在别的工程导入。这也是它和「📦 打包合并」的关键差别：合并是**一次性展开**成节点（不可还原），子脚本是**独立可编辑、可复用**的单元 |
 | 停止/暂停进不了子脚本？ | 停止与暂停标志是**全局**的，进入子脚本后照样在每个检查点生效；点停止会从子脚本里一路退到顶层结束 |
 | 设定面板里找不到「关于」了 | 0.1.2 起「关于」**移进 ⚙ 设定**：打开设定，左侧导航**最下方**（与上面分组有分隔线）就是「关于」，里面有**项目主页**与**发布页**两个链接 |
 | 设定面板改版后快捷键/主题在哪 | 左侧导航按组划分：**通用 / 外观 / 全局快捷键** 三组，下面是 **数据与安全**（含自定义背景等），最下方是**关于**。右侧是卡片式设置行，一行一项 |
-| 暂停点了没马上停 | 暂停在**检查点**生效（节点边界 / 延时的 250ms 小睡）。如果当前正在找图或回放宏，会等这个节点结束才停——这两类节点都有超时/时长上界。见 [10.16](#1016-暂停的语义与生效位置) |
+| 暂停点了没马上停 | 暂停在**检查点**生效（节点边界 / 延时的 250ms 小睡）。如果当前正在图像识别或回放宏，会等这个节点结束才停——这两类节点都有超时/时长上界。见 [10.16](#1016-暂停的语义与生效位置) |
 | 暂停后进度条不动，是卡死了吗 | 不是。悬浮框会显示 `⏸ 已暂停 · 第 n/m 轮`，日志也会记「已暂停」。点「▶ 继续」从原地接着跑 |
-| **后端突然不见了，怎么查原因** | 打开 `%APPDATA%\AutoGameTool\engine.log`。它会记下启动信息、全部运行日志、页面连接/断开、以及**退出原因**。常见几行：`桌面模式：编辑器页面已断开…后端继续运行` = 桌面版正常（刷新/崩溃都不会退，只有当壳自己收尾时才结束进程）；`编辑器页面已断开（剩余 0 个页面）` + `引擎退出：…6 秒内没有重连` = 源码/浏览器方式运行下页面断连触发了自动退出（想禁掉就设 `AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1`）；`清理完成，引擎退出` = 正常优雅退出；日志末尾停在某一步且没有退出记录 = 进程被外部终止（例如被结束进程）。共 4 个文件：`engine.log` 与 `engine.log.1~.3`（各 2MB 轮转） |
+| **后端突然不见了，怎么查原因** | 打开 `%APPDATA%\AutoTool\engine.log`。它会记下启动信息、全部运行日志、页面连接/断开、以及**退出原因**。常见几行：`桌面模式：编辑器页面已断开…后端继续运行` = 桌面版正常（刷新/崩溃都不会退，只有当壳自己收尾时才结束进程）；`编辑器页面已断开（剩余 0 个页面）` + `引擎退出：…6 秒内没有重连` = 源码/浏览器方式运行下页面断连触发了自动退出（想禁掉就设 `AUTOTOOL_KEEP_ALIVE_ON_CLOSE=1`）；`清理完成，引擎退出` = 正常优雅退出；日志末尾停在某一步且没有退出记录 = 进程被外部终止（例如被结束进程）。共 4 个文件：`engine.log` 与 `engine.log.1~.3`（各 2MB 轮转） |
 | **连点器在哪、怎么调频率** | 从左侧节点面板拖入 **⚡ 连点器**，右侧属性面板里设坐标（可点 **🎯 采集点击坐标**直接用鼠标选点）、按键、**点击次数**与**间隔（ms）**；间隔滑条旁会实时显示换算的**约 N 次/秒**，设 `0` 就是不限速。执行中暂停/停止都有效 |
 | **画布拖不动了 / 框选选到一片** | 有意设计：**右键拖拽**平移画布、**左键拖拽**框选节点（`Ctrl`+点击逐个加选）。想平移却按了左键就会变成框选，松开即取消 |
 | 背景图设置了但换台电脑就没了 | 有意为之：背景只存本机浏览器 `localStorage`，不上传引擎、不写进 `.agflow`。见 [10.17](#1017-自定义背景选图--按屏幕比例截取--透明度) |
 | 设了背景后文字看不清 | 把「设定 → 透明度」调低；画布与面板本身有一层暗色底，正常不会影响可读性 |
 | 背景图保存失败/重启后丢失 | 图片太大撞了 `localStorage` 约 5MB 的配额。设置面板会提示；换一张更小的图，或调低分辨率再选 |
 | 键盘突然不能用了 | **旧版本的多监听器缺陷**。请用最新版并重启电脑清掉残留钩子；新版已用事件总线修复 |
-| 找图超时 | 提高阈值容差（降低阈值）、缩小识别区域、确认分辨率未变 |
+| 图像识别超时 | 提高阈值容差（降低阈值）、缩小识别区域、确认分辨率未变 |
 | 中文模板识别失败 | 旧版缺陷，新版已修复 |
 | 模拟输入无效 | 见 [12. 已知限制](#12-已知限制)；先用 `/input/probe` 诊断 |
 | 窗口列表里没有目标窗口 | 只列出"任务栏窗口"；若游戏是子窗口/无标题窗口则不会出现 |
@@ -1286,7 +1333,7 @@ $env:AUTOGAMETOOL_NO_BROWSER = '1'
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/health          # 引擎存活（免令牌）
-# 以下接口需令牌（AUTOGAMETOOL_TOKEN 固定令牌时测试更方便）：
+# 以下接口需令牌（AUTOTOOL_TOKEN 固定令牌时测试更方便）：
 Invoke-RestMethod "http://127.0.0.1:8765/debug/kb?token=<令牌>"      # 键盘钩子状态
 Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口列表
 ```
@@ -1301,11 +1348,11 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
    - 多数游戏在**被遮挡 / 最小化时停止渲染**，导致图像识别无新画面。
    - 如需"游戏窗口被遮挡甚至最小化仍挂机"，可选方案：驱动级虚拟输入（Interception）、隐藏桌面、虚拟机隔离、云机，或（网页游戏）浏览器自动化。**详见项目讨论记录。**
 2. **独占全屏**游戏无法用 GDI/PrintWindow 截图。
-3. **OCR 尚未接入**（依赖已装好，节点待实现）。
+3. **OCR 首次调用会慢一下**：文字识别走 RapidOCR（onnxruntime），引擎**懒加载**——第一次用到这个节点时才建引擎，首次识别会多等几秒，之后正常。模型随依赖一起装好，不需要联网。
 4. **反作弊**：本项目不涉及也不应涉及任何绕过反作弊的手段。
 5. **撤销/重做的粒度由时间决定**：连续拖动、连续输入会被合并成一步（见 [10.15](#1015-撤销--重做为什么用快照--防抖)）；历史上限 60 步，且**不跨脚本**（加载工程后从该状态重新开始）。想逐字符回退请在输入框内用浏览器原生 `Ctrl+Z`。
-6. **停止是协作式的**：引擎置停止标志，节点在检查点退出。目前所有节点都会检查（延时 250ms、找图/判断在轮询里、宏回放在每个事件之间、**连点器在每次点击之前**），但一次已进入的阻塞调用（如 `PostMessage` 发送）仍需等它返回。
-7. **暂停只在检查点生效**：节点边界与延时片段内立即生效；找图/判断会等它的超时窗口结束、宏回放会等这一段放完、连点器在两下点击之间立即停住（见 [10.16](#1016-暂停的语义与生效位置)）。这样取舍是为了不让暂停时长被算进超时、也不让宏回放"追帧"。
+6. **停止是协作式的**：引擎置停止标志，节点在检查点退出。目前所有节点都会检查（延时 250ms、图像识别/判断在轮询里、宏回放在每个事件之间、**连点器在每次点击之前**），但一次已进入的阻塞调用（如 `PostMessage` 发送）仍需等它返回。
+7. **暂停只在检查点生效**：节点边界与延时片段内立即生效；图像识别/判断会等它的超时窗口结束、宏回放会等这一段放完、连点器在两下点击之间立即停住（见 [10.16](#1016-暂停的语义与生效位置)）。这样取舍是为了不让暂停时长被算进超时、也不让宏回放"追帧"。
 8. **背景图存在本机浏览器**：换浏览器或清缓存会丢；`localStorage` 约 5MB 配额，导出时已限制在 1920×1080 以内并在装不下时自动降质（见 [10.17](#1017-自定义背景选图--按屏幕比例截取--透明度)）。
 9. **同时仍只允许一个编辑器页面**：多标签是"一个页面里开多份文档"，不是"开多个页面"（见 [10.19](#1019-为什么只允许一个编辑器页面)）。
 10. **子脚本的三条硬边界**：① 嵌套层数上限 `MAX_SCRIPT_DEPTH = 16`；② 脚本之间**不允许互相调用成环**（A→B→A 会在选择时就被拒绝）；③ **删除子脚本不在撤销范围内** —— `Ctrl+Z` 只覆盖画布上的节点增删改，删子脚本前请先导出备份（见 [10.21](#1021-子脚本嵌套与防递归)）。
@@ -1317,8 +1364,10 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 
 - [ ] 后台输入方案落地（驱动级 / 隐藏桌面 / 浏览器自动化，按游戏形态选型）
 - [ ] DXGI 桌面复制截图（支持被遮挡窗口）
-- [ ] OCR 文本识别节点
-- [ ] 像素颜色判断节点（扩充判断条件）
+- [x] **OCR 文本识别节点** —— 0.1.3 落地（RapidOCR，见 [14](#14-更新日志)）
+- [x] **像素颜色 / 颜色检测节点** —— 0.1.3 落地（颜色检测 + 像素检测）
+- [x] **数据类节点与变量插值** —— 0.1.3 落地（变量 / 运算 / 文本处理 + `{{变量名}}`）
+- [x] **系统类节点** —— 0.1.3 落地（窗口 / 进程 / 文件 / 命令）
 - [x] **子流程 / 复用组件** —— 0.1.2 以「子脚本（嵌套）」形式落地（见 [10.21](#1021-子脚本嵌套与防递归)）
 - [ ] 脚本库跨文件复用（当前子脚本存在父脚本内部，跨文件复用要整份导入）
 - [ ] 撤销历史的可视化（当前只显示可用/不可用，看不到具体是哪一步）
@@ -1330,6 +1379,31 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 ---
 
 ## 14. 更新日志
+
+### v0.1.3 —— 2026-10-06
+
+**本版 = 一次「命名 + 节点体系」的定型**：工具正式改名 **AutoTool**；「步骤类型」升级为**节点**，按能力分成 **6 大类、25 个核心节点**。脚本格式**继续向后兼容**：0.1.2 及更早的 `.agflow` 打开时会**自动升级**（旧的"找图判断"会被拆成规范里的两个节点），老文件照常能跑。
+
+#### ✨ 新增
+
+- **六大类节点体系**：节点不再是一串平级的"步骤类型"，而是按**输入 / 视觉 / 流程 / 工具 / 数据 / 系统**分类，同一类**同一种配色**（蓝/绿/青/橙/紫/灰）——一眼就能看出这段流程在干什么。左侧节点面板改为**类别分页**
+- **视觉类节点补齐**：新增 **文字识别（OCR，RapidOCR 中英文混排）**、**颜色检测**（区域内找指定颜色、带容差与最少像素数）、**像素检测**（精确比对一个点或 N×N 小方块）、**区域分析**（是否变化 / 平均颜色 / 区域截图存盘），并支持**框选识别区域**（`source=region` 时在截图上拖一块，存的是屏幕绝对坐标矩形，窗口截图与全屏截图都能算对）
+- **数据类节点**：**变量**（赋值/读取/删除）、**运算**（`+ - * / %` 与括号）、**文本处理**（拼接/截取/替换/正则提取/转数字/去空白/大小写/分割取值）。全流程（含所有层子脚本）**共享一份运行变量**，任何文本参数都支持 `{{变量名}}` 插值
+- **系统类节点**：**窗口**（按标题关键字查找 / 激活 / 最小化 / 最大化 / 还原 / 移动 / 关闭，`hwnd` 可存变量）、**进程**（启动 / 结束 / 是否在运行）、**文件**（读 / 写 / 追加 / 复制 / 移动 / 删除 / 存在性 / 列目录 / 建目录）、**命令**（CMD / PowerShell / Bash，可回收输出与退出码）
+- **等待节点**：等到「图片出现 / 颜色出现 / 像素匹配 / 变量达标 / 窗口出现」，统一带超时与"超时后继续或终止"
+- **外部工具节点**：运行外部程序（可选等待结束、取 stdout）或发起 HTTP 请求（方法/请求头/请求体，取响应体与状态码）
+- **流程控制升级**：**判断**（&&/|| 双条件，左值可直接写变量名）、**循环**（固定次数 / 条件 / 无限，带 `max_iterations` 安全阀与"当前轮次存入变量"，循环体从 `body` 出口出去、走完连回循环节点即下一轮）、**终止**分三级（**结束当前循环** ≈ break / **结束当前脚本**（子脚本返回调用方）/ **终止整个工作流**）
+- **属性面板改为"参数模式表"驱动**：25 个节点的字段、默认值、显示条件集中在 `frontend/src/lib/nodeSchema.ts` 一份数据里，**面板 / 默认值 / 节点摘要 / 老脚本补参**四处同源。新增节点只要加一条模式 + 引擎加一个处理分支，不必再到处改 `v-if`
+- **老脚本自动迁移**：加载 `.agflow` 时就地升级——`click→鼠标操作`、`key→键盘按键`、`text→文本输入`、`macro→键鼠录制`；老的「找图判断」（找图 + 分支）**按新规范拆成「图像识别 → 判断」**；老的「找图」若当年带 `click` / `on_timeout=exit`，展开为 `图像识别 → 判断 →（是）鼠标操作 /（否）终止`。**升级幂等、不丢用户填过的任何值**，并会提示改了哪些
+
+#### 🐛 修复 / 调整
+
+- **引擎侧也认老类型名**：`normalize_type()` 兜住 `click` / `key` / `text` / `macro` 等旧名，因此**手改过 JSON、或用旧版文件直接下发**也照样能跑，不会静默走空
+- **找图与判断坐标不再对不上**：统一 `grab()` 返回 `(帧, 偏移x, 偏移y)`，绑定窗口时"识别到的位置"与"点击用到的坐标"用同一套换算
+- **循环图的入口判定**：循环体末尾连回循环节点后，循环节点多了入边、过去会被判定为"找不到起始节点"。现在会先识别**环内部的边**再算入度，以循环开头的流程也能正确起跑
+- **节点级异常保护**：单个节点（含日志/广播层）出错只记到该节点名下并沿默认出口继续，不再把整轮挂掉；`BreakLoop` / `EndScript` 控制信号原样穿透
+- **命令执行**：改用 `subprocess` + 线程执行，绕开 Windows 上 `asyncio` 子进程的 `NotImplementedError`
+- **表达式求值不用 `eval`**：运算表达式走 **AST 白名单**（只放行 `abs/min/max/round/int/float/len/str`），避免从他人处拷来的脚本执行任意代码
 
 ### v0.1.2 —— 2026-10-04
 
@@ -1371,8 +1445,8 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 - **端到端实测**（真实引擎 + HTTP）：`/health` 返回 `0.1.2`；环形脚本被 `400` 拒绝并返回 `存在循环调用，无法运行：打怪 → 回城 → 打怪`；缺失子脚本被 `400` 拒绝并说明是哪一步指向了谁；正常子脚本流程 `200` 开跑，引擎日志逐行确认 `进入子脚本「脚本S1」（第 1 层）→ 子脚本内节点执行 → 子脚本执行完成`，两轮循环各展开一次
 - **打包产物实测**（PyInstaller onedir + Tauri/NSIS）：
   - 冻结包里的 `/flow/load` 对照测试 —— 合法流程 / 合法子脚本调用 `200`，自环（`A → A`）`400 存在循环调用，无法运行：A → A`，缺失子脚本 `400` 并给出补救提示（证明 `scriptgraph.py` 确实打进了包，不只是源码里能跑）
-  - **免安装绿色版**：解压到工作区外 → 双击 `autogametool.exe` → `shell.log` 走到 `引擎 /health 已就绪`、`创建主窗口`、`主窗口已创建`，`/health` = `{"version":"0.1.2","desktop":true}`
-  - **安装包**：`/S` 静默安装退出码 `0`，`%LOCALAPPDATA%\AutoGameTool` 下 `autogametool.exe` / `engine\AutoGameTool.exe` / `engine\_internal\frontend_dist\` 齐全，注册表 `DisplayVersion = 0.1.2`；启动后同样走到 `主窗口已创建`
+  - **免安装绿色版**：解压到工作区外 → 双击 `autotool.exe` → `shell.log` 走到 `引擎 /health 已就绪`、`创建主窗口`、`主窗口已创建`，`/health` = `{"version":"0.1.2","desktop":true}`
+  - **安装包**：`/S` 静默安装退出码 `0`，`%LOCALAPPDATA%\AutoTool` 下 `autotool.exe` / `engine\AutoTool.exe` / `engine\_internal\frontend_dist\` 齐全，注册表 `DisplayVersion = 0.1.2`；启动后同样走到 `主窗口已创建`
 
 ### v0.1.1 —— 2026-10-03
 
@@ -1403,9 +1477,9 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 
 - 版本号统一为 `0.1.1`，**五处一致**：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`frontend/src-tauri/tauri.conf.json`、`frontend/src-tauri/Cargo.toml` 及其 `Cargo.lock` 里的版本行
 - `/health` 额外返回 `desktop` 字段，前端据此判断是否需要发送告别信号
-- 安装包文件名 `AutoGameTool_0.1.1_x64-setup.exe`（分发副本为根目录 `AutoGameTool-Setup.exe`）；发布 tag 用 **`v0.1.1`**（`0.1.0` 那次加 `-desktop` 后缀只是为了避开仓库里更早的同名 tag）
+- 安装包文件名 `AutoTool_0.1.1_x64-setup.exe`（分发副本为根目录 `AutoTool-Setup.exe`）；发布 tag 用 **`v0.1.1`**（`0.1.0` 那次加 `-desktop` 后缀只是为了避开仓库里更早的同名 tag）
 - 安装包改为**内嵌 WebView2 引导程序**（`bundle.windows.webviewInstallMode = embedBootstrapper`）并固定安装器图标 —— 目标机器缺少 WebView2 时不再需要安装期单独联网下载
-- **重新提供免安装绿色版** `AutoGameTool_0.1.1_portable_x64.zip`：0.1.0「不再单独出绿色包」的决定在本版撤回 —— 真实场景里仍有既没有管理员权限、也不愿意动安装器的机器
+- **重新提供免安装绿色版** `AutoTool_0.1.1_portable_x64.zip`：0.1.0「不再单独出绿色包」的决定在本版撤回 —— 真实场景里仍有既没有管理员权限、也不愿意动安装器的机器
 - 两个包的安装路径已各自实测：安装包在**非工程目录**（下载目录）下 `/S` 静默安装 → 注册表 `DisplayVersion=0.1.1`、桌面快捷方式、`/health` 正常；绿色版解压后直接双击 → `引擎 /health 已就绪` → `主窗口已创建`
 
 ### v0.1.0（桌面版首版）—— 2026-10-03
@@ -1418,30 +1492,30 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
   - 引擎仍是本地 `127.0.0.1:8765` 的 HTTP/WS 服务，前端由引擎同源提供（不需要处理 CORS，也不需要在页面里注入令牌）
   - 开发模式窗口开在 vite（1420）上，改前端即时热更新；发布模式窗口开在引擎入口 URL（带持久令牌）
   - 单实例：第二次启动把已有窗口提到前台，而不是再开一个
-  - 壳自带诊断日志 `%APPDATA%\AutoGameTool\shell.log`（可用 `AUTOGAMETOOL_SHELL_LOG` 指定路径）
-- **引擎新增桌面模式** `AUTOGAMETOOL_DESKTOP=1`：不自动开浏览器，且**永不因为「页面没了」退出**（关窗、刷新、WebView 崩溃都由壳收尾）
+  - 壳自带诊断日志 `%APPDATA%\AutoTool\shell.log`（可用 `AUTOTOOL_SHELL_LOG` 指定路径）
+- **引擎新增桌面模式** `AUTOTOOL_DESKTOP=1`：不自动开浏览器，且**永不因为「页面没了」退出**（关窗、刷新、WebView 崩溃都由壳收尾）
 - **引擎新增** `POST /open_external`（令牌保护，只放行 http/https）：顶栏「关于 → GitHub 发布页」交给系统默认浏览器打开 —— 桌面壳里的 `window.open` 会开出一个没有地址栏、没有前进后退的子窗口
 - **打包**：新增 `build_desktop.ps1`（前端 → 引擎 onedir → `tauri build` → NSIS 安装包）；引擎作为 Tauri `resources` 随包分发，**仍用 onedir（不回到 onefile）**，避免重新引入 `%TEMP%` 解压那类启动失败
 
 #### 🐛 修复
 
 - **装完后双击没反应、窗口始终不出现**
-  - 根因：发出去的 `AutoGameTool-Setup.exe` 构建于「建窗失败改为退回浏览器」那次源码改动**之前**。旧壳在 `open_main_window` 失败时直接把错误往上抛，Tauri 的 `build().expect(..)` 随之 panic；release 是无控制台子系统，于是**静默退出**——用户看到的就是「双击了，然后什么都没有」
+  - 根因：发出去的 `AutoTool-Setup.exe` 构建于「建窗失败改为退回浏览器」那次源码改动**之前**。旧壳在 `open_main_window` 失败时直接把错误往上抛，Tauri 的 `build().expect(..)` 随之 panic；release 是无控制台子系统，于是**静默退出**——用户看到的就是「双击了，然后什么都没有」
   - 触发条件在真实环境里确实存在：系统处于**锁屏/非活动桌面**时 WebView2 建窗会报 `拒绝访问 (os error 5)`；或引擎在 90 秒内没就绪
   - 修复：按当前源码重新构建安装包。新壳建窗失败时**退回系统默认浏览器**打开同一界面，并把原因写进 `shell.log`，进程不再退出，引擎与悬浮框继续可用
 
 #### 🧹 清理（本版下线）
 
-- **WebUI 期独立安装器**：删除 `build_installer.ps1`、`installer\AutoGameTool.nsi` 与 `tools\nsis\` 工具链 —— 安装包改由 Tauri bundler 内置的 NSIS 产出，不再需要手工维护 `.nsi`
-- **便携版**：删除 `dist-desktop\` 与便携版 zip。「免安装」不再单独出一个包 —— 安装包解出来的 `autogametool.exe` + `engine\` 本身就是绿色的（见 [9.2](#92-制作安装包tauri-bundler--nsis)）※ 本项**已在 0.1.1 撤回**，绿色包重新提供
-- **构建产物**：删除 `engine\dist\`、`engine\build\`、`engine\AutoGameTool.spec` 与 `engine\build.log`（下次构建自动重建）
+- **WebUI 期独立安装器**：删除 `build_installer.ps1`、`installer\AutoTool.nsi` 与 `tools\nsis\` 工具链 —— 安装包改由 Tauri bundler 内置的 NSIS 产出，不再需要手工维护 `.nsi`
+- **便携版**：删除 `dist-desktop\` 与便携版 zip。「免安装」不再单独出一个包 —— 安装包解出来的 `autotool.exe` + `engine\` 本身就是绿色的（见 [9.2](#92-制作安装包tauri-bundler--nsis)）※ 本项**已在 0.1.1 撤回**，绿色包重新提供
+- **构建产物**：删除 `engine\dist\`、`engine\build\`、`engine\AutoTool.spec` 与 `engine\build.log`（下次构建自动重建）
 - **WebUI 期回归测试脚本**（17 个、约 300 条断言）与临时/构建产物约 1.4 GB —— 取舍说明：这些脚本大量围绕「浏览器页面 / 多窗口 / 关闭页面即退出」编写，桌面版语义已不同；引擎侧可复用的部分后续按新架构重建
 - 环境要求（本机实测通过）：Rust stable + MSVC 工具链、Node/pnpm、WebView2 运行时、Python 3.13 venv + PyInstaller、NSIS（Tauri 自带）
 
 #### 📝 说明
 
-- 版本号统一为 `0.1.0`，五处联动：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`frontend/src-tauri/tauri.conf.json`、`frontend/src-tauri/Cargo.toml`（同步 `Cargo.lock` 里 `autogametool` 的版本行）
-- 安装包文件名 `AutoGameTool_0.1.0_x64-setup.exe`（分发副本为根目录 `AutoGameTool-Setup.exe`）
+- 版本号统一为 `0.1.0`，五处联动：`engine/main.py`（FastAPI title + `/health`）、`frontend/package.json`、`frontend/src-tauri/tauri.conf.json`、`frontend/src-tauri/Cargo.toml`（同步 `Cargo.lock` 里 `autotool` 的版本行）
+- 安装包文件名 `AutoTool_0.1.0_x64-setup.exe`（分发副本为根目录 `AutoTool-Setup.exe`）
 - 发布 tag 用 **`v0.1.0-desktop`** —— 仓库早先已有一个 `v0.1.0` tag，故加 `-desktop` 后缀区分。桌面版按 `0.x` 号段独立计数
 
 ---
@@ -1458,6 +1532,6 @@ Invoke-RestMethod "http://127.0.0.1:8765/windows/list?token=<令牌>"  # 窗口�
 
 <div align="center">
 
-**AutoGameTool** · Windows 优先 · 本地引擎 + 一键安装
+**AutoTool** · Windows 优先 · 本地引擎 + 一键安装
 
 </div>

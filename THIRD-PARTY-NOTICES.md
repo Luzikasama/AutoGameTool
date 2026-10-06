@@ -1,8 +1,8 @@
 # 第三方组件许可声明
 
-本仓库（AutoGameTool）**自有代码**以 [MIT License](LICENSE) 发布。
+本仓库（AutoTool）**自有代码**以 [MIT License](LICENSE) 发布。
 
-但发行版 `AutoGameTool-Setup.exe` / `AutoGameTool.exe` 中**打包了若干第三方组件**，它们各自遵循自己的许可协议，不因本项目采用 MIT 而改变。以下列出实际打包进发行版的组件及其许可。
+但发行版 `AutoTool-Setup.exe` / `AutoTool.exe` 中**打包了若干第三方组件**，它们各自遵循自己的许可协议，不因本项目采用 MIT 而改变。以下列出实际打包进发行版的组件及其许可。
 
 > 版本号取自实际构建环境（2026-09 实测）。
 

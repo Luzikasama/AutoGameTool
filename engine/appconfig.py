@@ -1,4 +1,4 @@
-"""用户配置读写（%APPDATA%\\AutoGameTool\\config.json）。
+"""用户配置读写（%APPDATA%\\AutoTool\\config.json）。
 
 所有配置项共用这一个文件，统一从这里读写，避免多个模块各自「读-改-写」互相覆盖。
 写入使用「临时文件 + 替换」保证原子性，崩溃/断电不会留下截断的配置。
@@ -6,16 +6,17 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 from pathlib import Path
 from typing import Any
+
+import apppaths
 
 _LOCK = threading.Lock()
 
 
 def config_dir() -> Path:
-    return Path(os.environ.get("APPDATA", str(Path.home()))) / "AutoGameTool"
+    return apppaths.app_dir()
 
 
 def config_path() -> Path:

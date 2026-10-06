@@ -1,21 +1,25 @@
-export type StepType =
-  | 'delay'
-  | 'find_image'
-  | 'click'
-  | 'key'
-  | 'text'
-  | 'judge'
-  | 'terminate'
-  | 'macro'
-  | 'autoclick'
-  | 'script_call'
-
 export interface FlowNode {
   id: string
-  type: StepType
+  /** 节点的类型标识；老脚本里可能是 0.1.2 的节点，加载时由迁移层转换 */
+  type: NodeType | (string & {})
   params: Record<string, any>
   once?: boolean
 }
+
+/**
+ * 多出口节点的连线口（Vue Flow 的 sourceHandle）。
+ *
+ * 约定（前端画布与引擎侧共用）：
+ *   · 判断：`yes` / `no`
+ *   · 循环：`body`（循环体入口）/ `next`（循环结束后继续）
+ *   · 其余节点只有一个默认出口（sourceHandle 为空串）
+ *
+ * 循环体末尾连回循环节点自身，即表示"这一轮结束、进入下一轮"。
+ */
+export const BRANCH_YES = 'yes'
+export const BRANCH_NO = 'no'
+export const BRANCH_BODY = 'body'
+export const BRANCH_NEXT = 'next'
 
 /**
  * 子脚本：一段可以被其他脚本调用的可复用流程。
@@ -54,20 +58,145 @@ export interface Flow {
   edges: FlowEdge[]
 }
 
-export const STEP_META: Record<StepType, { label: string; icon: string; color: string }> = {
-  delay: { label: '延时', icon: '⏱', color: '#f59e0b' },
-  find_image: { label: '找图', icon: '🎯', color: '#22c55e' },
-  click: { label: '鼠标点击', icon: '🖱', color: '#3b82f6' },
-  key: { label: '键盘按键', icon: '⌨', color: '#a855f7' },
-  text: { label: '输入文本', icon: '📝', color: '#ec4899' },
-  judge: { label: '判断分支', icon: '🔀', color: '#06b6d4' },
-  terminate: { label: '终止条件', icon: '🛑', color: '#ef4444' },
-  macro: { label: '键鼠录制', icon: '⏺', color: '#f97316' },
-  autoclick: { label: '连点器', icon: '⚡', color: '#14b8a6' },
-  // 调用脚本：本质是"把另一段脚本内联到这里执行"，与打包合并的运行语义接近，
-  // 区别只是子脚本可以单独导出、单独编辑、被多个脚本复用。
-  script_call: { label: '调用脚本', icon: '📦', color: '#8b5cf6' },
+/**
+ * 六大节点类别（《节点设计规范 V1》第 2 节）。
+ *
+ * 类目决定画布上的**配色**：同一类的节点长得一样，一眼就能看出这段流程在干什么
+ * （输入=蓝 / 视觉=绿 / 流程=青 / 工具=橙 / 数据=紫 / 系统=灰）。
+ */
+export type NodeCategory = 'input' | 'vision' | 'flow' | 'tool' | 'data' | 'system'
+
+export const CATEGORY_ORDER: NodeCategory[] = [
+  'input',
+  'vision',
+  'flow',
+  'tool',
+  'data',
+  'system',
+]
+
+export const CATEGORY_META: Record<
+  NodeCategory,
+  { label: string; index: string; icon: string; color: string; desc: string }
+> = {
+  input: { label: '输入', index: '①', icon: '🖱', color: '#3b82f6', desc: '执行动作：鼠标、键盘、文本、剪贴板' },
+  vision: { label: '视觉', index: '②', icon: '🎯', color: '#22c55e', desc: '看到什么：图像、文字、颜色、像素、区域' },
+  flow: { label: '流程', index: '③', icon: '🔀', color: '#06b6d4', desc: '控制执行：判断、循环、延时、等待、终止' },
+  tool: { label: '工具', index: '④', icon: '⚡', color: '#f97316', desc: '组合与外部能力：录制、连点、脚本调用、外部工具' },
+  data: { label: '数据', index: '⑤', icon: '🧮', color: '#a855f7', desc: '信息本身：变量、运算、文本处理' },
+  system: { label: '系统', index: '⑥', icon: '🪟', color: '#64748b', desc: '操作系统资源：窗口、进程、文件、命令' },
 }
+
+/** 25 个核心节点的类型标识（规范第 17 节） */
+export type NodeType =
+  // ① 输入
+  | 'mouse'
+  | 'keyboard'
+  | 'text_input'
+  | 'clipboard'
+  // ② 视觉
+  | 'find_image'
+  | 'ocr'
+  | 'color_check'
+  | 'pixel_check'
+  | 'region_analysis'
+  // ③ 流程
+  | 'judge'
+  | 'loop'
+  | 'delay'
+  | 'wait'
+  | 'terminate'
+  // ④ 工具
+  | 'record'
+  | 'autoclick'
+  | 'script_call'
+  | 'external_tool'
+  // ⑤ 数据
+  | 'variable'
+  | 'calculate'
+  | 'text_process'
+  // ⑥ 系统
+  | 'window'
+  | 'process'
+  | 'file'
+  | 'command'
+
+export interface NodeMeta {
+  label: string
+  icon: string
+  category: NodeCategory
+  /** 属性面板里的一句话说明（鼠标悬停/分组标题用） */
+  hint?: string
+}
+
+export const NODE_META: Record<NodeType, NodeMeta> = {
+  // ---------- ① 输入 ----------
+  mouse: { label: '鼠标操作', icon: '🖱', category: 'input', hint: '点击 / 双击 / 右键 / 移动 / 按下松开 / 滚轮' },
+  keyboard: { label: '键盘按键', icon: '⌨', category: 'input', hint: '单键 / 组合键 / 按下 / 松开' },
+  text_input: { label: '文本输入', icon: '📝', category: 'input', hint: '直接输入或经剪贴板输入到当前窗口' },
+  clipboard: { label: '剪贴板', icon: '📋', category: 'input', hint: '写入 / 读取 / 清空' },
+  // ---------- ② 视觉 ----------
+  find_image: { label: '图像识别', icon: '🎯', category: 'vision', hint: '在屏幕或指定区域内寻找模板图' },
+  ocr: { label: '文字识别', icon: '🔍', category: 'vision', hint: '对指定区域做 OCR，输出文本' },
+  color_check: { label: '颜色检测', icon: '🎨', category: 'vision', hint: '区域内是否出现指定颜色' },
+  pixel_check: { label: '像素检测', icon: '📍', category: 'vision', hint: '精确比对一个点（或小方块）的颜色' },
+  region_analysis: { label: '区域分析', icon: '🖼', category: 'vision', hint: '区域是否变化 / 平均颜色 / 截图' },
+  // ---------- ③ 流程 ----------
+  judge: { label: '判断', icon: '🔀', category: 'flow', hint: '按条件走「是 / 否」分支' },
+  loop: { label: '循环', icon: '🔁', category: 'flow', hint: '固定次数 / 条件循环 / 无限循环' },
+  delay: { label: '延时', icon: '⏱', category: 'flow', hint: '无条件等待指定时间' },
+  wait: { label: '等待', icon: '⏳', category: 'flow', hint: '等到条件满足（图片出现、变量达标…）' },
+  terminate: { label: '终止', icon: '🛑', category: 'flow', hint: '终止当前节点 / 循环 / 脚本 / 整个工作流' },
+  // ---------- ④ 工具 ----------
+  record: { label: '键鼠录制', icon: '⏺', category: 'tool', hint: '录一段操作，停止后生成普通节点' },
+  autoclick: { label: '连点器', icon: '⚡', category: 'tool', hint: '高频连点：坐标 + 次数 + 间隔' },
+  script_call: { label: '调用脚本', icon: '📦', category: 'tool', hint: '执行另一个脚本（子脚本嵌套）' },
+  external_tool: { label: '外部工具', icon: '🔌', category: 'tool', hint: '调用外部程序 / HTTP 接口 / 插件' },
+  // ---------- ⑤ 数据 ----------
+  variable: { label: '变量', icon: '🏷', category: 'data', hint: '新建 / 赋值 / 读取 / 删除' },
+  calculate: { label: '运算', icon: '🧮', category: 'data', hint: '数学、比较、逻辑、赋值' },
+  text_process: { label: '文本处理', icon: '🔤', category: 'data', hint: '拼接、截取、替换、正则、转数字…' },
+  // ---------- ⑥ 系统 ----------
+  window: { label: '窗口', icon: '🪟', category: 'system', hint: '查找 / 激活 / 最小化 / 移动 / 取信息' },
+  process: { label: '进程', icon: '⚙', category: 'system', hint: '启动 / 关闭 / 是否在运行 / 取信息' },
+  file: { label: '文件', icon: '📁', category: 'system', hint: '读 / 写 / 复制 / 移动 / 删除 / 存在性' },
+  command: { label: '命令', icon: '⌘', category: 'system', hint: '执行 CMD / PowerShell / Bash 命令' },
+}
+
+/** 按类目取节点（面板用它分组渲染，顺序与规范一致） */
+export function nodesOfCategory(cat: NodeCategory): Array<[NodeType, NodeMeta]> {
+  return (Object.entries(NODE_META) as Array<[NodeType, NodeMeta]>).filter(
+    ([, m]) => m.category === cat,
+  )
+}
+
+/** 节点配色 = 它所属类目的颜色 */
+export function nodeColor(t: string): string {
+  const m = NODE_META[t as NodeType]
+  return m ? CATEGORY_META[m.category].color : '#888'
+}
+
+/**
+ * 0.1.2 及更早的节点 → 新节点类型。
+ *
+ * 只做"换个名字"的部分；`judge`（老语义是"找图+分支"）需要拆成两个节点，
+ * 由 `lib/migrateFlow.ts` 负责（要动连线，不能只靠映射表）。
+ */
+export const LEGACY_TYPE_MAP: Record<string, NodeType> = {
+  click: 'mouse',
+  key: 'keyboard',
+  text: 'text_input',
+  macro: 'record',
+  find_image: 'find_image',
+  delay: 'delay',
+  judge: 'judge',
+  terminate: 'terminate',
+  autoclick: 'autoclick',
+  script_call: 'script_call',
+}
+
+/** 老的「判断分支」（找图 + 分支）节点 —— 加载时会被拆开 */
+export const LEGACY_JUDGE = 'judge'
 
 export interface LogEntry {
   level: string

@@ -1,4 +1,4 @@
-"""AutoGameTool 引擎入口：FastAPI + WebSocket + 全局快捷键。"""
+"""AutoTool 引擎入口：FastAPI + WebSocket + 全局快捷键。"""
 import ctypes as _ctypes
 
 # 设置 DPI 感知，保证窗口坐标与截图像素一致
@@ -137,7 +137,7 @@ _loop: asyncio.AbstractEventLoop | None = None
 _REPEAT_MIN, _REPEAT_MAX = 1, 99999
 _repeat_value = 1
 # 页面标题（frontend/index.html 的 <title>），用于定位 WebUI 所在窗口
-_WEBUI_TITLE_HINT = "AutoGameTool"
+_WEBUI_TITLE_HINT = "AutoTool"
 
 # 上一次广播出去的运行状态（None = 还没广播过），用于去重
 _last_run_state: bool | None = None
@@ -342,7 +342,7 @@ async def _focus_ui() -> None:
 
     两种形态目标不同，这是桌面化之后必须分开的第一处：
 
-    · 桌面模式：目标是**壳创建的原生窗口**（进程名 autogametool.exe）。它被
+    · 桌面模式：目标是**壳创建的原生窗口**（进程名 autotool.exe）。它被
       `find_webui_window` 的「必须像浏览器」规则排除在外，所以按**父进程 pid**
       直接找 —— 引擎是壳拉起的 sidecar，父进程就是壳。
     · 浏览器模式（源码直跑 / 退回浏览器）：仍是老路径，按标题找浏览器窗口。
@@ -356,7 +356,7 @@ async def _focus_ui() -> None:
                 {
                     "type": "log",
                     "level": "warn",
-                    "message": "未找到程序主窗口：请确认 AutoGameTool 窗口没有被关掉",
+                    "message": "未找到程序主窗口：请确认 AutoTool 窗口没有被关掉",
                     "step": None,
                     "ts": time.time(),
                 }
@@ -381,7 +381,7 @@ async def _focus_ui() -> None:
             {
                 "type": "log",
                 "level": "warn",
-                "message": "未找到编辑器窗口：请确认 AutoGameTool 标签页仍开着（页面标题需含 AutoGameTool）",
+                "message": "未找到编辑器窗口：请确认 AutoTool 标签页仍开着（页面标题需含 AutoTool）",
                 "step": None,
                 "ts": time.time(),
             }
@@ -467,7 +467,7 @@ def _setup_hotkey() -> None:
         {"toggle_run": _cb_toggle_run, "record": _cb_record, "pick": _cb_pick}
     )
     print(
-        "[AutoGameTool] 全局快捷键: "
+        "[AutoTool] 全局快捷键: "
         + "；".join(
             f"{b['label']}={'+'.join(b['keys']) if b['enabled'] else '未启用'}"
             for b in hotkey_manager.get_bindings()
@@ -529,25 +529,25 @@ async def lifespan(_: FastAPI):
     enginelog.info("清理完成，引擎退出")
 
 
-app = FastAPI(title="AutoGameTool Engine", version="0.1.2", lifespan=lifespan)
+app = FastAPI(title="AutoTool Engine", version="0.1.3", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
 # 而引擎具备操控键鼠、截屏的能力，因此：
 # 1) 所有 API 需要随机令牌（随浏览器 URL 传给前端）；
-# 2) 打包运行与前端同源，不需要 CORS——仅开发模式(AUTOGAMETOOL_DEV=1)放开 vite 端口；
+# 2) 打包运行与前端同源，不需要 CORS——仅开发模式(AUTOTOOL_DEV=1)放开 vite 端口；
 # 3) 校验 Host 头，防 DNS rebinding。
-# 自动化测试可设 AUTOGAMETOOL_TOKEN 固定令牌。
+# 自动化测试可设 AUTOTOOL_TOKEN 固定令牌。
 def _load_or_create_token() -> str:
     """取本次运行的访问令牌：环境变量 > 已保存的 > 新生成并保存。
 
     为什么要把令牌**存下来**（v0.8.1）：以前每次启动都是新令牌，于是「程序已在运行时
     再双击一次」那条路径会用它自己那份**新令牌**打开浏览器页面，而真正在跑的引擎用的是
     旧令牌 —— 页面永远连不上，日志里只会反复出现「WebSocket 令牌校验失败」（实测踩到）。
-    令牌只保护本机回环端口（防别的网页 CSRF），存在 %APPDATA%\\AutoGameTool 下与
+    令牌只保护本机回环端口（防别的网页 CSRF），存在 %APPDATA%\\AutoTool 下与
     config.json 同等权限，不额外扩大攻击面。
     """
-    env_token = os.environ.get("AUTOGAMETOOL_TOKEN", "").strip()
+    env_token = os.environ.get("AUTOTOOL_TOKEN", "").strip()
     if env_token:
         return env_token
     token_file = appconfig.config_dir() / "engine.token"
@@ -571,7 +571,7 @@ _ENGINE_TOKEN = _load_or_create_token()
 # 告诉日志层：这串字面量必须被抹掉。无论它以什么形式出现在日志里（URL 参数、请求头、
 # 或某处异常把请求原样回显），都会被替换成 *** ——不只是靠 "token=" 这个模式去猜。
 enginelog.register_secret(_ENGINE_TOKEN)
-_DEV_MODE = os.environ.get("AUTOGAMETOOL_DEV", "").strip().lower() in ("1", "true", "yes", "on")
+_DEV_MODE = os.environ.get("AUTOTOOL_DEV", "").strip().lower() in ("1", "true", "yes", "on")
 _ENTRY_URL = f"http://127.0.0.1:8765/?token={_ENGINE_TOKEN}"
 
 _ALLOWED_HOSTS = {"127.0.0.1:8765", "localhost:8765", "[::1]:8765"}
@@ -633,8 +633,8 @@ async def health():
     # desktop 供前端判断当前形态：桌面版不发「页面告别」、界面文案也按原生窗口说
     return {
         "status": "ok",
-        "engine": "autogametool",
-        "version": "0.1.2",
+        "engine": "autotool",
+        "version": "0.1.3",
         "desktop": _desktop_mode(),
     }
 
@@ -972,7 +972,7 @@ def _desktop_mode() -> bool:
     2) **永不因为「页面没了」而退出**：关窗、刷新、WebView 崩溃都由壳负责收尾，
        引擎只负责活着；否则壳还在、引擎先自杀，界面就会变成一片「已断开」。
     """
-    return os.environ.get("AUTOGAMETOOL_DESKTOP", "").strip().lower() in (
+    return os.environ.get("AUTOTOOL_DESKTOP", "").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -984,7 +984,7 @@ def _keep_alive_on_close() -> bool:
     """是否「无论如何都不退后端」（无人值守挂机的逃生开关）。"""
     if _desktop_mode():
         return True
-    return os.environ.get("AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE", "").strip().lower() in (
+    return os.environ.get("AUTOTOOL_KEEP_ALIVE_ON_CLOSE", "").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -999,10 +999,10 @@ def _exit_on_page_loss() -> bool:
     只有页面主动告别（前端在 pagehide 时发 /goodbye）才退；静默掉线一律继续跑，
     这样挂机不会因为浏览器把后台标签页挂起而中断（实测踩过：日志里只有
     「编辑器页面已断开」，6 秒后引擎自己退出、悬浮框一起消失）。
-    需要旧行为时设 AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1。
+    需要旧行为时设 AUTOTOOL_EXIT_ON_PAGE_LOSS=1。
     （桌面模式下这条整体不生效——后端生命周期由壳管理，见 _desktop_mode。）
     """
-    return os.environ.get("AUTOGAMETOOL_EXIT_ON_PAGE_LOSS", "").strip().lower() in (
+    return os.environ.get("AUTOTOOL_EXIT_ON_PAGE_LOSS", "").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -1021,7 +1021,7 @@ async def _close_when_no_page(grace: float, reason: str) -> None:
     """宽限期内没有页面重连 → 停止流程并退出后端。
 
     grace 由调用方决定：页面主动告别用短宽限（用户确实关了页面），
-    静默掉线要么不退（默认）、要么用旧的长宽限（AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1）。
+    静默掉线要么不退（默认）、要么用旧的长宽限（AUTOTOOL_EXIT_ON_PAGE_LOSS=1）。
     """
     try:
         await asyncio.sleep(grace)
@@ -1034,7 +1034,7 @@ async def _close_when_no_page(grace: float, reason: str) -> None:
         enginelog.warn("页面已离开但流程仍在运行，保持后端与悬浮框（不退出）")
         return
     enginelog.log_exit(f"{reason}，且 {grace:.0f} 秒内没有重连")
-    print("[AutoGameTool] 编辑器页面已关闭，正在停止流程并退出后端…", flush=True)
+    print("[AutoTool] 编辑器页面已关闭，正在停止流程并退出后端…", flush=True)
     try:
         executor.stop()
         # 给正在跑的流程一点时间走完 finally（复位 running、释放钩子）再退出
@@ -1156,11 +1156,11 @@ async def ws_endpoint(ws: WebSocket):
             enginelog.info("编辑器页面已断开（剩余 %d 个页面）", len(manager.connections))
         if not manager.connections and not _desktop_mode():
             if _keep_alive_on_close():
-                enginelog.warn("已无编辑器页面连接；AUTOGAMETOOL_KEEP_ALIVE_ON_CLOSE=1，后端继续运行")
+                enginelog.warn("已无编辑器页面连接；AUTOTOOL_KEEP_ALIVE_ON_CLOSE=1，后端继续运行")
             elif _exit_on_page_loss():
                 # 旧行为（显式要求时）：静默掉线也退出
                 enginelog.warn("已无编辑器页面连接；若 %.0f 秒内没有重连，将停止流程并退出后端"
-                               "（AUTOGAMETOOL_EXIT_ON_PAGE_LOSS=1 指定的旧行为）", _CLOSE_GRACE_SEC)
+                               "（AUTOTOOL_EXIT_ON_PAGE_LOSS=1 指定的旧行为）", _CLOSE_GRACE_SEC)
                 _schedule_close_check(_CLOSE_GRACE_SEC, "编辑器页面全部断开")
             else:
                 # 默认：静默掉线**不退后端**。页面可能是被系统挂起/丢弃/浏览器崩了，
@@ -1206,10 +1206,10 @@ if __name__ == "__main__":
     _kernel32 = ctypes.windll.kernel32
     _kernel32.CreateMutexW.restype = wintypes.HANDLE
     _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
-    _single_mutex = _kernel32.CreateMutexW(None, False, "AutoGameTool_SingleInstance")
+    _single_mutex = _kernel32.CreateMutexW(None, False, "AutoTool_SingleInstance")
     if _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         enginelog.warn("检测到已有实例在运行，本次启动退出")
-        print("[AutoGameTool] 检测到程序已在运行，本次启动退出（避免多开导致快捷键冲突）。", flush=True)
+        print("[AutoTool] 检测到程序已在运行，本次启动退出（避免多开导致快捷键冲突）。", flush=True)
         threading.Thread(target=lambda: webbrowser.open(_ENTRY_URL), daemon=True).start()
         time.sleep(0.5)
         sys.exit(0)
@@ -1219,16 +1219,16 @@ if __name__ == "__main__":
         webbrowser.open(_ENTRY_URL)
 
     # 控制台若存在，这里会显示带令牌的完整地址；落盘的那份会被 enginelog 掩成 token=***
-    print(f"[AutoGameTool] 编辑器地址: {_ENTRY_URL}", flush=True)
+    print(f"[AutoTool] 编辑器地址: {_ENTRY_URL}", flush=True)
     enginelog.info("引擎启动：版本 %s，日志文件 %s", app.version, _LOG_PATH or "（不可用）")
 
-    # 设置 AUTOGAMETOOL_NO_BROWSER=1（或由桌面壳传入 AUTOGAMETOOL_DESKTOP=1）可禁止自动打开浏览器
-    _skip_browser = _desktop_mode() or os.environ.get("AUTOGAMETOOL_NO_BROWSER", "").strip().lower() in (
+    # 设置 AUTOTOOL_NO_BROWSER=1（或由桌面壳传入 AUTOTOOL_DESKTOP=1）可禁止自动打开浏览器
+    _skip_browser = _desktop_mode() or os.environ.get("AUTOTOOL_NO_BROWSER", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
     if _skip_browser:
-        _why = "AUTOGAMETOOL_DESKTOP=1（桌面壳）" if _desktop_mode() else "AUTOGAMETOOL_NO_BROWSER"
-        print(f"[AutoGameTool] 已按 {_why} 跳过自动打开浏览器。", flush=True)
+        _why = "AUTOTOOL_DESKTOP=1（桌面壳）" if _desktop_mode() else "AUTOTOOL_NO_BROWSER"
+        print(f"[AutoTool] 已按 {_why} 跳过自动打开浏览器。", flush=True)
         enginelog.info("已按 %s 跳过自动打开浏览器", _why)
     else:
         threading.Thread(target=_open_browser, daemon=True).start()
@@ -1240,16 +1240,38 @@ if __name__ == "__main__":
     _server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=8765, access_log=False)
     )
+    def _report_start_failure(detail: str) -> None:
+        """启动阶段失败时，把「人话」同时写日志、打印、弹框，然后退出。
+
+        必须弹框：打包版是 `--noconsole` 的，没有窗口、没有 stdout。早先这里在
+        端口被占用时只写日志就退出，用户看到的就是「双击了，什么都没发生」。
+        常见成因：**旧版（改名前的 AutoGameTool）还在运行**，或已经开了一个 AutoTool
+        —— 两者的单实例互斥量名字不同，互斥量拦不住，只会在绑端口这一步撞车。
+        """
+        msg = (
+            f"引擎启动失败：{detail}\n"
+            "端口 8765 可能已被占用。请检查是否已经打开了本程序或旧版 "
+            "AutoGameTool（含悬浮框）：先全部退出再重试。\n\n"
+            f"详见日志：{_LOG_PATH}"
+        )
+        enginelog.error("%s", msg)
+        print(f"[AutoTool] {msg}", flush=True)
+        _fatal_dialog("AutoTool 启动失败", msg)
+        sys.exit(1)
+
     try:
         _server.run()
         enginelog.log_exit("uvicorn 正常结束")
     except OSError as e:
-        msg = f"引擎启动失败：{e}（端口 8765 可能被其他程序占用）"
-        enginelog.error("%s", msg)
-        print(f"[AutoGameTool] {msg}", flush=True)
-        _fatal_dialog("AutoGameTool 启动失败", msg)
-        sys.exit(1)
+        _report_start_failure(str(e))
+    except SystemExit as e:
+        # uvicorn 在**启动阶段**失败时抛的是 SystemExit，而不是把 OSError 交给我们
+        # （它只把 OSError 写进了日志）。这里必须自己把它翻译出来，否则打包版
+        # 会静默退出 —— 那正是「双击没反应」。
+        if getattr(_server, "started", False):
+            raise
+        _report_start_failure(f"uvicorn 启动阶段退出（退出码 {e.code}）")
     except BaseException as e:  # 兜底：任何异常都要留下记录（无控制台时这是唯一的线索）
         enginelog.error("引擎异常退出：%r", e, exc_info=True)
-        _fatal_dialog("AutoGameTool 异常退出", f"{type(e).__name__}: {e}\n\n详见日志：{_LOG_PATH}")
+        _fatal_dialog("AutoTool 异常退出", f"{type(e).__name__}: {e}\n\n详见日志：{_LOG_PATH}")
         raise

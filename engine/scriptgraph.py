@@ -39,10 +39,12 @@ def collect_calls(flow) -> list[str]:
     for n in flow.get("nodes") or []:
         if not isinstance(n, dict):
             continue
-        # 两种形状都认：引擎负载是扁平的 {type, params}，
-        # 文件/画布是嵌套的 {data: {stepType, params}}
+        # 三种形状都认：
+        #   0.1.3 起画布节点 {data: {nodeType, params}}
+        #   0.1.2 及更早的 {data: {stepType, params}}
+        #   引擎负载的扁平 {type, params}
         data = n.get("data") if isinstance(n.get("data"), dict) else {}
-        ntype = data.get("stepType") or n.get("type")
+        ntype = data.get("nodeType") or data.get("stepType") or n.get("type")
         if ntype != "script_call":
             continue
         params = (data.get("params") if data else None) or n.get("params") or {}

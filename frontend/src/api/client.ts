@@ -13,17 +13,18 @@ const ENGINE_PORT = '8765'
 const BASE = window.location.port === ENGINE_PORT ? '' : `http://127.0.0.1:${ENGINE_PORT}`
 
 // 访问令牌：引擎自动打开浏览器时通过 ?token= 传入；存入 sessionStorage 后从地址栏抹除，
-// 防止令牌随书签/截图泄露。开发模式（AUTOGAMETOOL_DEV=1）下引擎不校验，可为空。
+// 防止令牌随书签/截图泄露。开发模式（AUTOTOOL_DEV=1）下引擎不校验，可为空。
+// `agt_token` 是 0.1.2 及更早（工具名 AutoGameTool）用的旧键，读取时兼容一次。
 function initToken(): string {
   const url = new URL(window.location.href)
   const fromUrl = url.searchParams.get('token')
   if (fromUrl) {
-    sessionStorage.setItem('agt_token', fromUrl)
+    sessionStorage.setItem('at_token', fromUrl)
     url.searchParams.delete('token')
     window.history.replaceState(null, '', url.pathname + url.search + url.hash)
     return fromUrl
   }
-  return sessionStorage.getItem('agt_token') || ''
+  return sessionStorage.getItem('at_token') || sessionStorage.getItem('agt_token') || ''
 }
 const TOKEN = initToken()
 

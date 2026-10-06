@@ -16,11 +16,32 @@ import {
  *  - 图片是 base64，几十到几百 KB，走 HTTP 每次启动都传一遍不划算
  * 所以：不上传引擎、不写进工程文件，只在本机浏览器里留着。
  */
-const KEY = 'agt.bg'
-const APPEARANCE_KEY = 'agt.appearance'
+const KEY = 'at.bg'
+const APPEARANCE_KEY = 'at.appearance'
+// 0.1.2 及更早（工具名为 AutoGameTool）用的旧键；读取时兼容并写回新键
+const LEGACY_KEY = 'agt.bg'
+const LEGACY_APPEARANCE_KEY = 'agt.appearance'
+
+/** 读键，顺带把旧版（agt.*）的值迁到新键上；没有可迁的就返回 null。 */
+function readMigrated(key: string, legacyKey: string): string | null {
+  try {
+    const v = localStorage.getItem(key)
+    if (v !== null) return v
+    const old = localStorage.getItem(legacyKey)
+    if (old === null) return null
+    try {
+      localStorage.setItem(key, old)
+    } catch {
+      /* 配额不足就本次直接用，下次再试 */
+    }
+    return old
+  } catch {
+    return null
+  }
+}
 
 export const useUiStore = defineStore('ui', () => {
-  // data URL（已在裁剪步骤里按屏幕比例裁好）
+  // data URL（已在裁剪节点里按屏幕比例裁好）
   const bgImage = ref('')
   // 背景图不透明度 0.05~1
   const bgOpacity = ref(0.5)
@@ -56,7 +77,7 @@ export const useUiStore = defineStore('ui', () => {
 
   function loadAppearance() {
     try {
-      appearance.value = normalizeAppearance(localStorage.getItem(APPEARANCE_KEY))
+      appearance.value = normalizeAppearance(readMigrated(APPEARANCE_KEY, LEGACY_APPEARANCE_KEY))
     } catch {
       appearance.value = DEFAULT_APPEARANCE
     }
@@ -76,7 +97,7 @@ export const useUiStore = defineStore('ui', () => {
 
   function load() {
     try {
-      const raw = localStorage.getItem(KEY)
+      const raw = readMigrated(KEY, LEGACY_KEY)
       if (!raw) return
       const j = JSON.parse(raw)
       if (typeof j?.image === 'string') bgImage.value = j.image

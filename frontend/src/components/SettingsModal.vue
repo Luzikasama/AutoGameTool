@@ -82,7 +82,7 @@ function selectNav(k: NavKey) {
 }
 
 // ---------- 「关于」用到的常量 ----------
-const REPO_URL = 'https://github.com/Luzikasama/AutoGameTool'
+const REPO_URL = 'https://github.com/Luzikasama/AutoTool'
 const RELEASES_URL = `${REPO_URL}/releases`
 
 /** 用系统默认浏览器打开外链。
@@ -783,7 +783,7 @@ onBeforeUnmount(() => {
             <div class="st-card">
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">AutoGameTool</div>
+                  <div class="st-row-title">AutoTool</div>
                   <div class="st-row-desc">可视化流程编辑器 + 本机自动化引擎（图像识别 / 键鼠）。</div>
                 </div>
                 <div class="st-row-ctl">

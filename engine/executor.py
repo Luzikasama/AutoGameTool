@@ -1,4 +1,4 @@
-"""流程执行器：图执行（支持判断分支、单次执行、终止条件、循环与全局启停）。
+"""流程执行器：图执行（六大类节点、判断分支、循环、终止、子脚本嵌套）。
 
 分辨率自适应：
 - 流程可携带 screen={width,height}（保存时的主显示器物理分辨率）与
@@ -6,49 +6,99 @@
 - 运行时若当前分辨率/窗口尺寸与参考值不同，点击与宏坐标按比例换算，
   使脚本可跨分辨率/跨 DPI 复用；模板匹配的分辨率自适应见 vision.match_template_auto。
 
+控制流（《节点设计规范 V1》第 2 节）：
+- 判断 / 循环 有两个出口，用连线上的 sourceHandle 区分：
+    判断：`yes` / `no`      循环：`body`（循环体）/ `next`（循环结束后继续）
+- 循环体末尾连回循环节点自身，表示"这一轮结束、进入下一轮"。
+- 终止分三级：`loop`（break 出最内层循环）/ `script`（当前脚本返回）/ `workflow`（整次运行停止）。
+  用异常实现（BreakLoop / EndScript）——嵌套循环时"break 最近一层"的语义天然正确。
+
 子脚本（嵌套调用）：
 - 流程可携带 scripts={id: {id, name, nodes, edges}}（子脚本库），
-  「调用脚本」节点按 params.script_id 就地展开执行 —— 运行语义与"打包合并"基本一致，
-  区别只是子脚本体面可复用、可单独编辑导出。
-- 因此执行器里**有两层图**：当前正在跑的这张图（_run_graph），
-  以及它可能在节点里调用的下一层图。二者共用同一套走图逻辑。
-- 防递归共三道防线（见 scriptgraph.py 的说明）：
-    1) 编辑器里加调用关系时拦截（前端）
-    2) 运行前整图环检测（scriptgraph.validate_scripts，下面 run() 里调用）
-    3) 运行时调用栈 + 层数上限（self.call_stack / MAX_SCRIPT_DEPTH）
+  「调用脚本」节点按 params.script_id 就地展开执行。
+- 防递归三道防线（见 scriptgraph.py）：编辑器拦截 / 运行前整图环检测 /
+  运行时调用栈 + MAX_SCRIPT_DEPTH。
+
+变量作用域：整个工作流共享一份（主脚本与所有层子脚本），见 runvars.VarScope。
 """
+from __future__ import annotations
+
 import asyncio
+import subprocess
 import time
 import traceback
 from typing import Any, Callable
 
 import inputctl
+import nodes as nodemod
 import overlay
 import vision
 import window
+from runvars import VarScope, eval_conditions, interpolate
 from scriptgraph import MAX_SCRIPT_DEPTH, name_map, normalize_scripts, validate_scripts
 
-# 悬浮框里显示的节点中文名
+# 悬浮框里显示的节点中文名（25 个核心节点）
 _STEP_LABEL = {
-    "delay": "延时",
-    "find_image": "找图",
-    "click": "鼠标点击",
-    "key": "键盘按键",
-    "text": "输入文本",
-    "judge": "判断分支",
-    "macro": "键鼠回放",
-    "terminate": "终止条件",
-    "autoclick": "连点器",
-    "script_call": "调用脚本",
+    # ① 输入
+    'mouse': '鼠标操作',
+    'keyboard': '键盘按键',
+    'text_input': '文本输入',
+    'clipboard': '剪贴板',
+    # ② 视觉
+    'find_image': '图像识别',
+    'ocr': '文字识别',
+    'color_check': '颜色检测',
+    'pixel_check': '像素检测',
+    'region_analysis': '区域分析',
+    # ③ 流程
+    'judge': '判断',
+    'loop': '循环',
+    'delay': '延时',
+    'wait': '等待',
+    'terminate': '终止',
+    # ④ 工具
+    'record': '键鼠录制',
+    'autoclick': '连点器',
+    'script_call': '调用脚本',
+    'external_tool': '外部工具',
+    # ⑤ 数据
+    'variable': '变量',
+    'calculate': '运算',
+    'text_process': '文本处理',
+    # ⑥ 系统
+    'window': '窗口',
+    'process': '进程',
+    'file': '文件',
+    'command': '命令',
+}
+
+# 0.1.2 及更早的步骤类型 → 0.1.3 节点类型。
+# 前端加载时已经升级过一次；这里再兜一层，是为了「手改 JSON / 别人给的旧文件 /
+# 从旧版 Release 里直接加载到引擎」这些绕过前端的入口。
+_LEGACY_TYPES = {
+    'click': 'mouse',
+    'key': 'keyboard',
+    'text': 'text_input',
+    'macro': 'record',
 }
 
 
-def _validate_graph(nodes, edges, where: str) -> None:
-    """校验一张图（根流程或某个子脚本）的节点与连线，非法时抛 ValueError。
+class BreakLoop(Exception):
+    """终止「当前循环这一轮」——由最内层循环捕获。"""
 
-    where 会出现在错误信息里，因为"哪张图坏了"对用户很关键：
-    根流程的报错和"第 3 个子脚本里的报错"处理方式完全不同。
-    """
+
+class EndScript(Exception):
+    """结束「当前脚本」——由 _run_graph 捕获（子脚本即返回调用方）。"""
+
+
+def normalize_type(t: Any) -> str:
+    """把（可能的）老步骤类型归一成新节点类型。"""
+    s = str(t or '')
+    return _LEGACY_TYPES.get(s, s)
+
+
+def _validate_graph(nodes, edges, where: str) -> None:
+    """校验一张图（根流程或某个子脚本）的节点与连线，非法时抛 ValueError。"""
     if not isinstance(nodes, list) or not isinstance(edges, list):
         raise ValueError(f"{where}的 nodes/edges 必须是数组")
     ids = set()
@@ -62,11 +112,7 @@ def _validate_graph(nodes, edges, where: str) -> None:
 
 
 def validate_flow(flow: dict) -> None:
-    """校验流程结构，非法时抛 ValueError（避免执行器带着脏数据运行）。
-
-    子脚本库也一并校验：子脚本里的坏连线同样会让执行器在执行到一半时炸掉，
-    而那时用户已经在挂机了 —— 早报比晚报好得多。
-    """
+    """校验流程结构，非法时抛 ValueError（避免执行器带着脏数据运行）。"""
     if not isinstance(flow, dict):
         raise ValueError("流程必须是 JSON 对象")
     nodes = flow.get("nodes", [])
@@ -101,56 +147,69 @@ class Executor:
         # 暂停：与停止不同，暂停只是让流程停在检查点上，resume() 后从原地继续
         self.paused = False
         self.current_flow: dict | None = None
-        # 当前执行任务的强引用，供 stop()/reconcile() 判断「是否真有流程在跑」
         self.task: "asyncio.Task | None" = None
         # 本次运行的子脚本库（id → 子脚本），由 run() 从流程里取出
         self.scripts: dict[str, dict] = {}
-        # 运行时调用栈（第三道防递归防线）：每个元素 {"id","name"}，栈深 = 当前嵌套层数。
-        # 只放子脚本，根脚本不占位 —— 根脚本不可被调用，放进去反而会让层数算多一层。
+        # 运行时调用栈（第三道防递归防线）：元素 {"id","name"}；根脚本不占位
         self.call_stack: list[dict] = []
-        # 悬浮框当前显示的「第几轮 / 共几轮」。子脚本内部也要更新悬浮框的步骤文字，
-        # 但轮数必须沿用外层循环的进度，否则一进子脚本就变成 1/1，看起来像重新开始了。
+        # 悬浮框当前显示的「第几轮 / 共几轮」（子脚本内部沿用外层进度）
         self._ov_loop = 0
         self._ov_total = 0
+
+        # ---- 一次运行的执行上下文（run() 里设置，节点实现直接读）----
+        self.vars = VarScope()
+        self.input_mode = 'real'
+        self.window_hwnd: int | None = None
+        self.scale: Callable[[Any, Any], tuple[int, int]] | None = None
+        # 当前节点往悬浮框/日志里报的"一句话结果"（节点实现可写）
+        self.last_message = ''
+
+    # ------------------------------------------------------------------ 状态
 
     def stop(self) -> None:
         self.stopped = True
         # 停止时一并清掉暂停：否则「暂停中停止」会让暂停等待循环一直挂着
         self.paused = False
-        # 没有真正在跑的任务（例如任务已异常退出但状态残留）时直接复位，
-        # 否则前端的「停止」按钮会一直卡住，点也点不回来
         if self.task is None or self.task.done():
             self.running = False
 
     def pause(self) -> None:
-        """暂停：流程会在下一个检查点停下（节点边界 / 延时片段内）。"""
         if self.running:
             self.paused = True
 
     def resume(self) -> None:
         self.paused = False
 
-    async def _wait_if_paused(self) -> None:
+    async def wait_if_paused(self) -> None:
         """暂停等待点。
 
         只放在「节点边界」与「延时的小睡之间」两处：
         - 这两处都不是"做到一半"的状态，恢复后从原地继续即可，不会重复已完成的动作
-        - 刻意不放进找图/判断的轮询里：那里的超时是按 time.time() 算的，
+        - 刻意不放进找图/等待的轮询里：那里的超时按 time.time() 算，
           在里面停住会把暂停时长也算进超时，恢复后立刻误判超时
         """
         while self.paused and not self.stopped:
             await asyncio.sleep(0.1)
 
-    def reconcile(self) -> bool:
-        """把 running 与实际任务状态对齐，返回修正后的 running。
+    async def sleep(self, seconds: float) -> None:
+        """可停止、可暂停的等待：按 250ms 切片，保证「停止」在长延时下也立刻生效。"""
+        left = max(0.0, float(seconds))
+        while left > 0:
+            if self.stopped:
+                return
+            await self.wait_if_paused()
+            if self.stopped:
+                return
+            take = min(0.25, left)
+            await asyncio.sleep(take)
+            left -= take
 
-        兜底任何让 run() 的 finally 未能执行的异常路径：任务已结束却仍标记运行中时
-        自动复位，前端靠 1 秒轮询 /run/state 即可自愈。
-        """
+    def reconcile(self) -> bool:
+        """把 running 与实际任务状态对齐，返回修正后的 running。"""
         if self.running and (self.task is None or self.task.done()):
             self.running = False
         if not self.running:
-            self.paused = False  # 没在跑就谈不上暂停，避免展示出"已暂停但空闲"的矛盾状态
+            self.paused = False
         return self.running
 
     async def log(self, level: str, msg: str, step: str | None = None) -> None:
@@ -159,7 +218,6 @@ class Executor:
         )
 
     async def _state(self, state: str) -> None:
-        # 悬浮框上的启停按钮要跟着真实状态走
         try:
             overlay.set_run_state(state == "running")
         except Exception:
@@ -170,62 +228,145 @@ class Executor:
 
     @staticmethod
     def _ov(loop: int, total: int, step: str) -> None:
-        """更新悬浮框。
-
-        必须彻底防御：悬浮框只是显示层，任何异常都不能影响流程执行
-        （曾因 overlay 模块缺少模块级 update() 而让每次运行都在起跑处异常退出）。
-        """
+        """更新悬浮框。悬浮框只是显示层，任何异常都不能影响流程执行。"""
         try:
             overlay.update(loop, total, step)
         except Exception:
             pass
 
     def _ov_text(self, step: str) -> None:
-        """只改悬浮框的步骤文字，轮数沿用当前外层循环进度。
-
-        子脚本内部改的必须是文字：轮数由最外层循环决定，
-        子脚本自己那一层是"被调用一次就走一遍"，拿它的 1/1 去覆盖会让进度显示倒退。
-        """
+        """只改悬浮框的步骤文字，轮数沿用当前外层循环进度。"""
         self._ov(self._ov_loop, self._ov_total, step)
 
     def _step_text(self, node: dict) -> str:
-        ntype = str(node.get("type") or "?")
+        ntype = normalize_type(node.get("type"))
         label = _STEP_LABEL.get(ntype, ntype)
-        p = node.get("params") or {}
-        extra = ""
-        if ntype in ("find_image", "judge"):
-            extra = str(p.get("template") or "")
-        elif ntype == "key":
-            extra = str(p.get("key") or "")
-        elif ntype == "delay":
+        extra = ''
+        if self.last_message:
+            extra = self.last_message
+        elif ntype == 'delay':
+            p = node.get("params") or {}
             extra = f"{p.get('ms', 0)} ms"
-        elif ntype == "text":
-            extra = str(p.get("text") or "")[:14]
-        elif ntype == "autoclick":
-            extra = f"{p.get('count', 1)} 次 / {p.get('interval_ms', 100)} ms"
-        elif ntype == "script_call":
-            sid = str(p.get("script_id") or "")
-            sub = self.scripts.get(sid)
-            extra = sub["name"] if sub else (str(p.get("name") or "") or "未选择")
         return f"{label} {extra}".strip()
 
-    async def toggle(self) -> None:
-        """全局快捷键启停。"""
-        if self.running and not (self.task and self.task.done()):
-            self.stop()
-            await self.log("warn", "快捷键触发：停止")
-        elif self.current_flow:
-            await self.log("info", "快捷键触发：启动")
-            await self.run(self.current_flow)
+    # ------------------------------------------------------------ 截图 / 坐标
+
+    def grab(self, scope_mode: str = 'auto'):
+        """按范围截图，返回 (BGR 帧, 屏幕偏移 x, 屏幕偏移 y)。
+
+        偏移量是"帧内坐标 → 屏幕坐标"要加的值：
+          · 整屏截图 → (0, 0)
+          · 窗口截图 → 窗口左上角在屏幕上的位置
+        旧代码在找图里手工加过一次 offset，在判断里忘了加 —— 统一从这里出，
+        就不会再出现"找图和判断坐标不一致"这类只有换窗口才暴露的问题。
+        """
+        use_window = scope_mode == 'window' or (scope_mode == 'auto' and self.window_hwnd)
+        if use_window and self.window_hwnd:
+            rect = window.get_window_rect(self.window_hwnd)
+            if self.input_mode == 'simulated':
+                # PrintWindow：后台也能截（窗口被遮挡/最小化时仍可用）
+                return window.capture_window(self.window_hwnd), rect['left'], rect['top']
+            # mss 区域截图：快，但要求窗口可见
+            return window.capture_window_fast(self.window_hwnd), rect['left'], rect['top']
+        return vision.grab_frame(), 0, 0
+
+    def grab_region(self, region: dict):
+        """按"屏幕坐标的矩形"截图（OCR / 颜色检测的自定义区域走这里）。"""
+        frame = vision.grab_frame(
+            {
+                'left': int(region.get('left', 0)),
+                'top': int(region.get('top', 0)),
+                'width': max(1, int(region.get('width', 1))),
+                'height': max(1, int(region.get('height', 1))),
+            }
+        )
+        return frame, int(region.get('left', 0)), int(region.get('top', 0))
+
+    # ------------------------------------------------------------- 命令行
+
+    async def run_shell(self, cmd: str, cwd: str | None, timeout_ms: int, shell: str) -> tuple[int, str]:
+        """执行一条命令，返回 (退出码, 输出文本)。
+
+        刻意用 subprocess.run + 线程而不是 asyncio 子进程：
+        Windows 上 asyncio 子进程要求 ProactorEventLoop，而不同的 ASGI 运行配置
+        （以及某些事件循环策略）会让它直接抛 NotImplementedError —— 挂机中途
+        「命令」节点炸掉比"慢一点"糟糕得多。
+        """
+        if shell == 'powershell':
+            argv = ['powershell', '-NoProfile', '-NonInteractive', '-Command', cmd]
+        elif shell == 'bash':
+            argv = ['bash', '-lc', cmd]
         else:
-            await self.log("warn", "暂无已加载流程，无法通过快捷键启动")
+            argv = ['cmd', '/c', cmd]
+
+        def _run() -> tuple[int, str]:
+            try:
+                proc = subprocess.run(  # noqa: S603 - 用户显式配置的命令
+                    argv,
+                    cwd=cwd or None,
+                    capture_output=True,
+                    timeout=max(0.1, timeout_ms / 1000.0),
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                )
+                code = int(proc.returncode)
+                out = nodemod.decode_output(proc.stdout or b'') + nodemod.decode_output(proc.stderr or b'')
+                return code, out
+            except subprocess.TimeoutExpired as e:
+                out = nodemod.decode_output(e.stdout or b'') + nodemod.decode_output(e.stderr or b'')
+                return -1, out + f'\n[超时] 命令超过 {timeout_ms} ms 未结束，已放弃等待'
+
+        try:
+            return await asyncio.to_thread(_run)
+        except FileNotFoundError as e:
+            return -1, f'[失败] 找不到可执行文件：{e}'
+        except Exception as e:
+            return -1, f'[失败] {e}'
+
+    # ------------------------------------------------------------ 录制回放
+
+    async def _replay_events(self, events: list, speed: float) -> None:
+        """回放一段录制的键鼠事件（速度 = 时间轴的压缩倍率）。"""
+        base = time.time() * 1000.0
+        for ev in events:
+            if self.stopped:
+                return
+            target = float(ev.get('t', 0)) / speed
+            wait = target - (time.time() * 1000.0 - base)
+            if wait > 0:
+                await self.sleep(wait / 1000.0)
+            if self.stopped:
+                return
+            etype = ev.get('type')
+            try:
+                if etype in ('mousemove', 'mousedown', 'mouseup', 'scroll'):
+                    x, y = ev.get('x', 0), ev.get('y', 0)
+                    if self.scale:
+                        x, y = self.scale(x, y)
+                    if etype == 'mousemove':
+                        await asyncio.to_thread(inputctl.move, x, y, self.input_mode, self.window_hwnd)
+                    elif etype == 'mousedown':
+                        await asyncio.to_thread(
+                            inputctl.mouse_down, x, y, ev.get('button', 'left'), self.input_mode, self.window_hwnd
+                        )
+                    elif etype == 'mouseup':
+                        await asyncio.to_thread(
+                            inputctl.mouse_up, x, y, ev.get('button', 'left'), self.input_mode, self.window_hwnd
+                        )
+                    else:
+                        await asyncio.to_thread(
+                            inputctl.scroll, ev.get('dx', 0), ev.get('dy', 0), self.input_mode, self.window_hwnd, x, y
+                        )
+                elif etype == 'keydown':
+                    await asyncio.to_thread(inputctl.key_down, str(ev.get('key', '')), self.input_mode, self.window_hwnd)
+                elif etype == 'keyup':
+                    await asyncio.to_thread(inputctl.key_up, str(ev.get('key', '')), self.input_mode, self.window_hwnd)
+            except Exception as e:
+                await self.log('warn', f'回放事件失败({etype}): {e}')
+
+    # ---------------------------------------------------------------- 主入口
 
     def _make_scaler(self, flow: dict, hwnd):
-        """构造坐标换算函数。返回 (scale_fn, 说明) 或 (None, None)。
-
-        优先按「绑定窗口的参考 rect → 当前 rect」换算（同时覆盖窗口移动/缩放/
-        分辨率变化）；未绑定窗口时按「参考屏幕分辨率 → 当前主屏分辨率」换算。
-        """
+        """构造坐标换算函数。返回 (scale_fn, 说明) 或 (None, None)。"""
         win = flow.get("window")
         ref_rect = win.get("rect") if isinstance(win, dict) else None
         if hwnd and isinstance(ref_rect, dict) and ref_rect.get("width") and ref_rect.get("height"):
@@ -267,22 +408,19 @@ class Executor:
     async def run(self, flow: dict) -> None:
         self.current_flow = flow
         # 关键：置位 running 之后的全部逻辑都必须落在 try/finally 内。
-        # 旧版把「开跑日志 + 分辨率换算」放在 try 之外，这段一旦抛异常，
-        # finally 不会执行，running 会永久卡在 True——前端右上角一直显示「停止」
-        # 且点击无效（因为 /run/stop 原样回传 running）。
         self.stopped = False
-        self.paused = False  # 新一轮开跑必须是"非暂停"，否则会卡在上一轮遗留的暂停里
+        self.paused = False
         self.running = True
-        # 每次开跑都清空调用栈、重取子脚本库：
-        # 上一次运行残留的栈会让本次的第一个 script_call 就被误判成"嵌套过深"
         self.call_stack = []
         self.scripts = normalize_scripts(flow.get("scripts") if isinstance(flow, dict) else None)
         self._ov_loop, self._ov_total = 0, 0
+        # 每次开跑都是一份全新的变量表：上一次运行残留的变量会让本次判断读到脏数据
+        self.vars = VarScope()
+        self.last_message = ''
         try:
             await self._state("running")
             self._ov(0, 0, "准备中…")
 
-            # 先校验：畸形流程直接拒绝，不会让 running 卡死在 True
             try:
                 validate_flow(flow)
                 repeat = max(1, int(flow.get("repeat", 1)))
@@ -290,10 +428,6 @@ class Executor:
                 await self.log("error", f"流程数据无效，已拒绝执行: {e}")
                 return
 
-            # 第二道防线：缺失脚本 / 循环调用 / 嵌套过深。
-            # 前端在编辑时已经拦过一次，这里再拦一次是为了兜住「手改 JSON」
-            # 「导入别人的文件」「旧版本文件」这些前端管不到的入口 ——
-            # 无限递归的表现是程序卡死，用户完全无从下手，宁可重复检查。
             problems = validate_scripts(flow)
             if problems:
                 for msg in problems:
@@ -304,25 +438,24 @@ class Executor:
 
             nodes = flow.get("nodes", [])
             edges = flow.get("edges", [])
-            input_mode = flow.get("input_mode", "real")
+            self.input_mode = flow.get("input_mode", "real")
             win = flow.get("window")
-            hwnd = win.get("hwnd") if isinstance(win, dict) else None
+            self.window_hwnd = win.get("hwnd") if isinstance(win, dict) else None
 
             await self.log(
                 "info",
-                f"开始执行「{flow.get('name', '未命名')}」：{len(nodes)} 节点 × {repeat} 轮，输入模式={input_mode}"
+                f"开始执行「{flow.get('name', '未命名')}」：{len(nodes)} 个节点 × {repeat} 轮，输入模式={self.input_mode}"
                 + (f"，内嵌 {len(self.scripts)} 个子脚本" if self.scripts else ""),
             )
-            # 分辨率换算容错：屏幕/窗口数据畸形时退化为不做换算，而不是中断整个流程
             try:
-                scale_fn, scale_desc = self._make_scaler(flow, hwnd)
+                self.scale, scale_desc = self._make_scaler(flow, self.window_hwnd)
             except Exception as e:
-                scale_fn, scale_desc = None, None
+                self.scale, scale_desc = None, None
                 await self.log("warn", f"分辨率适配计算失败，将按原坐标执行: {e}")
-            if scale_fn:
+            if self.scale:
                 await self.log("info", f"分辨率/窗口尺寸适配已启用（{scale_desc}），坐标将按比例换算")
 
-            await self._run_graph(nodes, edges, input_mode, hwnd, scale_fn, repeat)
+            await self._run_graph(nodes, edges, repeat)
             if self.stopped:
                 return
             await self.log("info", "流程执行完成")
@@ -333,37 +466,24 @@ class Executor:
             traceback.print_exc()
         finally:
             self.running = False
-            # 调用栈必须清空：这次运行里出过异常也不要留给下一次
             self.call_stack = []
-            # 广播失败不应把异常抛回调用方（此时 running 已复位，状态本来就正确）
             try:
                 await self._state("idle")
             except Exception:
                 pass
 
-    async def _run_graph(
-        self,
-        nodes: list,
-        edges: list,
-        input_mode: str,
-        hwnd,
-        scale_fn,
-        repeat: int,
-        scope: str = "",
-    ) -> None:
-        """走完一张流程图的「起点 → … → 结束」。
+    async def _run_graph(self, nodes: list, edges: list, repeat: int, scope: str = "") -> None:
+        """走完一张流程图（根脚本或某一层子脚本），共 repeat 轮。
 
-        根流程与每一层子脚本都走这一份实现。子脚本一律 **repeat=1**：循环由最外层决定，
-        这样"调用脚本"与"把那些步骤直接合并进主流程"（打包合并）的运行语义才一致。
-        scope 只影响日志与悬浮框文案：空串表示顶层，否则是「子脚本「X」」这样的前缀。
+        子脚本一律 repeat=1：循环由最外层决定，这样"调用脚本"与"把这些节点直接
+        合并进主流程"（打包合并）的运行语义才一致。
         """
         prefix = f"{scope}：" if scope else ""
         node_map = {n["id"]: n for n in nodes}
         adj: dict[str, list[tuple[str, str]]] = {}
         for e in edges:
             adj.setdefault(e["source"], []).append((e.get("sourceHandle") or "", e["target"]))
-        targets = {e["target"] for e in edges}
-        starts = [n["id"] for n in nodes if n["id"] not in targets]
+        starts = self._entry_nodes(nodes, edges)
         if not starts:
             await self.log("error", f"{prefix}流程缺少起始节点，这一段不会执行")
             return
@@ -373,78 +493,282 @@ class Executor:
         if unreachable:
             await self.log("warn", f"{prefix}{len(unreachable)} 个节点从起始节点不可达，不会执行: {unreachable}")
         start_id = starts[0]
-        # 「单次执行」的作用域：顶层跨轮次生效；子脚本内每次被调用重新计
         executed_once: set[str] = set()
 
-        for r in range(repeat):
-            if self.stopped:
-                await self.log("warn", f"{prefix}已手动停止")
-                if not scope:
-                    self._ov(r + 1, repeat, "已手动停止")
-                return
-            if not scope:
-                # 只有最外层推进悬浮框的轮数：子脚本内部沿用外层的进度，
-                # 否则一进子脚本悬浮框就跳回 1/1，看起来像重新开始了
-                self._ov_loop, self._ov_total = r + 1, repeat
-                await self.log("info", f"--- 第 {r + 1}/{repeat} 轮 ---")
-                self._ov(r + 1, repeat, "本轮开始")
-            else:
-                await self.log("debug", f"{prefix}开始（第 {r + 1}/{repeat} 遍）")
-            current = start_id
-            visited = 0
-            max_steps = max(1000, len(node_map) * 100)  # 单轮步数上限，防无终止环空转
-            while current and not self.stopped:
-                # 暂停检查点：在节点边界等待。放在这里（而不是从节点内部硬中断）
-                # 是因为它天然不会重复执行已完成的动作，恢复后正好从当前节点继续。
-                await self._wait_if_paused()
+        try:
+            for r in range(repeat):
                 if self.stopped:
-                    break
-                visited += 1
-                if visited > max_steps:
-                    await self.log(
-                        "error", f"{prefix}单轮执行超过 {max_steps} 步（疑似无终止条件的环），已停止"
-                    )
-                    # 顶层终止整次运行；子脚本内只结束这一段，把控制权还给调用方
+                    await self.log("warn", f"{prefix}已手动停止")
                     if not scope:
-                        self.stopped = True
+                        self._ov(r + 1, repeat, "已手动停止")
                     return
-                node = node_map.get(current)
-                if not node:
-                    break
-                ntype = node.get("type")
-                params = node.get("params") or {}
-                once = bool(node.get("once"))
+                if not scope:
+                    self._ov_loop, self._ov_total = r + 1, repeat
+                    await self.log("info", f"--- 第 {r + 1}/{repeat} 轮 ---")
+                    self._ov(r + 1, repeat, "本轮开始")
+                else:
+                    await self.log("debug", f"{prefix}开始（第 {r + 1}/{repeat} 遍）")
+                await self._walk(start_id, node_map, adj, prefix, executed_once)
+        except EndScript:
+            await self.log("info", f"{prefix}脚本被「终止」节点结束")
+        except BreakLoop:
+            # 顶层（不在任何循环里）用了「结束当前循环」：没有循环可结束，当作这一段结束
+            await self.log("warn", f"{prefix}「终止」节点设置了结束循环，但这里不在任何循环里，已忽略")
+        if self.stopped:
+            return
 
-                if ntype == "terminate":
-                    await self.log("info", f"{prefix}触发终止条件，立即停止运行")
-                    self._ov_text("触发终止条件")
-                    self.stopped = True
-                    return
+    async def _walk(
+        self,
+        start_id: str,
+        node_map: dict,
+        adj: dict,
+        prefix: str,
+        executed_once: set[str],
+        stop_id: str | None = None,
+    ) -> str:
+        """从 start_id 顺着连线走，直到终端 / stop_id / 停止。
 
-                if ntype == "judge":
-                    self._ov_text(f"{prefix}{self._step_text(node)}")
-                    found = await self._do_judge(params, input_mode, hwnd)
-                    label = "yes" if found else "no"
-                    nxt = [t for (h, t) in adj.get(current, []) if h == label]
-                    current = nxt[0] if nxt else None
-                    continue
+        返回 'end'（走到尽头）/ 'backedge'（走到 stop_id，即循环体回到循环节点）/ 'overflow'。
+        """
+        current: str | None = start_id
+        visited = 0
+        max_steps = max(1000, len(node_map) * 100)
+        while current and not self.stopped:
+            if stop_id and current == stop_id:
+                return 'backedge'
+            await self.wait_if_paused()
+            if self.stopped:
+                break
+            visited += 1
+            if visited > max_steps:
+                await self.log(
+                    "error", f"{prefix}单轮执行超过 {max_steps} 步（疑似无终止条件的环），已停止"
+                )
+                self.stopped = True
+                return 'overflow'
+            node = node_map.get(current)
+            if not node:
+                break
+            ntype = normalize_type(node.get("type"))
+            params = node.get("params") or {}
+            once = bool(node.get("once"))
 
-                # 单次执行：后续轮次跳过（但仍沿连线继续）
-                if once and current in executed_once:
-                    nxt = adj.get(current, [])
-                    current = nxt[0][1] if nxt else None
-                    continue
+            # 单次执行：后续轮次跳过，但仍沿连线继续（判断/终止节点没有"执行"的意义）
+            if once and current in executed_once and ntype not in ('judge', 'loop', 'terminate'):
+                outs = adj.get(current, [])
+                current = outs[0][1] if outs else None
+                continue
 
-                await self.log("info", f"{prefix}节点: {ntype}", current)
-                self._ov_text(f"{prefix}{self._step_text(node)}")
+            self.last_message = ''
+            try:
+                await self.log("debug", f"{prefix}节点: {ntype}", current)
+                self._ov_text(f"{prefix}{_STEP_LABEL.get(ntype, ntype)}")
+                branch = await self._exec_node(node, ntype, params, node_map, adj, prefix)
+            except (BreakLoop, EndScript):
+                raise  # 控制信号，交给循环 / 脚本作用域处理
+            except Exception as e:
+                # 广播层或节点框架出问题也不能静默消失，更不能把整轮挂掉：
+                # 记到当前节点名下，然后沿默认出口继续（挂机场景更稳）
+                await self.log("error", f"{prefix}节点执行失败({ntype}): {e}", current)
+                branch = None
+            executed_once.add(current)
+
+            if branch is None:
+                outs = adj.get(current, [])
+                current = outs[0][1] if outs else None
+            else:
+                current = self._pick_target(adj.get(current, []), branch)
+        return 'end'
+
+    @staticmethod
+    def _pick_target(outs: list[tuple[str, str]], handle: str) -> str | None:
+        """按出口名挑下一个节点。
+
+        找不到该出口的连线时**退回默认出口**（sourceHandle 为空的那条）：
+        画布上"判断节点只连了一条线"很常见（用户还在搭），这种时候不应该直接断流。
+        """
+        for h, t in outs:
+            if h == handle:
+                return t
+        for h, t in outs:
+            if not h:
+                return t
+        return None
+
+    async def _exec_node(
+        self, node: dict, ntype: str, params: dict, node_map: dict, adj: dict, prefix: str
+    ) -> str | None:
+        """执行一个节点。返回出口名（分支节点）或 None（普通节点 / 已处理）。"""
+        if ntype == 'terminate':
+            await self._do_terminate(params, prefix)
+            return None
+
+        if ntype == 'judge':
+            try:
+                ok = eval_conditions(params, self.vars)
+            except Exception as e:
+                await self.log("error", f"{prefix}判断条件求值失败（{e}），按「否」分支继续")
+                ok = False
+            self.last_message = '是' if ok else '否'
+            await self.log("info", f"{prefix}判断 → {'是' if ok else '否'}")
+            return 'yes' if ok else 'no'
+
+        if ntype == 'loop':
+            await self._exec_loop(node, ntype, params, node_map, adj, prefix)
+            return 'next'
+
+        if ntype == 'script_call':
+            await self._call_script(params, prefix)
+            return None
+
+        handler = nodemod.HANDLERS.get(ntype)
+        if handler is None:
+            await self.log("warn", f"{prefix}未知节点类型: {ntype}")
+            return None
+        try:
+            await handler(self, params)
+        except Exception as e:
+            # 单步失败只记录，不中断整个流程（挂机场景更稳）
+            await self.log("error", f"{prefix}节点执行失败({ntype}): {e}", node.get("id"))
+        return None
+
+    async def _do_terminate(self, params: dict, prefix: str) -> None:
+        """终止节点：按 level 决定终止范围。"""
+        level = str(params.get('level') or 'workflow')
+        msg = interpolate(params.get('message') or '', self.vars).strip()
+        tail = f"（{msg}）" if msg else ""
+        if level == 'loop':
+            await self.log("info", f"{prefix}终止：结束当前循环{tail}")
+            self._ov_text("结束当前循环")
+            raise BreakLoop
+        if level == 'script':
+            await self.log("info", f"{prefix}终止：结束当前脚本{tail}")
+            self._ov_text("结束当前脚本")
+            raise EndScript
+        await self.log("info", f"{prefix}终止：停止整个工作流{tail}")
+        self._ov_text("已终止工作流")
+        self.stopped = True
+
+    async def _exec_loop(self, node: dict, ntype: str, params: dict, node_map: dict, adj: dict, prefix: str) -> None:
+        """循环节点。
+
+        循环体从 `body` 出口出去，末尾连回循环节点自身（或 dead-end）表示"这一轮结束"。
+        循环结束后由调用方从 `next` 出口继续。
+
+        安全阀：条件循环 / 无限循环都必须有 max_iterations（界面默认 1000），
+        否则一个"条件永远为真"的循环会把程序挂死，而用户完全无从下手。
+        """
+        mode = str(params.get('mode') or 'times')
+        outs = adj.get(node.get('id'), [])
+        body_start = self._pick_target(outs, 'body')
+        index_var = interpolate(params.get('index_var') or '', self.vars).strip()
+        interval_ms = max(0, int(self._safe_float(params.get('interval_ms'), 0)))
+        loop_id = node.get('id')
+
+        if mode == 'times':
+            total = max(1, min(1000000, int(self._safe_float(params.get('times'), 10))))
+            plan = f'固定 {total} 次'
+        elif mode == 'condition':
+            total = max(1, min(10000000, int(self._safe_float(params.get('max_iterations'), 1000))))
+            plan = f'条件循环（上限 {total} 轮）'
+        else:
+            total = max(1, min(10000000, int(self._safe_float(params.get('max_iterations'), 1000))))
+            plan = f'无限循环（上限 {total} 轮）'
+
+        if not body_start:
+            await self.log('warn', f'{prefix}循环节点没有连「循环体」出口，{plan} 只会空转等待')
+        await self.log('info', f'{prefix}循环开始：{plan}')
+
+        done = 0
+        for i in range(total):
+            if self.stopped:
+                return
+            if mode == 'condition':
                 try:
-                    await self._run_step(node, input_mode, hwnd, scale_fn)
+                    if not eval_conditions(params, self.vars):
+                        await self.log('info', f'{prefix}循环：条件不再满足，提前结束（已跑 {done} 轮）')
+                        break
                 except Exception as e:
-                    # 单步失败只记录，不中断整个流程（挂机场景更稳）
-                    await self.log("error", f"{prefix}节点执行失败({ntype}): {e}", current)
-                executed_once.add(current)
-                nxt = adj.get(current, [])
-                current = nxt[0][1] if nxt else None
+                    await self.log('error', f'{prefix}循环条件求值失败（{e}），提前结束')
+                    break
+            if index_var:
+                self.vars.set(index_var, i + 1)
+            self._ov_text(f'{prefix}循环 {i + 1}/{total}')
+            if body_start:
+                try:
+                    await self._walk(
+                        body_start, node_map, adj, f'{prefix}循环体·第{i + 1}轮', set(), stop_id=loop_id
+                    )
+                except BreakLoop:
+                    await self.log('info', f'{prefix}循环：被「终止」节点中断（已跑 {i + 1} 轮）')
+                    done = i + 1
+                    break
+            done = i + 1
+            if interval_ms > 0:
+                await self.sleep(interval_ms / 1000.0)
+        else:
+            if mode != 'times':
+                await self.log('warn', f'{prefix}循环：达到最大轮数 {total} 仍未满足退出条件，已强制结束')
+        await self.log('info', f'{prefix}循环结束：共 {done} 轮')
+
+    @staticmethod
+    def _safe_float(raw, default: float) -> float:
+        try:
+            v = float(str(raw).strip()) if not isinstance(raw, (int, float)) else float(raw)
+        except (TypeError, ValueError):
+            return float(default)
+        return v if v == v else float(default)  # NaN 兜底
+
+    async def _call_script(self, params: dict, prefix: str) -> None:
+        """执行「调用脚本」：把子脚本那一层图就地走一遍。"""
+        sid = interpolate(params.get('script_id') or '', self.vars).strip()
+        if not sid:
+            await self.log("error", f"{prefix}调用脚本：这一步还没有选择要调用的子脚本，已跳过")
+            return
+
+        sub = self.scripts.get(sid)
+        if sub is None:
+            have = "、".join(f"「{n}」" for n in name_map(self.scripts).values()) or "（本文件里没有任何子脚本）"
+            await self.log(
+                "error",
+                f"{prefix}调用脚本：找不到要调用的脚本「{params.get('name') or sid}」。"
+                f"这份脚本里现有的子脚本是：{have}。"
+                "请在编辑器里重新选择，或把缺失的子脚本导入回来。",
+            )
+            return
+
+        chain_names = [f"「{e['name']}」" for e in self.call_stack] + [f"「{sub['name']}」"]
+        chain = " → ".join(chain_names)
+        for e in self.call_stack:
+            if e["id"] == sid:
+                await self.log(
+                    "error",
+                    f"{prefix}调用脚本：检测到循环调用，已停止这一支。\n调用链：{chain}\n"
+                    "（脚本之间不允许互相调用成环，请打断其中一条调用）",
+                )
+                return
+        if len(self.call_stack) >= MAX_SCRIPT_DEPTH:
+            await self.log(
+                "error",
+                f"{prefix}调用脚本：嵌套层数超过上限（{MAX_SCRIPT_DEPTH} 层），已停止这一支。\n调用链：{chain}",
+            )
+            return
+
+        nodes = sub.get("nodes") or []
+        if not nodes:
+            await self.log("warn", f"{prefix}调用脚本：子脚本「{sub['name']}」是空的，已跳过")
+            return
+
+        await self.log("info", f"{prefix}进入子脚本「{sub['name']}」（第 {len(self.call_stack) + 1} 层）")
+        self.call_stack.append({"id": sid, "name": sub["name"]})
+        try:
+            await self._run_graph(nodes, sub.get("edges") or [], 1, scope=f"子脚本「{sub['name']}」")
+        finally:
+            # 异常安全出栈：漏掉一次 pop，之后所有调用都会被误判成"嵌套过深"
+            self.call_stack.pop()
+        if self.stopped:
+            return
+        await self.log("info", f"{prefix}子脚本「{sub['name']}」执行完成")
 
     @staticmethod
     def _reachable(adj: dict, start: str) -> set[str]:
@@ -458,320 +782,48 @@ class Executor:
             stack.extend(t for _, t in adj.get(cur, []))
         return seen
 
-    async def _do_judge(self, params: dict, input_mode: str, hwnd) -> bool:
-        tpl_id = params.get("template")
-        threshold = float(params.get("threshold", 0.85))
-        timeout_ms = int(params.get("timeout_ms", 5000))
-        try:
-            template = await asyncio.to_thread(vision.load_template, tpl_id)
-        except (FileNotFoundError, ValueError) as e:
-            await self.log("error", f"判断模板不可用: {e}")
-            return False
-        meta = await asyncio.to_thread(vision.load_template_meta, tpl_id)
-        start = time.time()
-        while not self.stopped:
-            try:
-                frame = await asyncio.to_thread(self._capture, hwnd, input_mode)
-                found, _, _, score, scale = await asyncio.to_thread(
-                    vision.match_template_auto, frame, template, meta, threshold
-                )
-            except Exception as e:
-                await self.log("error", f"判断截图失败: {e}")
-                return False
-            if found:
-                extra = f"，缩放 x{scale:.2f}" if abs(scale - 1) > 0.01 else ""
-                await self.log("info", f"判断：找到「{tpl_id}」（{score:.3f}{extra}）→ 成功分支")
-                return True
-            if time.time() - start > timeout_ms / 1000:
-                await self.log("info", f"判断：超时未找到「{tpl_id}」→ 失败分支")
-                return False
-            await asyncio.sleep(0.2)
-        return False
+    @staticmethod
+    def _entry_nodes(nodes: list, edges: list) -> list[str]:
+        """找流程入口节点。
 
-    async def _run_step(self, node: dict, input_mode: str, hwnd, scale_fn=None) -> None:
-        stype = node.get("type")
-        params = node.get("params") or {}
-        if stype == "delay":
-            total_ms = max(0, int(params.get("ms", 1000)))
-            if total_ms <= 0:
-                await self.log("warn", "延时为 0ms，跳过")
-                return
-            remaining = total_ms
-            while remaining > 0:
-                if self.stopped:
-                    await self.log("warn", f"延时被中断（剩余 {remaining}ms）")
-                    return
-                chunk = min(1000, remaining)
-                await self.log("debug", f"正在延时… 剩余 {remaining}ms")
-                # 每个 1 秒的分段再拆成 250ms 小睡并检查停止标志。
-                # 挂机脚本里的单个延时动辄几十秒，若整段睡死，"停止"要等它走完才生效，
-                # 表现得就像「点了停止没反应」（悬浮框与 WebUI 的停止按钮都会被拖住）。
-                left = chunk
-                while left > 0:
-                    if self.stopped:
-                        await self.log("warn", f"延时被中断（剩余 {remaining - (chunk - left)}ms）")
-                        return
-                    # 暂停检查点：暂停时余下的延时不再流逝，恢复后继续把剩余时间睡完
-                    await self._wait_if_paused()
-                    if self.stopped:
-                        await self.log("warn", f"延时被中断（剩余 {remaining - (chunk - left)}ms）")
-                        return
-                    take = min(250, left)
-                    await asyncio.sleep(take / 1000)
-                    left -= take
-                remaining -= chunk
-        elif stype == "find_image":
-            await self._do_find(params, input_mode, hwnd)
-        elif stype == "click":
-            x, y = int(params.get("x", 0)), int(params.get("y", 0))
-            if scale_fn:
-                x, y = scale_fn(x, y)
-            await asyncio.to_thread(
-                inputctl.click, x, y, params.get("button", "left"),
-                int(params.get("clicks", 1)), input_mode, hwnd,
-            )
-            await self.log("debug", f"点击 ({x}, {y}) 按键={params.get('button', 'left')} 模式={input_mode}")
-        elif stype == "key":
-            key = str(params.get("key", ""))
-            await asyncio.to_thread(inputctl.press_key, key, input_mode, hwnd)
-            await self.log("debug", f"按键 {key} 模式={input_mode}")
-        elif stype == "text":
-            text = str(params.get("text", ""))
-            await asyncio.to_thread(inputctl.type_text, text, input_mode, hwnd)
-            await self.log("debug", f"输入文本 {text!r}")
-        elif stype == "macro":
-            await self._run_macro(params, input_mode, hwnd, scale_fn)
-        elif stype == "autoclick":
-            await self._do_autoclick(params, input_mode, hwnd, scale_fn)
-        elif stype == "script_call":
-            await self._call_script(params, input_mode, hwnd, scale_fn)
-        else:
-            await self.log("warn", f"未知节点类型: {stype}")
-
-    async def _call_script(self, params: dict, input_mode: str, hwnd, scale_fn) -> None:
-        """执行「调用脚本」：把子脚本那一层图就地走一遍。
-
-        所有拒绝路径都**只跳过这一步**，不中断整个流程 —— 挂机场景里"因为一个子脚本
-        缺失就把整晚的任务停掉"代价太大，而且错误信息都写清了怎么办。
-        唯一的例外是 terminate（子脚本里触发终止条件），那条路径会正常向上传播停止。
+        朴素做法是「没有入边的节点」，但循环体末尾会连回循环节点自身，
+        于是循环节点也有了入边 —— 一个「以循环开头」的流程反而找不到入口。
+        这里先识别出成环的节点对（互相可达），把**环内部的边**排除后再算入度，
+        循环节点就能重新作为入口被选出来。
         """
-        sid = str(params.get("script_id") or "").strip()
-        if not sid:
-            await self.log("error", "调用脚本：这一步还没有选择要调用的子脚本，已跳过（请到编辑器里选择）")
-            return
+        ids = [n["id"] for n in nodes]
+        idset = set(ids)
+        g: dict[str, list[str]] = {i: [] for i in ids}
+        for e in edges:
+            s, t = e.get("source"), e.get("target")
+            if s in idset and t in idset:
+                g[s].append(t)
 
-        sub = self.scripts.get(sid)
-        if sub is None:
-            have = "、".join(f"「{n}」" for n in name_map(self.scripts).values()) or "（本文件里没有任何子脚本）"
-            await self.log(
-                "error",
-                f"调用脚本：找不到要调用的脚本「{params.get('name') or sid}」。"
-                f"这份脚本里现有的子脚本是：{have}。"
-                "出现这种情况通常是：子脚本被删除了，或者这份脚本是从别处拷来的、缺少内嵌的子脚本。"
-                "请在编辑器里重新选择，或把缺失的子脚本导入回来。",
-            )
-            return
+        def reach_from(start: str) -> set[str]:
+            seen: set[str] = set()
+            stack = [start]
+            while stack:
+                cur = stack.pop()
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                stack.extend(g.get(cur, ()))
+            return seen
 
-        # ---- 第三道防线：运行时调用栈 ----
-        # 前两道（编辑时拦截 / 运行前整图检测）已经覆盖绝大多数情况；这里兜住的是
-        # 「流程在运行途中被改」以及「环检测被某种途径绕过」的极端情况。
-        chain_names = [f"「{e['name']}」" for e in self.call_stack] + [f"「{sub['name']}」"]
-        chain = " → ".join(chain_names)
-        for e in self.call_stack:
-            if e["id"] == sid:
-                await self.log(
-                    "error",
-                    f"调用脚本：检测到循环调用，已停止这一支，避免无限嵌套。\n调用链：{chain}\n"
-                    "（脚本之间不允许互相调用成环，请打断其中一条调用）",
-                )
-                return
-        if len(self.call_stack) >= MAX_SCRIPT_DEPTH:
-            await self.log(
-                "error",
-                f"调用脚本：嵌套层数超过上限（{MAX_SCRIPT_DEPTH} 层），已停止这一支，避免无限嵌套。\n"
-                f"调用链：{chain}\n请把其中几层合并成一层。",
-            )
-            return
-
-        nodes = sub.get("nodes") or []
-        if not nodes:
-            await self.log("warn", f"调用脚本：子脚本「{sub['name']}」是空的，已跳过")
-            return
-
-        await self.log("info", f"进入子脚本「{sub['name']}」（第 {len(self.call_stack) + 1} 层）")
-        self.call_stack.append({"id": sid, "name": sub["name"]})
-        try:
-            await self._run_graph(
-                nodes,
-                sub.get("edges") or [],
-                input_mode,
-                hwnd,
-                scale_fn,
-                1,  # 循环由最外层决定，子脚本每次被调用只走一遍
-                scope=f"子脚本「{sub['name']}」",
-            )
-        finally:
-            # 异常安全出栈：漏掉一次 pop，之后所有调用都会被误判成"嵌套过深"
-            self.call_stack.pop()
-        if self.stopped:
-            return
-        await self.log("info", f"子脚本「{sub['name']}」执行完成")
-
-    async def _do_autoclick(self, params: dict, input_mode: str, hwnd, scale_fn=None) -> None:
-        """连点器：在同一个坐标上按固定间隔点 N 次。
-
-        与「鼠标点击」节点的区别：那个是"点一下（可连续 N 下，间隔固定很短的内部实现）"，
-        本节点关心的是**节奏可控的连点**——坐标固定、间隔可调、次数可调，且整个
-        过程可暂停、可停止（每次点击前都查一遍标志，长连点不会卡住停止按钮）。
-
-        interval_ms 是**两次点击之间的间隔**（不是点击按住时长）。
-        """
-        try:
-            x, y = int(params.get("x", 0)), int(params.get("y", 0))
-            count = int(params.get("count", 10))
-            interval_ms = int(params.get("interval_ms", 100))
-        except (TypeError, ValueError):
-            await self.log("error", "连点器参数无效（坐标 / 次数 / 间隔必须是整数）")
-            return
-        button = str(params.get("button", "left"))
-        count = max(1, min(count, 100000))
-        interval_ms = max(0, min(interval_ms, 600000))
-        if scale_fn:
-            x, y = scale_fn(x, y)
-        rate = f"，约 {1000 / interval_ms:.1f} 次/秒" if interval_ms > 0 else ""
-        await self.log(
-            "info",
-            f"连点器开始：坐标 ({x}, {y})，{count} 次，间隔 {interval_ms}ms{rate}",
-        )
-        done = 0
-        for i in range(count):
-            if self.stopped:
-                await self.log("warn", f"连点器被中断（已完成 {done}/{count} 次）")
-                return
-            # 暂停检查点：放在每次点击之前，恢复后正好从下一次接着点，不会重复点
-            await self._wait_if_paused()
-            if self.stopped:
-                await self.log("warn", f"连点器被中断（已完成 {done}/{count} 次）")
-                return
-            try:
-                await asyncio.to_thread(inputctl.click, x, y, button, 1, input_mode, hwnd)
-                done += 1
-            except Exception as e:
-                await self.log("warn", f"连点器第 {i + 1} 次点击失败: {e}")
-            # 间隔按 50ms 切片睡，保证停止/暂停在长间隔下也能及时生效
-            left = interval_ms
-            while left > 0 and not self.stopped:
-                await self._wait_if_paused()
-                if self.stopped:
-                    break
-                take = min(50, left)
-                await asyncio.sleep(take / 1000)
-                left -= take
-        if self.stopped:
-            await self.log("warn", f"连点器被中断（已完成 {done}/{count} 次）")
-            return
-        await self.log("info", f"连点器完成：共点击 {done} 次")
-
-    async def _run_macro(self, params: dict, input_mode: str, hwnd, scale_fn=None) -> None:
-        """回放键鼠录制步骤。"""
-        events = params.get("events") or []
-        try:
-            speed = float(params.get("speed", 1.0) or 1.0)
-        except Exception:
-            speed = 1.0
-        if speed <= 0:
-            speed = 1.0
-        if not events:
-            await self.log("warn", "录制步骤为空，跳过")
-            return
-        await self.log("info", f"回放录制步骤：{len(events)} 个事件，速度 x{speed}")
-        base = time.time() * 1000.0
-        for ev in events:
-            if self.stopped:
-                return
-            target = float(ev.get("t", 0)) / speed
-            wait = target - (time.time() * 1000.0 - base)
-            if wait > 0:
-                await asyncio.sleep(wait / 1000.0)
-            etype = ev.get("type")
-            try:
-                if etype == "mousemove":
-                    x, y = (scale_fn(ev.get("x", 0), ev.get("y", 0)) if scale_fn
-                            else (ev.get("x", 0), ev.get("y", 0)))
-                    await asyncio.to_thread(inputctl.move, x, y, input_mode, hwnd)
-                elif etype == "mousedown":
-                    x, y = (scale_fn(ev.get("x", 0), ev.get("y", 0)) if scale_fn
-                            else (ev.get("x", 0), ev.get("y", 0)))
-                    await asyncio.to_thread(
-                        inputctl.mouse_down, x, y, ev.get("button", "left"), input_mode, hwnd
-                    )
-                elif etype == "mouseup":
-                    x, y = (scale_fn(ev.get("x", 0), ev.get("y", 0)) if scale_fn
-                            else (ev.get("x", 0), ev.get("y", 0)))
-                    await asyncio.to_thread(
-                        inputctl.mouse_up, x, y, ev.get("button", "left"), input_mode, hwnd
-                    )
-                elif etype == "scroll":
-                    sx, sy = (scale_fn(ev.get("x", 0), ev.get("y", 0)) if scale_fn
-                              else (ev.get("x", 0), ev.get("y", 0)))
-                    await asyncio.to_thread(
-                        inputctl.scroll, ev.get("dx", 0), ev.get("dy", 0), input_mode, hwnd, sx, sy
-                    )
-                elif etype == "keydown":
-                    await asyncio.to_thread(inputctl.key_down, str(ev.get("key", "")), input_mode, hwnd)
-                elif etype == "keyup":
-                    await asyncio.to_thread(inputctl.key_up, str(ev.get("key", "")), input_mode, hwnd)
-            except Exception as e:
-                await self.log("warn", f"回放事件失败({etype}): {e}")
-        await self.log("info", "录制回放完成")
-
-    async def _do_find(self, params: dict, input_mode: str, hwnd) -> None:
-        tpl_id = params.get("template")
-        threshold = float(params.get("threshold", 0.85))
-        timeout_ms = int(params.get("timeout_ms", 5000))
-        do_click = bool(params.get("click", False))
-        try:
-            template = await asyncio.to_thread(vision.load_template, tpl_id)
-        except (FileNotFoundError, ValueError) as e:
-            await self.log("error", f"模板不可用: {e}")
-            return
-        meta = await asyncio.to_thread(vision.load_template_meta, tpl_id)
-        offset_x = offset_y = 0
-        if hwnd:
-            rect = window.get_window_rect(hwnd)
-            offset_x, offset_y = rect["left"], rect["top"]
-        start = time.time()
-        while not self.stopped:
-            try:
-                frame = await asyncio.to_thread(self._capture, hwnd, input_mode)
-                found, x, y, score, scale = await asyncio.to_thread(
-                    vision.match_template_auto, frame, template, meta, threshold
-                )
-            except Exception as e:
-                await self.log("error", f"窗口截图失败: {e}")
-                return
-            if found:
-                sx, sy = x + offset_x, y + offset_y
-                extra = f"，缩放 x{scale:.2f}" if abs(scale - 1) > 0.01 else ""
-                await self.log("info", f"找到模板「{tpl_id}」位置 ({sx}, {sy}) 相似度 {score:.3f}{extra}")
-                if do_click:
-                    await asyncio.to_thread(inputctl.click, sx, sy, "left", 1, input_mode, hwnd)
-                    await self.log("info", f"已点击匹配位置 ({sx}, {sy})")
-                return
-            if time.time() - start > timeout_ms / 1000:
-                if params.get("on_timeout") == "exit":
-                    await self.log("warn", f"超时未找到「{tpl_id}」→ 退出运行")
-                    self.stopped = True
-                else:
-                    await self.log("warn", f"超时未找到「{tpl_id}」→ 跳过")
-                return
-            await asyncio.sleep(0.2)
-
-    def _capture(self, hwnd, input_mode: str = "real"):
-        if hwnd:
-            if input_mode == "simulated":
-                # restore_minimized 默认 False：窗口被最小化时报错，而不是把它弹到前台。
-                # 否则用户故意最小化的窗口会被每个找图/判断节点反复弹回（"最小化失败"）。
-                return window.capture_window(hwnd)  # PrintWindow（后台也能截）
-            return window.capture_window_fast(hwnd)  # mss（快，窗口需可见）
-        return vision.grab_frame()
+        reach = {i: reach_from(i) for i in ids}
+        indeg = {i: 0 for i in ids}
+        for e in edges:
+            s, t = e.get("source"), e.get("target")
+            if s not in idset or t not in idset:
+                continue
+            if t in reach[s] and s in reach[t]:
+                continue  # 环内部的边（含循环体回边），不算入度
+            indeg[t] += 1
+        entries = [i for i in ids if indeg[i] == 0]
+        if entries:
+            return entries
+        # 整张图就是一个环、没有外部入口：优先挑循环节点当入口
+        for n in nodes:
+            if normalize_type(n.get("type")) == "loop":
+                return [n["id"]]
+        return ids[:1]

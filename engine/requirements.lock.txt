@@ -1,4 +1,4 @@
-# AutoGameTool engine 依赖锁定快照（engine\.venv 的完整包集合）
+# AutoTool engine 依赖锁定快照（engine\.venv 的完整包集合）
 # 用途：engine\.venv 被删除/迁移后，按本文件精确重建，避免 requirements.txt 拉错版本。
 # 来源：2026-10-03 从迁移前的 .venv\Lib\site-packages\*.dist-info\METADATA 导出，共 39 个包。
 # 重建用法：

@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   配合 tools\ui-editor-checks.mjs 使用。脚本负责把"跑起来"的部分准备好：
-    1. 起一份打包好的引擎（默认取 ..\AutoGameTool-app\，会**先复制到 TEMP 再运行**）
+    1. 起一份打包好的引擎（默认取 ..\AutoTool-app\，会**先复制到 TEMP 再运行**）
     2. 起一个无头 Chrome，开远程调试端口
     3. 跑 node 断言脚本，把结果打到控制台并写文件
     4. 收尾（无论成败都收回引擎与 Chrome 进程）
@@ -24,7 +24,7 @@
 #>
 [CmdletBinding()]
 param(
-  # 引擎产物目录（含 AutoGameTool.exe 与 _internal\）。默认 ..\AutoGameTool-app
+  # 引擎产物目录（含 AutoTool.exe 与 _internal\）。默认 ..\AutoTool-app
   [string]$AppDir,
   # 打包好的或已安装的引擎目录
   [string]$Node,
@@ -42,7 +42,7 @@ $ErrorActionPreference = 'Stop'
 $env:PYTHONIOENCODING = 'utf-8'
 
 $repo = Split-Path $PSScriptRoot -Parent
-if (-not $AppDir) { $AppDir = Join-Path $repo 'AutoGameTool-app' }
+if (-not $AppDir) { $AppDir = Join-Path $repo 'AutoTool-app' }
 $AppDir = (Resolve-Path $AppDir).Path
 
 # ---------- 找 node / chrome ----------
@@ -79,7 +79,7 @@ Write-Host "      浏览器   : $Chrome"
 # ---------- 复制引擎到工作区外再跑 ----------
 $runRoot = Join-Path $env:TEMP 'agt-ui-run'
 $engDir = Join-Path $runRoot 'engine'
-if ($Refresh -or -not (Test-Path (Join-Path $engDir 'AutoGameTool.exe'))) {
+if ($Refresh -or -not (Test-Path (Join-Path $engDir 'AutoTool.exe'))) {
   if (Test-Path $engDir) {
     # 用 Move 而不是删除：本机删除会被 safe-delete 掐断
     Move-Item $engDir (Join-Path $runRoot ('stale-engine-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))) -Force
@@ -109,9 +109,9 @@ $chromeProc = $null
 $exit = 1
 try {
   # ---------- 起引擎 ----------
-  Stop-NamedProcess 'AutoGameTool'
+  Stop-NamedProcess 'AutoTool'
   Start-Sleep -Seconds 1
-  $engineProc = Start-Process -FilePath (Join-Path $engDir 'AutoGameTool.exe') -WorkingDirectory $engDir -PassThru
+  $engineProc = Start-Process -FilePath (Join-Path $engDir 'AutoTool.exe') -WorkingDirectory $engDir -PassThru
   $health = $null
   $ok = $false
   for ($i = 0; $i -lt 40; $i++) {
@@ -126,7 +126,7 @@ try {
   Write-Host ("[3/5] 引擎就绪： " + ($health | ConvertTo-Json -Compress))
 
   $token = ''
-  $tokenFile = Join-Path $env:APPDATA 'AutoGameTool\engine.token'
+  $tokenFile = Join-Path $env:APPDATA 'AutoTool\engine.token'
   if (Test-Path $tokenFile) { $token = (Get-Content $tokenFile -Raw).Trim() }
 
   # ---------- 起无头浏览器 ----------
@@ -156,7 +156,7 @@ try {
   if ($OpenResult -and (Test-Path $outFile)) { Start-Process $outFile }
 } finally {
   if ($chromeProc) { Get-Process -Id $chromeProc.Id -ErrorAction SilentlyContinue | Stop-Process -Force }
-  Stop-NamedProcess 'AutoGameTool'
+  Stop-NamedProcess 'AutoTool'
   Write-Host '已收尾（引擎与无头浏览器均已关闭）'
 }
 

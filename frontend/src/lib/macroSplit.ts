@@ -1,26 +1,30 @@
 /**
  * 键鼠录制的「拆分」与「打包」：两者互为逆操作，都是纯函数。
  *
- * 拆分（录制事件 → 流程步骤）的合并规则
- *  - mousedown + 紧随的 mouseup（同键） → 一个鼠标点击（保留按下时的坐标）
- *  - 一段连续的按键（含组合键 ctrl+shift+a）→ 一个键盘按键
- *  - 连续滚轮 → 合并成一个录制步骤（引擎暂无独立滚轮节点）
- *  - mousemove 一律丢弃：点击节点自带坐标，回放时会把光标移到该坐标
- *  - 事件之间的间隔 >= minGapMs（见 expandPieces）时插入一个延时节点，保留原有节奏
+ * 拆分（录制事件 → 流程节点）的合并规则
+ *  - mousedown + 紧随的 mouseup（同键） → 一个「鼠标操作」节点（action=click，保留按下时的坐标）
+ *  - 一段连续的按键（含组合键 ctrl+shift+a）→ 一个「键盘按键」节点（action=press，keys=组合键）
+ *  - 连续滚轮 → 合并成一个录制节点（滚轮序列含多次不同方向的滚动，
+ *    逐条摊成「鼠标操作(wheel)」会炸出几十个节点，保持原样更实在）
+ *  - mousemove 一律丢弃：鼠标操作节点自带坐标，回放时会把光标移到该坐标
+ *  - 事件之间的间隔 >= minGapMs（见 expandPieces）时插入一个「延时」节点，保留原有节奏
  *
- * 打包（选中的相邻流程步骤 → 一个录制步骤）见 packStepsToMacro。
+ * 打包（选中的相邻流程节点 → 一个录制节点）见 packStepsToMacro。
+ *
+ * ⚠️ 节点类型/参数是「新旧通用」的：这里产出的都是 0.1.3 的新节点形态
+ * （mouse / keyboard / record），老文件由 lib/migrateFlow.ts 在加载时升级。
  */
-import type { StepType } from '../types'
+import type { NodeType } from '../types'
 
 export interface MacroPiece {
-  stepType: StepType
+  nodeType: NodeType
   params: Record<string, any>
   /** 该动作之前需要等待的毫秒数 */
   gapMs: number
 }
 
 export interface MacroStep {
-  stepType: StepType
+  nodeType: NodeType
   params: Record<string, any>
 }
 
@@ -46,7 +50,7 @@ export function compileMacroPieces(events: any[], speed = 1.0): MacroPiece[] {
 
   const flushScrolls = (t: number): void => {
     if (!scrolls.length) return
-    pieces.push({ stepType: 'macro', params: { events: scrolls, speed }, gapMs: takeGap(t) })
+    pieces.push({ nodeType: 'record', params: { events: scrolls, speed }, gapMs: takeGap(t) })
     scrolls = []
   }
 
@@ -74,12 +78,12 @@ export function compileMacroPieces(events: any[], speed = 1.0): MacroPiece[] {
         if (upT > lastT) lastT = upT
       }
       pieces.push({
-        stepType: 'click',
+        nodeType: 'mouse',
         params: {
+          action: 'click',
           x: Math.round(Number(ev.x) || 0),
           y: Math.round(Number(ev.y) || 0),
           button: ev.button || 'left',
-          clicks: 1,
         },
         gapMs: gap,
       })
@@ -106,7 +110,7 @@ export function compileMacroPieces(events: any[], speed = 1.0): MacroPiece[] {
       held = held.filter((k) => k !== key)
       if (group.length) {
         // 本轮第一个抬起 → 此刻 group 完整，结算成一个组合键节点（如 ctrl+shift+a）
-        pieces.push({ stepType: 'key', params: { key: group.join('+') }, gapMs: takeGap(groupAt) })
+        pieces.push({ nodeType: 'keyboard', params: { action: 'press', keys: group.join('+') }, gapMs: takeGap(groupAt) })
         group = []
       }
       continue
@@ -115,7 +119,7 @@ export function compileMacroPieces(events: any[], speed = 1.0): MacroPiece[] {
 
   // 录制在按键尚未抬起时结束：把仍按着的键也结算掉
   if (group.length) {
-    pieces.push({ stepType: 'key', params: { key: group.join('+') }, gapMs: takeGap(groupAt) })
+    pieces.push({ nodeType: 'keyboard', params: { action: 'press', keys: group.join('+') }, gapMs: takeGap(groupAt) })
   }
   const lastEventT = Number(events[events.length - 1]?.t) || lastT
   flushScrolls(lastEventT)
@@ -123,18 +127,18 @@ export function compileMacroPieces(events: any[], speed = 1.0): MacroPiece[] {
   return pieces
 }
 
-/** 把片段展开成最终步骤序列：间隔足够大的位置插入延时节点。 */
+/** 把片段展开成最终节点序列：间隔足够大的位置插入延时节点。 */
 export function expandPieces(pieces: MacroPiece[], minGapMs = 80): MacroStep[] {
   const steps: MacroStep[] = []
   for (const p of pieces) {
-    if (p.gapMs >= minGapMs) steps.push({ stepType: 'delay', params: { ms: p.gapMs } })
-    steps.push({ stepType: p.stepType, params: p.params })
+    if (p.gapMs >= minGapMs) steps.push({ nodeType: 'delay', params: { ms: p.gapMs } })
+    steps.push({ nodeType: p.nodeType, params: p.params })
   }
   return steps
 }
 
 // ---------------------------------------------------------------------------
-// 反向操作：把一串相邻步骤打包回一个「键鼠录制」步骤
+// 反向操作：把一串相邻节点打包回一个「键鼠录制」节点
 // ---------------------------------------------------------------------------
 
 /** 打包时一次点击的按下时长。
@@ -147,7 +151,7 @@ export const CLICK_GAP_MS = 40
 export const KEY_HOLD_MS = 60
 
 export interface PackStep {
-  stepType: StepType
+  nodeType: NodeType
   params: Record<string, any>
 }
 
@@ -155,69 +159,96 @@ export interface PackResult {
   ok: boolean
   /** 打包出的事件序列（ok=false 时为空） */
   events: any[]
-  /** 无法打包进录制的步骤类型（去重） */
-  badTypes: StepType[]
-}
-
-/** 这些步骤类型表达不了"键鼠事件"，因此不能被打包进录制步骤。
- *  autoclick（连点器）虽然是鼠标动作，但它的语义是"按这个节奏点 N 次"，
- *  录制里没有等价的"节奏 + 次数"表达，硬塞进去会悄悄丢掉次数与间隔。 */
-const UNPACKABLE: StepType[] = ['find_image', 'judge', 'text', 'terminate', 'autoclick']
-
-/** 某个步骤类型能否被打包进录制。 */
-export function canPack(stepType: StepType): boolean {
-  return !UNPACKABLE.includes(stepType)
+  /** 无法打包进录制的节点（去重） */
+  badTypes: NodeType[]
 }
 
 /**
- * 把一串**按执行顺序排列**的步骤打包成一个录制事件序列（拆分的逆操作）。
+ * 只有这四类节点能表达成「键鼠事件」；其余一律拒绝打包。
  *
- *  - 延时节点 → 时间轴向前推进（不产生事件）
- *  - 点击节点 → mousedown + mouseup（保留坐标与按键；clicks>1 时重复若干下）
- *  - 按键节点 → 组合键按顺序按下、逆序抬起
- *  - 录制节点 → 其事件按自身 speed 换算成真实时间后内联进来（可嵌套合并）
- *  - 找图 / 判断 / 文本 / 终止 → 无法表达为键鼠事件，整体拒绝打包
+ * 用白名单而不是黑名单：0.1.3 起节点从 10 个扩到 25 个，黑名单会被漏掉一半
+ * （漏掉的表现是"打包成功、但某些参数被悄悄丢掉"，比直接拒绝危险得多）。
+ */
+const PACKABLE: NodeType[] = ['mouse', 'keyboard', 'delay', 'record']
+
+/** 某个节点类型能否被打包进录制。 */
+export function canPack(nodeType: NodeType): boolean {
+  return PACKABLE.includes(nodeType)
+}
+
+/**
+ * 把一串**按执行顺序排列**的节点打包成一个录制事件序列（拆分的逆操作）。
  *
- * 只要有一个步骤不能打包就返回 ok=false（不做部分打包），调用方据此提示用户。
+ *  - 延时节点   → 时间轴向前推进（不产生事件）
+ *  - 鼠标操作   → move/down/up/click/double_click/right_click/middle_click/wheel 各自展开
+ *  - 键盘按键   → press：按顺序按下、逆序抬起；down/up：只按下/只抬起
+ *  - 录制节点   → 其事件按自身 speed 换算成真实时间后内联进来（可嵌套合并）
+ *  - 其余节点（找图/判断/连点器/变量/系统…）→ 无法表达成键鼠事件，整体拒绝打包
+ *
+ * 只要有一个节点不能打包就返回 ok=false（不做部分打包），调用方据此提示用户。
  */
 export function packStepsToMacro(steps: PackStep[]): PackResult {
   const events: any[] = []
-  const bad: StepType[] = []
+  const bad: NodeType[] = []
   let t = 0
 
   for (const s of steps || []) {
     const p = s?.params || {}
-    switch (s?.stepType) {
+    switch (s?.nodeType) {
       case 'delay': {
         const ms = Math.max(0, Number(p.ms) || 0)
         t += ms
         break
       }
-      case 'click': {
+      case 'mouse': {
+        const action = String(p.action || 'click')
         const x = Math.round(Number(p.x) || 0)
         const y = Math.round(Number(p.y) || 0)
         const button = p.button || 'left'
-        const clicks = Math.max(1, Math.min(10, Number(p.clicks) || 1))
-        for (let i = 0; i < clicks; i++) {
-          events.push({ t, type: 'mousedown', x, y, button })
+        if (action === 'move') {
+          events.push({ t, type: 'mousemove', x, y })
+          break
+        }
+        if (action === 'wheel') {
+          events.push({ t, type: 'scroll', x, y, dx: Number(p.dx) || 0, dy: Number(p.dy) || 0 })
+          break
+        }
+        if (action === 'down' || action === 'up') {
+          events.push({ t, type: action === 'down' ? 'mousedown' : 'mouseup', x, y, button })
+          break
+        }
+        // click / double_click / right_click / middle_click
+        const btn = action === 'right_click' ? 'right' : action === 'middle_click' ? 'middle' : button
+        const times = action === 'double_click' ? 2 : Math.max(1, Math.min(10, Number(p.clicks) || 1))
+        for (let i = 0; i < times; i++) {
+          events.push({ t, type: 'mousedown', x, y, button: btn })
           t += CLICK_HOLD_MS
-          events.push({ t, type: 'mouseup', x, y, button })
-          if (i + 1 < clicks) t += CLICK_GAP_MS
+          events.push({ t, type: 'mouseup', x, y, button: btn })
+          if (i + 1 < times) t += CLICK_GAP_MS
         }
         break
       }
-      case 'key': {
-        const parts = String(p.key || '')
+      case 'keyboard': {
+        const action = String(p.action || 'press')
+        const parts = String(p.keys || p.key || '')
           .split('+')
           .map((k) => k.trim().toLowerCase())
           .filter(Boolean)
         if (!parts.length) break
+        if (action === 'down') {
+          for (const k of parts) events.push({ t, type: 'keydown', key: k })
+          break
+        }
+        if (action === 'up') {
+          for (const k of parts) events.push({ t, type: 'keyup', key: k })
+          break
+        }
         for (const k of parts) events.push({ t, type: 'keydown', key: k })
         t += KEY_HOLD_MS
         for (const k of [...parts].reverse()) events.push({ t, type: 'keyup', key: k })
         break
       }
-      case 'macro': {
+      case 'record': {
         const inner: any[] = Array.isArray(p.events) ? p.events : []
         const innerSpeed = Number(p.speed) > 0 ? Number(p.speed) : 1
         let last = 0
@@ -231,7 +262,7 @@ export function packStepsToMacro(steps: PackStep[]): PackResult {
         break
       }
       default:
-        bad.push(s?.stepType)
+        bad.push(s?.nodeType)
         break
     }
   }
@@ -250,7 +281,7 @@ export function splitAgain(events: any[], minGapMs = 80): MacroStep[] {
 /**
  * 把选中的节点按连线顺序排成一条链；不是「一条连续链」时返回 null。
  *
- * 打包合并要求选中的步骤首尾相接，判定条件：
+ * 打包合并要求选中的节点首尾相接，判定条件：
  *  - 选中集合内部恰好有一个"没有入边"的头（0 个 = 成环，多个 = 不是一条链）
  *  - 顺流而下时中间不能有分支（判断节点有两条出边，表达不了先后顺序）
  *  - 这条链必须覆盖**全部**选中节点（否则有游离在外的）
@@ -304,7 +335,7 @@ export const ROW_PITCH = 78
  * 网格行列数：先用满可视高度得到 rows，再向右折行得到 cols。
  *
  * 列数刻意凑成**奇数**：蛇形走位下偶数列自上而下、奇数列自下而上，列数为奇数时
- * 最后一个步骤落在最右一列的下行方向上，更靠近原来的后继节点。
+ * 最后一个节点落在最右一列的下行方向上，更靠近原来的后继节点。
  *
  * 注意：最后一列不一定填满（count 不是 cols 的整数倍时），此时"出口"会停在那一列
  * 的中间。这是为了让**块内每一条连线都首尾相接**（相邻两步不是同列上下相邻、就是
@@ -319,14 +350,14 @@ export function splitGridLayout(count: number, viewportH = 520): { rows: number;
   return { rows: Math.ceil(n / cols), cols }
 }
 
-/** 第 i 个步骤在蛇形网格里的行列：偶数列自上而下，奇数列自下而上。 */
+/** 第 i 个节点在蛇形网格里的行列：偶数列自上而下，奇数列自下而上。 */
 export function gridSlot(i: number, rows: number): { col: number; row: number } {
   const col = Math.floor(i / rows)
   const pos = i % rows
   return { col, row: col % 2 === 0 ? pos : rows - 1 - pos }
 }
 
-/** 直接给出 count 个步骤相对原点的网格坐标（编辑器用它摆位，也可单独断言）。 */
+/** 直接给出 count 个节点相对原点的网格坐标（编辑器用它摆位，也可单独断言）。 */
 export function splitGridPositions(count: number, viewportH = 520): { x: number; y: number }[] {
   const { rows } = splitGridLayout(count, viewportH)
   const out: { x: number; y: number }[] = []

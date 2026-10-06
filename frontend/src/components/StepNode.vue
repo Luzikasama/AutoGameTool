@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, inject } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
-import { STEP_META } from '../types'
+import { BRANCH_BODY, BRANCH_NEXT, BRANCH_NO, BRANCH_YES, CATEGORY_META, NODE_META } from '../types'
+import { UNARY_OPS } from '../lib/nodeSchema'
 
 const props = defineProps<{
-  data: { stepType: string; label: string; params: Record<string, any>; once?: boolean }
+  data: { nodeType: string; label: string; params: Record<string, any>; once?: boolean }
   selected?: boolean
 }>()
 
@@ -15,11 +16,15 @@ const props = defineProps<{
  */
 const scriptExists = inject<(id: string) => boolean>('scriptExists', () => true)
 
-const meta = computed(() => STEP_META[props.data.stepType as keyof typeof STEP_META])
+const meta = computed(() => NODE_META[props.data.nodeType as keyof typeof NODE_META])
+const cat = computed(() => (meta.value ? CATEGORY_META[meta.value.category] : undefined))
+const color = computed(() => cat.value?.color || '#888')
 
-const isJudge = computed(() => props.data.stepType === 'judge')
-const isTerminate = computed(() => props.data.stepType === 'terminate')
-const isScriptCall = computed(() => props.data.stepType === 'script_call')
+const isJudge = computed(() => props.data.nodeType === 'judge')
+const isLoop = computed(() => props.data.nodeType === 'loop')
+/** 终止节点没有出口：它的作用就是断在这里 */
+const isTerminate = computed(() => props.data.nodeType === 'terminate')
+const isScriptCall = computed(() => props.data.nodeType === 'script_call')
 
 /** 子脚本缺失（被删掉 / 导入时没带上）——节点上要显示出来，别让问题藏到运行时 */
 const scriptMissing = computed(() => {
@@ -28,22 +33,77 @@ const scriptMissing = computed(() => {
   return !!id && !scriptExists(id)
 })
 
+/** 条件的紧凑写法：`found == yes` */
+function condText(c: any): string {
+  if (!c || typeof c !== 'object') return '未设置条件'
+  const left = String(c.left ?? '').trim() || '?'
+  const op = String(c.op ?? '==')
+  if (UNARY_OPS.includes(op)) return `${left} ${op}`
+  const right = String(c.right ?? '')
+  return `${left} ${op} ${right}`
+}
+
 const summary = computed(() => {
   const p = props.data.params || {}
-  switch (props.data.stepType) {
-    case 'delay':
-      return `${p.ms ?? 1000} ms`
+  switch (props.data.nodeType) {
+    case 'mouse': {
+      const act = String(p.action || 'click')
+      const label: Record<string, string> = {
+        click: '单击', double_click: '双击', right_click: '右键',
+        middle_click: '中键', move: '移动', down: '按下', up: '松开', wheel: '滚轮',
+      }
+      if (act === 'wheel') return `滚轮 (${p.dx ?? 0}, ${p.dy ?? 0})`
+      return `${label[act] || act} (${p.x ?? 0}, ${p.y ?? 0})`
+    }
+    case 'keyboard': {
+      const act: Record<string, string> = { press: '按一下', down: '按下', up: '松开' }
+      return `${act[String(p.action || 'press')] || ''} ${p.keys || '未设置按键'}`.trim()
+    }
+    case 'text_input':
+      return p.text ? `"${String(p.text).slice(0, 14)}"` : '空文本'
+    case 'clipboard': {
+      const a: Record<string, string> = { set: '写入剪贴板', get: '读取剪贴板', clear: '清空剪贴板' }
+      return a[String(p.action || 'set')] || ''
+    }
     case 'find_image':
       return p.template ? `模板：${p.template}` : '未选择模板'
-    case 'click':
-      return `(${p.x ?? 0}, ${p.y ?? 0}) · ${p.button ?? 'left'}`
-    case 'key':
-      return p.key || '未设置按键'
-    case 'text':
-      return p.text ? `"${p.text}"` : '空文本'
-    case 'judge':
-      return p.template ? `判断：${p.template}` : '判断：未选择模板'
-    case 'macro':
+    case 'ocr':
+      return p.source === 'region' ? '识别自定义区域' : '识别画面文字'
+    case 'color_check':
+      return `${p.color || '#000000'} ±${p.tolerance ?? 0}`
+    case 'pixel_check':
+      return `(${p.x ?? 0}, ${p.y ?? 0}) · ${p.color || '#000000'}`
+    case 'region_analysis': {
+      const m: Record<string, string> = { changed: '判断是否变化', average_color: '取平均颜色', screenshot: '截图存盘' }
+      return m[String(p.mode || 'changed')] || ''
+    }
+    case 'judge': {
+      const c1 = condText(p.condition)
+      const c2 = p.condition2 && String(p.condition2.left ?? '').trim() ? condText(p.condition2) : ''
+      if (!c2) return c1
+      const joiner = p.logic === 'or' ? ' 或 ' : ' 且 '
+      return `${c1}${joiner}${c2}`
+    }
+    case 'loop': {
+      const mode = String(p.mode || 'times')
+      if (mode === 'times') return `固定 ${p.times ?? 1} 次`
+      if (mode === 'condition') return `条件：${condText(p.condition)}`
+      return `无限循环（上限 ${p.max_iterations ?? 0}）`
+    }
+    case 'delay':
+      return `${p.ms ?? 1000} ms`
+    case 'wait': {
+      const m: Record<string, string> = {
+        image: '等图片出现', color: '等颜色出现', pixel: '等像素匹配',
+        variable: '等变量条件', window: '等窗口出现',
+      }
+      return m[String(p.mode || 'image')] || ''
+    }
+    case 'terminate': {
+      const l: Record<string, string> = { loop: '结束当前循环', script: '结束当前脚本', workflow: '终止整个工作流' }
+      return l[String(p.level || 'workflow')] || ''
+    }
+    case 'record':
       return `${(p.events || []).length} 个事件 · x${p.speed ?? 1}`
     case 'autoclick':
       return `(${p.x ?? 0}, ${p.y ?? 0}) · ${p.count ?? 10} 次 · ${p.interval_ms ?? 100}ms`
@@ -52,33 +112,54 @@ const summary = computed(() => {
       const name = p.name || p.script_id
       return scriptMissing.value ? `脚本不存在：${name}` : `调用：${name}`
     }
-    case 'terminate':
-      return '立即停止运行'
+    case 'external_tool':
+      return p.mode === 'http' ? `${p.method || 'GET'} ${String(p.url || '').slice(0, 24)}` : String(p.path || '未设置程序')
+    case 'variable':
+      return p.action === 'set' ? `${p.name || '?'} = ${String(p.value ?? '').slice(0, 12)}` : `${p.name || '?'}`
+    case 'calculate':
+      return `${String(p.expr || '').slice(0, 18)} → ${p.save_var || '?'}`
+    case 'text_process':
+      return `${p.action || ''} → ${p.save_var || '?'}`
+    case 'window':
+      return `${p.action || ''} ${String(p.title || '').slice(0, 14)}`.trim()
+    case 'process':
+      return `${p.action || ''} ${String(p.name || p.path || '').slice(0, 14)}`.trim()
+    case 'file':
+      return `${p.action || ''} ${String(p.path || '').slice(0, 16)}`.trim()
+    case 'command':
+      return `${p.shell || 'cmd'}: ${String(p.command || '').slice(0, 18)}`
     default:
       return ''
   }
 })
+
+const icon = computed(() => meta.value?.icon || '❓')
+const title = computed(() => props.data.label || meta.value?.label || props.data.nodeType)
 </script>
 
 <template>
-  <!-- 步骤类型色走 CSS 变量下发，而不是直接写在 border-color 上：
+  <!-- 节点配色走 CSS 变量下发，而不是直接写在 border-color 上：
        内联样式优先级高于样式表，一旦写死就没法用 .is-selected 类覆盖了。 -->
   <div
     class="step-node"
     :class="{ 'is-selected': selected, 'is-broken': scriptMissing }"
-    :style="{ '--node-color': meta.color }"
+    :style="{ '--node-color': color }"
   >
     <Handle type="target" :position="Position.Left" />
-    <div class="step-icon" :style="{ background: meta.color }">{{ meta.icon }}</div>
+    <div class="step-icon" :style="{ background: color }">{{ icon }}</div>
     <div class="step-body">
       <div class="step-title">
-        {{ data.label }}
+        {{ title }}
         <span v-if="data.once" class="once-badge">单次</span>
       </div>
       <div class="step-summary" :class="{ broken: scriptMissing }">{{ summary }}</div>
       <div v-if="isJudge" class="branch-legend">
-        <span class="branch-yes">● 成功</span>
-        <span class="branch-no">● 失败</span>
+        <span class="branch-yes">● 是</span>
+        <span class="branch-no">● 否</span>
+      </div>
+      <div v-else-if="isLoop" class="branch-legend">
+        <span class="branch-body">● 循环体</span>
+        <span class="branch-next">● 结束</span>
       </div>
     </div>
     <!-- 选中角标：放在节点框外右上角，用绝对定位，不参与布局（否则会改节点尺寸、
@@ -86,9 +167,14 @@ const summary = computed(() => {
     <span v-if="selected" class="sel-badge" aria-hidden="true">✓</span>
     <!-- 子脚本缺失角标：同样绝对定位 -->
     <span v-if="scriptMissing" class="warn-badge" aria-hidden="true">!</span>
+
     <template v-if="isJudge">
-      <Handle type="source" id="yes" :position="Position.Right" :style="{ top: '28%' }" class="handle-yes" />
-      <Handle type="source" id="no" :position="Position.Right" :style="{ top: '72%' }" class="handle-no" />
+      <Handle type="source" :id="BRANCH_YES" :position="Position.Right" :style="{ top: '28%' }" class="handle-yes" />
+      <Handle type="source" :id="BRANCH_NO" :position="Position.Right" :style="{ top: '72%' }" class="handle-no" />
+    </template>
+    <template v-else-if="isLoop">
+      <Handle type="source" :id="BRANCH_BODY" :position="Position.Right" :style="{ top: '28%' }" class="handle-yes" />
+      <Handle type="source" :id="BRANCH_NEXT" :position="Position.Right" :style="{ top: '72%' }" class="handle-no" />
     </template>
     <Handle v-else-if="!isTerminate" type="source" :position="Position.Right" />
   </div>
@@ -111,7 +197,7 @@ const summary = computed(() => {
     box-shadow 0.15s;
 }
 /* ---------- 选中反馈 ----------
-   只换边框颜色在深色底上根本认不出来（尤其是本来边框就有步骤类型色的时候）。
+   只换边框颜色在深色底上根本认不出来（尤其是本来边框就有节点类型色的时候）。
    这里一次性叠四层信号，保证「一眼看出来选中了谁」：
      1) 边框 + 标题文字换成主题强调色
      2) 紧贴的 2px 实心光环（box-shadow，不占布局、不改节点尺寸）
@@ -147,7 +233,7 @@ const summary = computed(() => {
 }
 /* ---------- 子脚本缺失 ----------
    被调用的子脚本不存在时，节点必须自己"喊出来"：否则这个问题会一直藏到运行那一刻，
-   错误信息在日志里一闪而过，用户根本对不上是哪个节点。 */
+   错误日志在日志里一闪而过，用户根本对不上是哪个节点。 */
 .step-node.is-broken {
   border-color: var(--danger);
   border-style: dashed;
@@ -219,6 +305,12 @@ const summary = computed(() => {
 }
 .branch-no {
   color: var(--danger);
+}
+.branch-body {
+  color: #06b6d4;
+}
+.branch-next {
+  color: var(--text-dim);
 }
 .handle-yes {
   background: #22c55e !important;

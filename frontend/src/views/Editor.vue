@@ -320,7 +320,7 @@ onBeforeUnmount(() => {
       <div class="busy-card">
         <div class="busy-title">已在另一个窗口打开</div>
         <p class="busy-text">
-          AutoGameTool 只允许一个编辑器窗口与一个后端。请使用已经打开的那个窗口；
+          AutoTool 只允许一个编辑器窗口与一个后端。请使用已经打开的那个窗口；
           如果那是旧标签页、你已经关掉它，本页会自动接管（正在重试…）。
         </p>
         <n-button size="small" type="primary" @click="eng.retryNow()">立即重试</n-button>

@@ -122,6 +122,18 @@ def move(x: int, y: int, mode: str = "real", hwnd: int | None = None) -> None:
         _mouse.position = (int(x), int(y))
 
 
+def cursor_pos() -> tuple[int, int]:
+    """当前鼠标的屏幕坐标。「鼠标操作-平滑移动」用它取起点。"""
+    pt = wintypes.POINT()
+    if user32.GetCursorPos(ctypes.byref(pt)):
+        return int(pt.x), int(pt.y)
+    try:
+        x, y = _mouse.position
+        return int(x), int(y)
+    except Exception:
+        return 0, 0
+
+
 def press_key(key: str, mode: str = "real", hwnd: int | None = None) -> None:
     """按下并抬起按键，支持 "ctrl+shift+a" 组合键。"""
     mods, mains = _split_combo(key)
