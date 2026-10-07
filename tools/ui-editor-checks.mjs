@@ -15,6 +15,10 @@
  *   7) 【0.1.4】右侧面板「参数 / 变量」两个标签页；变量按容器分（全局 vs 局部）
  *   8) 【0.1.4】组合节点：渲染 / 单击改属性 / 双击进新标签编辑 / 局部变量隔离
  *   9) 【0.1.4】「📦 合并节点」能把选中的一串相邻节点收成一个组合节点
+ *  10) 【0.1.5】输出变量是"节点声明能力、用户添加"：新节点不自带变量，
+ *      「变量」页有「节点输出」区块，点添加才建变量
+ *  11) 【0.1.5】「保存」不再弹路径（第一次 / 另存为 / 句柄失效才弹）；
+ *      用 stub 版 showSaveFilePicker 数调用次数来验证
  *
  * ⚠️ 输入方式：**只用页面内事件派发**（el.click() / new PointerEvent(...) / new MouseEvent('contextmenu')）。
  * 刻意不使用 CDP 的 Input.dispatchMouseEvent —— 那属于向浏览器注入输入事件，会碰到真实鼠标；
@@ -424,6 +428,70 @@ function make14Script(name) {
   }
 }
 
+/**
+ * 构造一份 0.1.5 的测试脚本（用来验证"输出变量要用户自己添加"）。
+ *
+ * 刻意**不写** save_found / save_x 之类的键：0.1.5 起节点只声明"能输出什么"，
+ * 这些键即使存在也应当是空串。变量表也是空的 —— 新节点不该自带任何变量。
+ */
+function make15Script(name) {
+  const node = (id, nodeType, label, x, y, params) => ({
+    id,
+    type: 'step',
+    position: { x, y },
+    data: { nodeType, label, once: false, params },
+  })
+  return {
+    format: 'agflow',
+    version: 3,
+    name,
+    repeat: 1,
+    window: null,
+    screen: null,
+    variables: [],
+    nodes: [
+      node('f1', 'find_image', '图像识别', 60, 60, { template: '', threshold: 0.85, timeout_ms: 5000 }),
+      node('c1', 'calculate', '运算', 360, 60, { expr: '1 + 1', precision: 4 }),
+    ],
+    edges: [{ id: 'e1', source: 'f1', target: 'c1', sourceHandle: null }],
+    scripts: {},
+  }
+}
+
+/** 画布上标题为 title 的节点在 nodeEls() 里的下标（-1 = 没找到） */
+const nodeIndexByTitle = (title) =>
+  js(
+    `(() => { ${HELPERS} ${HELPERS14}
+      const t = ${JSON.stringify(title)};
+      return nodeEls().findIndex(e => { const el = e.querySelector('.step-title'); return !!el && el.textContent.trim() === t; }); })()`,
+  )
+
+/** 「节点输出」区块里列出的属性名 */
+const outLabels = () =>
+  js(
+    `(() => { ${HELPERS} ${HELPERS14}
+      return visAll('.out-row').map(r => ((r.querySelector('.out-label') || {}).textContent || '').trim()); })()`,
+  )
+
+/** 点「节点输出」里某一项的「＋ 添加」 */
+const clickOutAdd = (label) =>
+  js(
+    `(() => { ${HELPERS} ${HELPERS14}
+      const row = visAll('.out-row').find(r => ((r.querySelector('.out-label') || {}).textContent || '').trim() === ${JSON.stringify(label)});
+      if (!row) return false;
+      const b = Array.from(row.querySelectorAll('button')).find(x => x.textContent.includes('添加'));
+      if (!b) return false; b.click(); return true; })()`,
+  )
+
+/** 点顶栏按钮（按去掉空白后的完整文本精确匹配，避免「保存」命中「另存为」） */
+const clickTopbar = (text) =>
+  js(
+    `(() => { ${HELPERS} ${HELPERS14}
+      const t = ${JSON.stringify(text)};
+      const b = visAll('.topbar button').find(x => x.textContent.replace(/\\s+/g, '').trim() === t);
+      if (!b) return false; b.click(); return true; })()`,
+  )
+
 async function main() {
   if (!BASE) throw new Error('缺少 AGT_URL（带 token 的页面地址）')
 
@@ -764,6 +832,132 @@ async function main() {
   await sleep(900)
   const nested = await js(`(() => { ${HELPERS} ${HELPERS14} return nodeEls().length; })()`)
   check('合并出来的组合节点可以双击进去，看到被收进去的 2 个节点', nested === 2, '内部节点数 = ' + nested)
+
+  // ---------- ⑪ 输出变量：节点只"声明能力"，由用户添加（0.1.5）----------
+  await clickInPage('.tab-add')
+  await sleep(700)
+  await loadScript(make15Script('OUT'), 'out.agflow')
+  await sleep(1500)
+
+  await clickInspTab('变量')
+  await sleep(350)
+  const noSelText = await js(`(() => { ${HELPERS} ${HELPERS14} return inspText(); })()`)
+  check(
+    '没选中节点时，变量页提示"先选中一个节点"',
+    /选中一个节点/.test(noSelText),
+    noSelText.slice(0, 90),
+  )
+  check(
+    '新脚本的变量表是空的（节点不带自建变量）',
+    (await varRows()) === 0,
+    '行数 = ' + (await varRows()),
+  )
+
+  const fiIdx2 = await nodeIndexByTitle('图像识别')
+  await nodeClick(fiIdx2, false)
+  await sleep(450)
+  const outs = await outLabels()
+  check(
+    '选中「图像识别」后列出它的输出变量属性（4 项）',
+    outs.length === 4 && outs.includes('是否找到') && outs.includes('匹配中心 X'),
+    JSON.stringify(outs),
+  )
+  check(
+    '这些输出还**没有**变成变量（不添加就不产生）',
+    (await varRows()) === 0,
+    '行数 = ' + (await varRows()),
+  )
+
+  await clickOutAdd('是否找到')
+  await sleep(400)
+  const namesAfterAdd = await varNames()
+  check(
+    '点「＋ 添加」后变量表里出现它（found）',
+    namesAfterAdd.length === 1 && namesAfterAdd[0] === 'found',
+    JSON.stringify(namesAfterAdd),
+  )
+  const addedMsg = (await messages()).join(' | ')
+  check('添加后有提示', /已添加变量/.test(addedMsg), addedMsg)
+
+  // 再点一次同一个属性（此时按钮已变成变量名）→ 不重复添加
+  await clickOutAdd('是否找到')
+  await sleep(350)
+  check(
+    '重复点已添加的属性不会重复建变量',
+    (await varRows()) === 1,
+    '行数 = ' + (await varRows()),
+  )
+
+  // 换一个节点（运算）→ 输出属性换成它自己的
+  const calcIdx = await nodeIndexByTitle('运算')
+  await nodeClick(calcIdx, false)
+  await sleep(450)
+  const outs2 = await outLabels()
+  check(
+    '切到「运算」节点后输出属性跟着换',
+    outs2.length === 1 && outs2[0] === '运算结果',
+    JSON.stringify(outs2),
+  )
+
+  // ---------- ⑫ 「保存」不再弹路径，「另存为」才弹（0.1.5）----------
+  // 装一个假的系统保存对话框：只数被调用次数，并记录写进去的内容
+  await js(
+    `(() => {
+      window.__picked = 0; window.__writes = [];
+      window.showSaveFilePicker = (opts) => {
+        window.__picked += 1;
+        const nm = ((opts && opts.suggestedName) || 'x.agflow');
+        return Promise.resolve({
+          name: nm,
+          createWritable: () => Promise.resolve({
+            write: (t) => { window.__writes.push(String(t)); return Promise.resolve(); },
+            close: () => Promise.resolve(),
+          }),
+        });
+      };
+      return true; })()`,
+  )
+
+  await clearMessages()
+  const saveBtnText = await js(
+    `(() => { ${HELPERS} ${HELPERS14}
+      return visAll('.topbar button').map(b => b.textContent.replace(/\\s+/g,' ').trim()).join(','); })()`,
+  )
+  check('顶栏有「保存」和「另存为」两个按钮', /保存/.test(saveBtnText) && /另存为/.test(saveBtnText), saveBtnText)
+
+  await clickTopbar('💾保存')
+  await sleep(700)
+  let pickStat = await js(`({ picked: window.__picked, writes: window.__writes.length })`)
+  const firstMsg = (await messages()).join(' | ')
+  check(
+    '第一次保存（还没有对应文件）会弹一次路径',
+    pickStat.picked === 1 && pickStat.writes === 1,
+    JSON.stringify(pickStat) + ' 提示=' + firstMsg,
+  )
+  check('保存后提示里写出了文件名', /已保存到/.test(firstMsg), firstMsg)
+
+  await clearMessages()
+  await clickTopbar('💾保存')
+  await sleep(700)
+  pickStat = await js(`({ picked: window.__picked, writes: window.__writes.length })`)
+  check(
+    '再次「保存」直接写回原文件，**不再弹路径**',
+    pickStat.picked === 1 && pickStat.writes === 2,
+    JSON.stringify(pickStat),
+  )
+
+  await clearMessages()
+  await clickTopbar('📄另存为')
+  await sleep(700)
+  pickStat = await js(`({ picked: window.__picked, writes: window.__writes.length })`)
+  check(
+    '「另存为」才会再弹一次路径',
+    pickStat.picked === 2 && pickStat.writes === 3,
+    JSON.stringify(pickStat),
+  )
+
+  const savedJson = await js(`(() => { const s = (window.__writes || [])[0]; return s ? s.slice(0, 40) : ''; })()`)
+  check('写出去的是合法的 .agflow JSON', /"format":\s*"agflow"/.test(savedJson), savedJson)
 
   const failed = results.filter((r) => r.startsWith('FAIL')).length
   const text =

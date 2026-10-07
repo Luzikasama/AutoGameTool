@@ -125,10 +125,15 @@ const summary = computed(() => {
       return p.mode === 'http' ? `${p.method || 'GET'} ${String(p.url || '').slice(0, 24)}` : String(p.path || '未设置程序')
     case 'variable':
       return p.action === 'set' ? `${p.name || '?'} = ${String(p.value ?? '').slice(0, 12)}` : `${p.name || '?'}`
-    case 'calculate':
-      return `${String(p.expr || '').slice(0, 18)} → ${p.save_var || '?'}`
-    case 'text_process':
-      return `${p.action || ''} → ${p.save_var || '?'}`
+    // 输出变量是"用户添加了才有"，没添加就不显示箭头（0.1.5 起）
+    case 'calculate': {
+      const out = String(p.save_var || '').trim()
+      return `${String(p.expr || '').slice(0, 18)}${out ? ` → ${out}` : ''}`
+    }
+    case 'text_process': {
+      const out = String(p.save_var || '').trim()
+      return `${p.action || ''}${out ? ` → ${out}` : ''}`
+    }
     case 'window':
       return `${p.action || ''} ${String(p.title || '').slice(0, 14)}`.trim()
     case 'process':

@@ -238,9 +238,14 @@ async def clipboard(ex, p) -> None:
         await ex.log('debug' if ok else 'warn', ('已清空剪贴板' if ok else '清空剪贴板失败'))
         return
     text = _clipboard_get()
-    key = _resolve_save_key(p.get('var'), scope) or 'clip'
-    ex.vars.set(key, text)
-    await ex.log('debug', f'已读取剪贴板 {len(text)} 个字符 → {key}')
+    # 输出变量由用户在「变量」页决定要不要（0.1.5 起不再兜底成 'clip'）：
+    # 没添加就不写，免得凭空多出一堆用不到的变量
+    key = _resolve_save_key(p.get('var'), scope)
+    if key:
+        ex.vars.set(key, text)
+        await ex.log('debug', f'已读取剪贴板 {len(text)} 个字符 → {key}')
+    else:
+        await ex.log('debug', f'已读取剪贴板 {len(text)} 个字符（未添加输出变量，结果未保存）')
 
 
 # ===========================================================================
@@ -795,7 +800,8 @@ async def variable(ex, p) -> None:
 async def calculate(ex, p) -> None:
     scope = ex.vars
     expr = p.get('expr')
-    key = _resolve_save_key(p.get('save_var'), scope) or 'result'
+    # 没添加输出变量就只算不存（0.1.5 起不再兜底成 'result'）
+    key = _resolve_save_key(p.get('save_var'), scope)
     try:
         value = eval_expr(str(expr or ''), scope)
     except ValueError as e:
@@ -804,9 +810,10 @@ async def calculate(ex, p) -> None:
     precision = max(0, min(10, _int(p.get('precision'), scope, 4)))
     rounded = round(value, precision)
     out = int(rounded) if float(rounded).is_integer() else rounded
-    scope.set(key, out)
+    if key:
+        scope.set(key, out)
     ex.last_message = f'{expr} = {out}'
-    await ex.log('info', f'运算：{expr} = {out} → {key}')
+    await ex.log('info', f'运算：{expr} = {out}{f" → {key}" if key else ""}')
 
 
 async def text_process(ex, p) -> None:
@@ -814,7 +821,8 @@ async def text_process(ex, p) -> None:
 
     scope = ex.vars
     action = str(p.get('action') or 'replace')
-    key = _resolve_save_key(p.get('save_var'), scope) or 'text_result'
+    # 没添加输出变量就只加工不存（0.1.5 起不再兜底成 'text_result'）
+    key = _resolve_save_key(p.get('save_var'), scope)
     text = interpolate(p.get('input') or '', scope)
     result = text
 
@@ -864,9 +872,13 @@ async def text_process(ex, p) -> None:
         parts = text.split(sep)
         result = parts[idx] if idx < len(parts) else ''
 
-    scope.set(key, result)
-    ex.last_message = f'{action} → {key}'
-    await ex.log('info', f'文本处理（{action}）：{str(result)[:40]!r} → {key}')
+    if key:
+        scope.set(key, result)
+    ex.last_message = f'{action} → {result}'
+    await ex.log(
+        'info',
+        f'文本处理（{action}）：{str(result)[:40]!r}{f" → {key}" if key else "（未添加输出变量，结果未保存）"}',
+    )
 
 
 # ===========================================================================

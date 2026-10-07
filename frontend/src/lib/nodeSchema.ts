@@ -53,10 +53,37 @@ export interface NodeField {
   showIf?: { key: string; equals?: any; in?: any[]; not?: any }
 }
 
+/**
+ * 节点的**输出变量属性**（0.1.5 起）。
+ *
+ * 关键语义：这只是一份"这个节点**能**产出哪些数据"的**声明**，
+ * **不会**在创建节点时自动生成任何变量 —— 挂机脚本里绝大多数节点算出来的东西都用不上，
+ * 一建就带一堆变量等于往变量表里倒垃圾。用户真正需要哪个，就到右侧「变量」页点一下
+ * 「添加」，这时才会：① 在本层变量表里建一条同名变量；② 把变量名写进该节点的
+ * params[param]，运行时引擎按它把值写出来。
+ */
+export interface NodeOutput {
+  /** 写进节点 params 里的键（save_found / save_x / save_var / index_var …） */
+  param: string
+  /** 属性名（界面上给用户看的中文） */
+  label: string
+  /** 用户点「添加」时默认用的变量名 */
+  suggest: string
+  /** 变量类型：auto / string / number / bool */
+  type?: string
+  /** 一句话说明（这个属性是什么值） */
+  hint?: string
+  /** 只在满足条件时可用（与 NodeField.showIf 同一套规则，例如"读取剪贴板"才有的属性） */
+  showIf?: { key: string; equals?: any; in?: any[]; not?: any }
+}
+
 export interface NodeSchema {
   fields: NodeField[]
-  /** 该节点会写进「运行变量」的键（给用户看，说明这个节点能提供什么数据） */
-  outputs?: Array<{ key: string; label: string }>
+  /**
+   * 该节点**可以**输出哪些变量（只是声明，不自动创建）。
+   * 老脚本里已经写好的 `save_*` 参数仍然有效，会被识别成"已添加"。
+   */
+  outputs?: NodeOutput[]
   /** 属性面板顶部的一句话用法 */
   help?: string
 }
@@ -174,9 +201,18 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
         { label: '清空剪贴板', value: 'clear' },
       ] },
       { key: 'text', label: '写入内容', type: 'textarea', default: '', placeholder: '支持 {{变量名}}', showIf: { key: 'action', equals: 'set' } },
-      { key: 'var', label: '读取到变量', type: 'text', default: 'clip', hint: '读取到的文本会存进这个变量，后续用 {{clip}} 引用', showIf: { key: 'action', equals: 'get' } },
     ],
-    outputs: [{ key: '读取到变量', label: '剪贴板文本' }],
+    // 只有「读取剪贴板」才有输出；默认不建变量，用户需要再去「变量」页添加
+    outputs: [
+      {
+        param: 'var',
+        label: '剪贴板文本',
+        suggest: 'clip',
+        type: 'string',
+        hint: '读到的文本，后续可用 {{变量名}} 引用',
+        showIf: { key: 'action', equals: 'get' },
+      },
+    ],
   },
 
   // =====================================================================
@@ -193,15 +229,12 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
         { label: '整个屏幕', value: 'screen' },
         { label: '绑定窗口', value: 'window' },
       ] },
-      { key: 'save_found', label: '找到与否存入变量', type: 'text', default: 'found', hint: '值为 yes / no，供「判断」节点使用' },
-      { key: 'save_x', label: '位置 X 存入变量', type: 'text', default: 'found_x' },
-      { key: 'save_y', label: '位置 Y 存入变量', type: 'text', default: 'found_y' },
-      { key: 'save_score', label: '相似度存入变量', type: 'text', default: 'found_score' },
     ],
     outputs: [
-      { key: 'save_found', label: '是否找到（yes/no）' },
-      { key: 'save_x / save_y', label: '匹配中心屏幕坐标' },
-      { key: 'save_score', label: '相似度 0~1' },
+      { param: 'save_found', label: '是否找到', suggest: 'found', type: 'auto', hint: 'yes / no，可直接给「判断」节点用' },
+      { param: 'save_x', label: '匹配中心 X', suggest: 'found_x', type: 'number' },
+      { param: 'save_y', label: '匹配中心 Y', suggest: 'found_y', type: 'number' },
+      { param: 'save_score', label: '相似度', suggest: 'found_score', type: 'number', hint: '0~1 之间的小数' },
     ],
   },
 
@@ -215,8 +248,6 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
         { label: '自定义区域', value: 'region' },
       ] },
       { key: 'region', label: '识别区域', type: 'region', default: null, showIf: { key: 'source', equals: 'region' } },
-      { key: 'save_text', label: '识别文本存入变量', type: 'text', default: 'ocr_text' },
-      { key: 'save_found', label: '是否有文字存入变量', type: 'text', default: 'ocr_found' },
       { key: 'join', label: '多行合并方式', type: 'select', default: 'newline', options: [
         { label: '保留换行', value: 'newline' },
         { label: '用空格连成一行', value: 'space' },
@@ -224,8 +255,8 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       ] },
     ],
     outputs: [
-      { key: 'save_text', label: '识别到的全部文本' },
-      { key: 'save_found', label: '是否识别到文字（yes/no）' },
+      { param: 'save_text', label: '识别到的文本', suggest: 'ocr_text', type: 'string', hint: '多行按上面的方式合并' },
+      { param: 'save_found', label: '是否识别到文字', suggest: 'ocr_found', type: 'auto', hint: 'yes / no' },
     ],
   },
 
@@ -242,13 +273,11 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'color', label: '目标颜色', type: 'color', default: '#ff0000' },
       { key: 'tolerance', label: '容差', type: 'number', default: 12, min: 0, max: 255, hint: '每个通道允许的偏差 0~255' },
       { key: 'min_pixels', label: '最少像素数', type: 'number', default: 1, min: 1, max: 10000000, hint: '命中的像素达到这个数量才算"出现"' },
-      { key: 'save_found', label: '是否出现存入变量', type: 'text', default: 'color_found' },
-      { key: 'save_x', label: '命中点 X 存入变量', type: 'text', default: '' },
-      { key: 'save_y', label: '命中点 Y 存入变量', type: 'text', default: '' },
     ],
     outputs: [
-      { key: 'save_found', label: '是否出现（yes/no）' },
-      { key: 'save_x / save_y', label: '第一个命中点的屏幕坐标' },
+      { param: 'save_found', label: '是否出现', suggest: 'color_found', type: 'auto', hint: 'yes / no' },
+      { param: 'save_x', label: '命中点 X', suggest: 'color_x', type: 'number' },
+      { param: 'save_y', label: '命中点 Y', suggest: 'color_y', type: 'number' },
     ],
   },
 
@@ -260,12 +289,10 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'size', label: '取样边长', type: 'number', default: 1, min: 1, max: 31, hint: '取以该点为中心的 N×N 方块的平均色，抗锯齿/抗闪烁' },
       { key: 'color', label: '目标颜色', type: 'color', default: '#00ff00' },
       { key: 'tolerance', label: '容差', type: 'number', default: 12, min: 0, max: 255 },
-      { key: 'save_found', label: '是否匹配存入变量', type: 'text', default: 'pixel_found' },
-      { key: 'save_color', label: '实际颜色存入变量', type: 'text', default: '' },
     ],
     outputs: [
-      { key: 'save_found', label: '是否匹配（yes/no）' },
-      { key: 'save_color', label: '实际颜色（#RRGGBB）' },
+      { param: 'save_found', label: '是否匹配', suggest: 'pixel_found', type: 'auto', hint: 'yes / no' },
+      { param: 'save_color', label: '实际颜色', suggest: 'pixel_color', type: 'string', hint: '#RRGGBB' },
     ],
   },
 
@@ -287,9 +314,16 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'reference', label: '参考图模板', type: 'template', default: '', showIf: { key: 'mode', equals: 'changed' }, hint: '与当前画面的差异超过阈值即算"有变化"' },
       { key: 'diff_threshold', label: '变化阈值', type: 'number', default: 0.02, min: 0.001, max: 1, step: 0.001, hint: '差异像素占比超过这个值算"有变化"', showIf: { key: 'mode', equals: 'changed' } },
       { key: 'save_path', label: '截图保存到', type: 'text', default: '', placeholder: '如 D:\\shots\\{{time}}.png', showIf: { key: 'mode', equals: 'screenshot' } },
-      { key: 'save_value', label: '结果存入变量', type: 'text', default: 'region_value' },
     ],
-    outputs: [{ key: 'save_value', label: '变化：yes/no；平均颜色：#RRGGBB' }],
+    outputs: [
+      {
+        param: 'save_value',
+        label: '分析结果',
+        suggest: 'region_value',
+        type: 'auto',
+        hint: '是否变化：yes/no；平均颜色：#RRGGBB',
+      },
+    ],
   },
 
   // =====================================================================
@@ -319,9 +353,10 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'condition', label: '继续条件', type: 'condition', default: { left: 'found', op: '==', right: 'yes' }, showIf: { key: 'mode', equals: 'condition' } },
       { key: 'max_iterations', label: '最大轮数（安全阀）', type: 'number', default: 1000, min: 1, max: 10000000, hint: '条件/无限循环必须设上限，避免脚本卡死', showIf: { key: 'mode', in: ['condition', 'forever'] } },
       { key: 'interval_ms', label: '每轮间隔', type: 'number', default: 0, min: 0, max: 3600000, hint: '毫秒。0 表示不额外等待' },
-      { key: 'index_var', label: '当前轮次存入变量', type: 'text', default: '', hint: '从 1 开始计数，可在循环体里用 {{变量名}} 引用' },
     ],
-    outputs: [{ key: 'index_var', label: '当前第几轮（从 1 开始）' }],
+    outputs: [
+      { param: 'index_var', label: '当前轮次', suggest: 'index', type: 'number', hint: '从 1 开始，循环体里可直接引用' },
+    ],
   },
 
   delay: {
@@ -352,9 +387,10 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'title', label: '窗口标题关键字', type: 'text', default: '', showIf: { key: 'mode', equals: 'window' } },
       { key: 'timeout_ms', label: '超时', type: 'number', default: 15000, min: 0, max: 3600000, hint: '毫秒。0 表示一直等（不推荐）' },
       { key: 'on_timeout', label: '超时后', type: 'select', default: 'continue', options: TIMEOUT_ON },
-      { key: 'save_found', label: '结果存入变量', type: 'text', default: 'wait_ok' },
     ],
-    outputs: [{ key: 'save_found', label: '是否在超时前满足（yes/no）' }],
+    outputs: [
+      { param: 'save_found', label: '是否在超时前满足', suggest: 'wait_ok', type: 'auto', hint: 'yes / no' },
+    ],
   },
 
   terminate: {
@@ -420,12 +456,10 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'headers', label: '请求头', type: 'textarea', default: '', placeholder: '每行一条：Content-Type: application/json', showIf: { key: 'mode', equals: 'http' } },
       { key: 'body', label: '请求体', type: 'textarea', default: '', showIf: { key: 'mode', equals: 'http' } },
       { key: 'timeout_ms', label: '超时', type: 'number', default: 10000, min: 100, max: 600000 },
-      { key: 'save_var', label: '输出存入变量', type: 'text', default: '', hint: '程序模式存 stdout，HTTP 模式存响应体' },
-      { key: 'save_code', label: '状态码存入变量', type: 'text', default: '' },
     ],
     outputs: [
-      { key: 'save_var', label: 'stdout / 响应体' },
-      { key: 'save_code', label: '退出码 / HTTP 状态码' },
+      { param: 'save_var', label: '输出内容', suggest: 'tool_out', type: 'string', hint: '程序模式是 stdout，HTTP 模式是响应体' },
+      { param: 'save_code', label: '退出码 / 状态码', suggest: 'tool_code', type: 'number', hint: '程序模式是退出码，HTTP 模式是状态码' },
     ],
   },
 
@@ -461,9 +495,10 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
     fields: [
       { key: 'expr', label: '表达式', type: 'text', default: '1 + 1', hint: '例：({{a}} + 5) * 2' },
       { key: 'precision', label: '保留小数位', type: 'number', default: 4, min: 0, max: 10 },
-      { key: 'save_var', label: '结果存入变量', type: 'text', default: 'result' },
     ],
-    outputs: [{ key: 'save_var', label: '运算结果（数字）' }],
+    outputs: [
+      { param: 'save_var', label: '运算结果', suggest: 'result', type: 'number' },
+    ],
   },
 
   text_process: {
@@ -493,9 +528,10 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       ], showIf: { key: 'action', equals: 'case' } },
       { key: 'sep', label: '分隔符', type: 'text', default: ',', showIf: { key: 'action', equals: 'split' } },
       { key: 'index', label: '取第几段', type: 'number', default: 0, min: 0, showIf: { key: 'action', equals: 'split' } },
-      { key: 'save_var', label: '结果存入变量', type: 'text', default: 'text_result' },
     ],
-    outputs: [{ key: 'save_var', label: '处理结果' }],
+    outputs: [
+      { param: 'save_var', label: '处理结果', suggest: 'text_result', type: 'string' },
+    ],
   },
 
   // =====================================================================
@@ -514,16 +550,14 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
         { label: '关闭窗口', value: 'close' },
       ] },
       { key: 'title', label: '标题关键字', type: 'text', default: '', placeholder: '留空则用当前绑定窗口' },
-      { key: 'hwnd_var', label: 'hwnd 存入变量', type: 'text', default: 'hwnd' },
       { key: 'x', label: 'X', type: 'number', default: 0, showIf: { key: 'action', equals: 'move' } },
       { key: 'y', label: 'Y', type: 'number', default: 0, showIf: { key: 'action', equals: 'move' } },
       { key: 'width', label: '宽', type: 'number', default: 800, showIf: { key: 'action', equals: 'move' } },
       { key: 'height', label: '高', type: 'number', default: 600, showIf: { key: 'action', equals: 'move' } },
-      { key: 'save_found', label: '是否找到存入变量', type: 'text', default: 'win_found' },
     ],
     outputs: [
-      { key: 'hwnd_var', label: '窗口句柄' },
-      { key: 'save_found', label: '是否找到（yes/no）' },
+      { param: 'hwnd_var', label: '窗口句柄', suggest: 'hwnd', type: 'number', hint: '可给后续节点指定窗口用' },
+      { param: 'save_found', label: '是否找到窗口', suggest: 'win_found', type: 'auto', hint: 'yes / no' },
     ],
   },
 
@@ -538,12 +572,10 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'name', label: '进程名', type: 'text', default: '', placeholder: '如 notepad.exe', showIf: { key: 'action', in: ['kill', 'is_running'] } },
       { key: 'path', label: '程序路径', type: 'text', default: '', showIf: { key: 'action', equals: 'start' } },
       { key: 'args', label: '启动参数', type: 'text', default: '', showIf: { key: 'action', equals: 'start' } },
-      { key: 'save_var', label: '结果存入变量', type: 'text', default: 'proc_result' },
-      { key: 'save_pid', label: 'PID 存入变量', type: 'text', default: 'proc_pid' },
     ],
     outputs: [
-      { key: 'save_var', label: '启动：PID；是否运行：yes/no' },
-      { key: 'save_pid', label: '进程号' },
+      { param: 'save_var', label: '处理结果', suggest: 'proc_result', type: 'auto', hint: '启动：PID；是否运行：yes/no' },
+      { param: 'save_pid', label: '进程号', suggest: 'proc_pid', type: 'number' },
     ],
   },
 
@@ -567,9 +599,16 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'encoding', label: '编码', type: 'select', default: 'utf-8', options: [
         { label: 'UTF-8', value: 'utf-8' }, { label: 'GBK', value: 'gbk' },
       ], showIf: { key: 'action', in: ['read', 'write', 'append'] } },
-      { key: 'save_var', label: '结果存入变量', type: 'text', default: 'file_result' },
     ],
-    outputs: [{ key: 'save_var', label: '读取内容 / 是否存在的 yes-no / 文件数' }],
+    outputs: [
+      {
+        param: 'save_var',
+        label: '处理结果',
+        suggest: 'file_result',
+        type: 'auto',
+        hint: '读取：文件内容；是否存在：yes/no；列目录：条目数',
+      },
+    ],
   },
 
   command: {
@@ -583,19 +622,20 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'command', label: '命令', type: 'command', default: '' },
       { key: 'cwd', label: '工作目录', type: 'text', default: '' },
       { key: 'timeout_ms', label: '超时', type: 'number', default: 30000, min: 100, max: 3600000 },
-      { key: 'save_var', label: '输出存入变量', type: 'text', default: 'cmd_output' },
-      { key: 'save_code', label: '退出码存入变量', type: 'text', default: 'cmd_code' },
     ],
     outputs: [
-      { key: 'save_var', label: '标准输出 + 标准错误' },
-      { key: 'save_code', label: '退出码' },
+      { param: 'save_var', label: '输出内容', suggest: 'cmd_output', type: 'string', hint: '标准输出 + 标准错误' },
+      { param: 'save_code', label: '退出码', suggest: 'cmd_code', type: 'number' },
     ],
   },
 }
 
 /** 某个节点的默认参数（字段默认值拼起来；未声明默认值的字段为 null）。
  *  参数类型放宽成 string：组合节点（GROUP_TYPE，不属于 25 个核心节点）没有模式表，
- *  调用它应当安静地返回空对象，而不是编译不过。 */
+ *  调用它应当安静地返回空对象，而不是编译不过。
+ *
+ *  输出变量属性一并给出**空串**默认值 —— 空串表示"用户没要这个输出"，
+ *  引擎读到空值直接跳过。这样新建节点只声明能力，不会凭空多出变量。 */
 export function defaultsFor(nodeType: string): Record<string, any> {
   const schema = NODE_SCHEMA[nodeType as NodeType]
   const out: Record<string, any> = {}
@@ -603,7 +643,26 @@ export function defaultsFor(nodeType: string): Record<string, any> {
   for (const f of schema.fields) {
     out[f.key] = typeof f.default === 'object' && f.default !== null ? { ...f.default } : (f.default ?? null)
   }
+  for (const o of schema.outputs || []) {
+    if (!(o.param in out)) out[o.param] = ''
+  }
   return out
+}
+
+/** 某个节点声明的输出变量属性（组合节点没有模式表，返回空数组）。 */
+export function nodeOutputs(nodeType: string): NodeOutput[] {
+  return NODE_SCHEMA[nodeType as NodeType]?.outputs || []
+}
+
+/** 某个输出属性在当前参数下是否可用（例如"读取剪贴板"才有输出）。 */
+export function outputVisible(o: NodeOutput, params: Record<string, any> | undefined): boolean {
+  const cond = o.showIf
+  if (!cond) return true
+  const v = params?.[cond.key]
+  if (cond.equals !== undefined) return v === cond.equals
+  if (cond.in !== undefined) return Array.isArray(cond.in) && cond.in.includes(v)
+  if (cond.not !== undefined) return v !== cond.not
+  return true
 }
 
 /** 字段在当前参数下是否应当显示（showIf 求值） */
@@ -617,9 +676,12 @@ export function fieldVisible(f: NodeField, params: Record<string, any>): boolean
   return true
 }
 
-/** 该节点的全部字段 key（含隐藏的）——迁移补参、默认值合并用 */
+/** 该节点的全部字段 key（含隐藏的）——迁移补参、默认值合并用。
+ *  输出变量属性也一并算进来：它们在参数里同样是一个键（只是不占字段位置）。 */
 export function schemaKeys(nodeType: string): string[] {
-  return (NODE_SCHEMA[nodeType as NodeType]?.fields || []).map((f) => f.key)
+  const schema = NODE_SCHEMA[nodeType as NodeType]
+  if (!schema) return []
+  return [...schema.fields.map((f) => f.key), ...(schema.outputs || []).map((o) => o.param)]
 }
 
 /**

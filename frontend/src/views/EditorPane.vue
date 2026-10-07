@@ -46,7 +46,18 @@ import {
   type VarItem,
   type WindowInfo,
 } from '../types'
-import { CONDITION_OPS, UNARY_OPS, defaultsFor, fieldVisible, mergeWithDefaults, NODE_SCHEMA, type NodeField } from '../lib/nodeSchema'
+import {
+  CONDITION_OPS,
+  UNARY_OPS,
+  defaultsFor,
+  fieldVisible,
+  mergeWithDefaults,
+  nodeOutputs,
+  outputVisible,
+  NODE_SCHEMA,
+  type NodeField,
+  type NodeOutput,
+} from '../lib/nodeSchema'
 import { migrateScript } from '../lib/migrateFlow'
 import {
   COL_PITCH,
@@ -627,7 +638,106 @@ function addVariable() {
 }
 
 function removeVariable(idx: number) {
+  const name = String(variables.value[idx]?.name || '').trim()
   variables.value = variables.value.filter((_, i) => i !== idx)
+  // 顺带把节点里指向它的输出绑定清掉，免得留下一个"节点还在写、变量表里却没有"的幽灵
+  if (name) renameBindings(name, '')
+}
+
+// ---------- 节点输出变量属性（0.1.5）----------
+/**
+ * 变量在这层分两种，界面里也分开管：
+ *
+ *  · **用户自建变量** —— 点「＋ 新增变量」自己建的，用来攒中间数据；
+ *  · **节点输出变量** —— 节点算出来的东西（找图找到没有 / 坐标 / OCR 文本 / 命令输出…）。
+ *
+ * 节点**只声明**"我能产出这些"（见 `nodeSchema` 的 `outputs`），**不会**在创建时自动建变量：
+ * 挂机脚本里绝大多数输出其实用不到，一建就带一堆变量只是往变量表里倒垃圾。
+ * 需要哪个，就在这儿点一下「添加」——这时才真的建变量，并把变量名写回节点参数。
+ */
+const selectedOutputs = computed<NodeOutput[]>(() => {
+  const n = selectedNode.value
+  if (!n) return []
+  return nodeOutputs(n.data.nodeType).filter((o) => outputVisible(o, n.data.params || {}))
+})
+
+/** 某个输出属性当前绑定到哪个变量名（空串 = 用户还没添加）。 */
+function outputBound(o: NodeOutput): string {
+  const n = selectedNode.value
+  return n ? String(n.data.params?.[o.param] ?? '').trim() : ''
+}
+
+/**
+ * 本层全部节点（含组合节点内部）输出绑定到的变量名集合。
+ * 用于判断"删掉这个变量还有没有别人在用"。
+ */
+function collectOutputBinds(): Set<string> {
+  const out = new Set<string>()
+  const walk = (arr: any[]) => {
+    for (const nd of arr || []) {
+      for (const o of nodeOutputs(nd?.data?.nodeType)) {
+        const v = String(nd?.data?.params?.[o.param] ?? '').trim()
+        // 含 {{}} 的是"按轮次写不同变量"，静态判断不了，跳过
+        if (v && !v.includes('{{')) out.add(v)
+      }
+      const inner = nd?.data?.params?.nodes
+      if (Array.isArray(inner)) walk(inner)
+    }
+  }
+  walk(nodes.value)
+  return out
+}
+const outputBoundNames = computed(() => collectOutputBinds())
+
+/** 把某个输出属性添加成本层变量（已有同名变量则直接复用，不重复声明）。 */
+function addOutputVar(o: NodeOutput) {
+  const n = selectedNode.value
+  if (!n || outputBound(o)) return
+  const name = String(o.suggest || o.param).trim()
+  if (!variables.value.some((v) => String(v.name || '').trim() === name)) {
+    variables.value = [...variables.value, { name, type: o.type || 'auto', value: '' }]
+  }
+  n.data.params[o.param] = name
+  markEdited()
+  message.success(`已添加变量「${name}」，运行时会写进这个变量`)
+}
+
+/** 取消添加：清掉节点参数；若没有别的节点再用它，变量本身也一起删掉。 */
+function removeOutputVar(o: NodeOutput) {
+  const n = selectedNode.value
+  if (!n) return
+  const name = outputBound(o)
+  n.data.params[o.param] = ''
+  markEdited()
+  if (!name) return
+  if (!collectOutputBinds().has(name)) {
+    variables.value = variables.value.filter((v) => String(v.name || '').trim() !== name)
+  }
+}
+
+/** 变量改名时，把节点里指向旧名字的输出绑定一起改掉（否则绑定会悄悄断掉）。 */
+function renameBindings(prev: string, next: string) {
+  if (!prev || prev === next) return
+  const walk = (arr: any[]) => {
+    for (const nd of arr || []) {
+      for (const o of nodeOutputs(nd?.data?.nodeType)) {
+        const cur = String(nd?.data?.params?.[o.param] ?? '').trim()
+        if (cur === prev) nd.data.params[o.param] = next
+      }
+      const inner = nd?.data?.params?.nodes
+      if (Array.isArray(inner)) walk(inner)
+    }
+  }
+  walk(nodes.value)
+}
+
+/** 变量名输入框：边打边同步绑定（防止改名把节点输出指到一个不存在的变量上）。 */
+function onVarNameInput(idx: number, val: string) {
+  const v = variables.value[idx]
+  if (!v) return
+  const prev = String(v.name || '').trim()
+  v.name = val
+  renameBindings(prev, String(val || '').trim())
 }
 
 /** 变量名重复检查（重名会让后面的覆盖前面的，必须提醒） */
@@ -1150,6 +1260,11 @@ function onHistoryKey(e: KeyboardEvent) {
     } else if (k === 'v') {
       e.preventDefault()
       pasteClipboard()
+    } else if (k === 's') {
+      // Ctrl+S 保存（直接写回原文件，不弹路径）；Ctrl+Shift+S 另存为（弹路径）
+      e.preventDefault()
+      if (e.shiftKey) saveFlowAs()
+      else saveFlow()
     }
     return
   }
@@ -1425,28 +1540,49 @@ function buildFile(): FlowFile {
   }
 }
 
-/** 把一份脚本 JSON 存成文件（保存当前脚本 / 导出子脚本共用）。 */
-async function saveJsonToFile(data: FlowFile) {
-  const json = JSON.stringify(data, null, 2)
+const SCRIPT_FILE_TYPES = [
+  { description: 'AutoTool 脚本', accept: { 'application/json': ['.agflow'] } },
+]
+
+/** 当前环境有没有文件系统访问 API（桌面壳的 WebView2 / Chrome 系浏览器都有）。 */
+function hasFilePicker(): boolean {
+  return typeof (window as any).showSaveFilePicker === 'function'
+}
+
+function handleLabel(handle: any): string {
+  return String(handle?.name || '脚本文件')
+}
+
+/** 弹系统「保存」对话框挑位置。用户取消 / 环境不支持 → null。 */
+async function pickSaveHandle(suggestedName: string): Promise<any | null> {
   const w = window as any
-  const baseName = data.name || '脚本'
-  // 优先使用文件系统访问 API：弹出原生保存对话框（可覆盖/另存）
-  if (typeof w.showSaveFilePicker === 'function') {
-    try {
-      const handle = await w.showSaveFilePicker({
-        suggestedName: `${baseName}.agflow`,
-        types: [{ description: 'AutoTool 脚本', accept: { 'application/json': ['.agflow'] } }],
-      })
-      const writable = await handle.createWritable()
-      await writable.write(json)
-      await writable.close()
-      return true
-    } catch (e: any) {
-      if (e && e.name === 'AbortError') return false // 用户取消
-      // 否则回退到下载
-    }
+  if (!hasFilePicker()) return null
+  try {
+    return await w.showSaveFilePicker({
+      suggestedName: `${suggestedName}.agflow`,
+      types: SCRIPT_FILE_TYPES,
+    })
+  } catch (e: any) {
+    if (e && e.name === 'AbortError') return null // 用户取消
+    message.error('打开保存对话框失败：' + (e?.message || e))
+    return null
   }
-  // 回退：浏览器下载
+}
+
+/** 写进一个已有句柄。句柄失效（文件被删 / 权限被撤）时返回 false。 */
+async function writeHandle(handle: any, json: string): Promise<boolean> {
+  try {
+    const writable = await handle.createWritable()
+    await writable.write(json)
+    await writable.close()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 兜底：浏览器下载（没有文件系统 API 时；下载目录不弹路径，行为上等同"静默保存"）。 */
+function downloadJson(baseName: string, json: string): void {
   const blob = new Blob([json], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -1454,13 +1590,30 @@ async function saveJsonToFile(data: FlowFile) {
   a.download = `${baseName}.agflow`
   a.click()
   URL.revokeObjectURL(url)
+}
+
+/**
+ * 把一份脚本 JSON 存成文件 —— **总是弹路径**（导出子脚本用；语义就是"另存为"）。
+ * 主流程的保存 / 另存为走下面的 `saveFlow` / `saveFlowAs`。
+ */
+async function saveJsonToFile(data: FlowFile): Promise<boolean> {
+  const json = JSON.stringify(data, null, 2)
+  const baseName = data.name || '脚本'
+  if (!hasFilePicker()) {
+    downloadJson(baseName, json)
+    return true
+  }
+  const handle = await pickSaveHandle(baseName)
+  if (!handle) return false
+  if (!(await writeHandle(handle, json))) {
+    message.error('写文件失败，请换个位置再试')
+    return false
+  }
   return true
 }
 
-async function saveFlow() {
-  const data = buildFile()
-  const ok = await saveJsonToFile(data)
-  if (!ok) return
+/** 保存收尾：记下这次的屏幕 / 窗口参照，并把这批标签标成"已保存"。 */
+function finishSave(data: FlowFile, note: string) {
   fileScreen.value = data.screen ?? null
   fileWindowRect.value = data.window?.rect ?? null
   // 存的是整份根脚本（含子脚本 / 组合节点），所以这些标签都算"已保存"
@@ -1469,11 +1622,78 @@ async function saveFlow() {
     docs.patchTab(t.id, { dirty: false })
     if (t.kind !== 'root') docs.patchTab(t.rootId, { dirty: false })
   }
-  message.success('脚本已保存')
+  message.success(note)
 }
 
-function triggerLoad() {
-  fileInput.value?.click()
+/**
+ * 保存 / 另存为。
+ *
+ * 0.1.5 起**「保存」不再弹路径选择**：脚本一旦有了对应的磁盘文件（第一次保存时选过、
+ * 或者就是从"加载"打开的），之后每次保存都直接写回那个文件。只有三种情况才会弹：
+ *  · 第一次保存（还没有对应文件）；
+ *  · 点的是「另存为」；
+ *  · 原文件已经被删 / 权限被撤销，写不进去了。
+ */
+async function doSave(asNew: boolean): Promise<void> {
+  const data = buildFile()
+  const json = JSON.stringify(data, null, 2)
+  const baseName = data.name || '脚本'
+  const rootId = tab.value?.rootId || ''
+
+  // 没有文件系统 API：只能下载（不弹路径，等于静默保存到下载目录）
+  if (!hasFilePicker()) {
+    downloadJson(baseName, json)
+    finishSave(data, '已下载到浏览器的下载目录')
+    return
+  }
+
+  const existing = asNew ? null : docs.getFileHandle(rootId)
+  if (existing && (await writeHandle(existing, json))) {
+    finishSave(data, `已保存到「${handleLabel(existing)}」`)
+    return
+  }
+
+  // 没有句柄 / 句柄失效 → 让用户选一次位置
+  const picked = await pickSaveHandle(baseName)
+  if (!picked) return // 用户取消：什么都不动（标签保持"未保存"）
+  docs.setFileHandle(rootId, picked)
+  if (!(await writeHandle(picked, json))) {
+    docs.setFileHandle(rootId, null)
+    message.error('保存失败，请换一个位置再试')
+    return
+  }
+  finishSave(data, `已保存到「${handleLabel(picked)}」`)
+}
+
+async function saveFlow() {
+  await doSave(false)
+}
+
+async function saveFlowAs() {
+  await doSave(true)
+}
+
+/**
+ * 打开脚本。
+ *
+ * 0.1.5 起优先走系统「打开」对话框（`showOpenFilePicker`）而不是隐藏的 file input：
+ * 这样能顺便拿到**文件句柄**，之后点「保存」就直接写回这个文件、不用再选路径。
+ * 环境不支持时（或打开失败）退回 file input。
+ */
+async function triggerLoad() {
+  const w = window as any
+  if (typeof w.showOpenFilePicker !== 'function') {
+    fileInput.value?.click()
+    return
+  }
+  try {
+    const [handle] = await w.showOpenFilePicker({ multiple: false, types: SCRIPT_FILE_TYPES })
+    const file = await handle.getFile()
+    loadFileObject(file, handle)
+  } catch (e: any) {
+    if (e && e.name === 'AbortError') return // 用户取消
+    fileInput.value?.click() // 其它原因（权限等）→ 退回传统方式
+  }
 }
 
 /**
@@ -1486,7 +1706,13 @@ function triggerLoad() {
 function onLoadFile(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
-  if (!file) return
+  // file input 拿不到文件句柄，所以 handle 传 null（下次保存会弹一次路径）
+  if (file) loadFileObject(file, null)
+  input.value = ''
+}
+
+/** 读一个 File 并打开（handle 非空时会被记成"这份脚本对应的磁盘文件"）。 */
+function loadFileObject(file: File, handle: any) {
   const reader = new FileReader()
   reader.onload = () => {
     try {
@@ -1498,13 +1724,12 @@ function onLoadFile(e: Event) {
       const fileName = String(file.name || '').replace(/\.agflow$/i, '').trim()
       const name =
         innerName && innerName !== '未命名脚本' ? innerName : fileName || innerName || '未命名脚本'
-      openLoaded(data, name, !!data.window)
+      openLoaded(data, name, !!data.window, handle)
     } catch (err: any) {
       message.error('加载失败：' + err.message)
     }
   }
   reader.readAsText(file)
-  input.value = ''
 }
 
 /** 当前标签能不能被"取代"：必须是根脚本标签，且画布上还没有任何节点 */
@@ -1528,8 +1753,13 @@ function askSaveBeforeReplace(name: string): Promise<'save' | 'discard' | 'cance
   })
 }
 
-/** 加载进来的脚本：落到当前空白标签（取代）或新开一个标签。 */
-async function openLoaded(data: FlowFile, name: string, hadWindow: boolean) {
+/**
+ * 加载进来的脚本：落到当前空白标签（取代）或新开一个标签。
+ *
+ * `handle`：从系统「打开」对话框打开时带过来的文件句柄 —— 记下来之后，
+ * 「保存」就能直接写回同一个文件，不再弹路径。
+ */
+async function openLoaded(data: FlowFile, name: string, hadWindow: boolean, handle: any = null) {
   // 0.1.2 及更早的脚本在这里升级到 0.1.3 的节点体系：
   // 字段改名（stepType→nodeType）、类型改名（click→mouse…）、以及按规范拆开的
   // 「找图判断」。升级是幂等的，所以再打开一次也不会变样。
@@ -1568,6 +1798,9 @@ async function openLoaded(data: FlowFile, name: string, hadWindow: boolean) {
   }
   if (!id) id = docs.openRoot(init, name)
   docs.activate(id)
+  // 记住"这份脚本对应磁盘上的哪个文件"：从系统「打开」对话框进来时能拿到句柄，
+  // 之后「保存」直接写回它、不再弹路径；用 file input 打开的则忘掉旧句柄。
+  docs.setFileHandle(id, handle)
   // 载入时就存在的循环依赖：先提示，运行时引擎还会再拦一次
   const bad = findAnyCycle(
     buildGraph({ nodes: data.nodes || [] }, normalizeScripts(data.scripts), true),
@@ -2226,6 +2459,7 @@ onBeforeUnmount(() => {
       <n-button size="small" @click="newFlow">＋ 新建</n-button>
       <n-button size="small" @click="triggerLoad">📂 加载</n-button>
       <n-button size="small" @click="saveFlow">💾 保存</n-button>
+      <n-button size="small" @click="saveFlowAs">📄 另存为</n-button>
       <input ref="fileInput" type="file" accept=".agflow,application/json" style="display: none" @change="onLoadFile" />
       <input
         ref="subFileInput"
@@ -2752,6 +2986,26 @@ onBeforeUnmount(() => {
               </p>
             </div>
           </template>
+
+          <!-- 输出变量（0.1.5）：节点只"声明"能产出什么，**不会**自动建变量。
+               要哪个就切到「变量」页点一下「添加」——用不到的输出不占变量表。 -->
+          <div v-if="selectedOutputs.length" class="field">
+            <label>输出变量</label>
+            <p class="terminate-hint">
+              这个节点能输出：<b>{{ selectedOutputs.map((o) => o.label).join('、') }}</b>。
+              变量不会自动创建，需要哪个就到「变量」页点一下添加。
+            </p>
+            <n-button
+              size="small"
+              block
+              quaternary
+              type="primary"
+              style="margin-top: 6px"
+              @click="inspTab = 'vars'"
+            >
+              ＋ 去「变量」页添加输出变量
+            </n-button>
+          </div>
           <!-- 普通节点参数面板结束 -->
           </template>
         </template>
@@ -2779,22 +3033,69 @@ onBeforeUnmount(() => {
             变量名重复：{{ duplicateVarNames().join('、') }}。重名的会被后面的覆盖，建议先改掉。
           </n-alert>
 
+          <!-- ============ ① 本层已有变量 ============ -->
+          <div class="vars-group-title">本层变量</div>
+
           <div v-for="(v, i) in variables" :key="i" class="var-row">
             <div class="var-row-top">
-              <n-input v-model:value="v.name" size="small" placeholder="变量名" />
+              <n-input
+                :value="v.name"
+                size="small"
+                placeholder="变量名"
+                @update:value="(val: string) => onVarNameInput(i, val)"
+              />
               <n-button size="tiny" quaternary type="error" @click="removeVariable(i)">✕</n-button>
             </div>
             <div class="var-row-bottom">
               <n-select v-model:value="v.type" :options="VAR_TYPES" size="small" style="width: 108px" />
               <n-input v-model:value="v.value" size="small" placeholder="初始值" />
             </div>
+            <div v-if="outputBoundNames.has(String(v.name || '').trim())" class="var-src">
+              来自节点输出（运行时由该节点写入）
+            </div>
           </div>
 
-          <div v-if="!variables.length" class="vars-empty">本层还没有变量，点下面的按钮新增一条。</div>
+          <div v-if="!variables.length" class="vars-empty">
+            本层还没有变量。可以在下面「＋ 新增变量」自己建一个，也可以直接在「节点输出」里添加。
+          </div>
 
           <div class="field">
-            <n-button size="small" block type="primary" @click="addVariable">＋ 新增变量</n-button>
+            <n-button size="small" block @click="addVariable">＋ 新增变量（自己用）</n-button>
           </div>
+
+          <!-- ============ ② 选中节点的输出变量属性 ============ -->
+          <div class="vars-group-title">节点输出</div>
+
+          <template v-if="selectedNode">
+            <div v-if="selectedOutputs.length" class="out-list">
+              <div v-for="o in selectedOutputs" :key="o.param" class="out-row">
+                <div class="out-main">
+                  <span class="out-label">{{ o.label }}</span>
+                  <span v-if="o.hint" class="out-hint">{{ o.hint }}</span>
+                </div>
+                <div class="out-side">
+                  <template v-if="outputBound(o)">
+                    <n-button size="tiny" quaternary @click="removeOutputVar(o)">
+                      ✓ {{ outputBound(o) }}
+                    </n-button>
+                  </template>
+                  <n-button v-else size="tiny" type="primary" ghost @click="addOutputVar(o)">
+                    ＋ 添加
+                  </n-button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="vars-empty">
+              {{ metaOf(selectedNode.data.nodeType).label }}没有可输出的变量。
+            </div>
+            <p class="terminate-hint">
+              这些是<b>{{ metaOf(selectedNode.data.nodeType).label }}</b>能算出来的数据。
+              <b>不添加就不会产生变量</b>——只有你需要时点「添加」，才会建一条同名变量并由该节点写入。
+              点已添加的变量名可以取消。
+            </p>
+          </template>
+          <div v-else class="vars-empty">在画布上选中一个节点，这里会列出它能输出的变量。</div>
+
           <div class="field">
             <p class="terminate-hint">
               这里声明的是本层的变量：主脚本是<b>全局变量</b>（整个工作流可见），
@@ -3231,6 +3532,54 @@ onBeforeUnmount(() => {
 }
 .var-dup-alert {
   margin-bottom: 10px;
+}
+/* 变量页里的分区小标题（本层变量 / 节点输出） */
+.vars-group-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin: 14px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+/* 变量行底部的来源提示（来自某个节点的输出） */
+.var-src {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+/* 节点输出变量属性列表 */
+.out-list {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.out-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+}
+.out-row + .out-row {
+  border-top: 1px solid var(--border);
+}
+.out-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.out-label {
+  font-size: 13px;
+}
+.out-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.out-side {
+  flex: none;
 }
 .inspector-head {
   display: flex;

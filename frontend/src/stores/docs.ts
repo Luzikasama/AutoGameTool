@@ -85,6 +85,16 @@ export const useDocsStore = defineStore('docs', () => {
 
   // 文档数据本体。markRaw：这是一份"数据库"，不需要 Vue 去追踪里面每个节点。
   const roots = markRaw(new Map<string, RootData>())
+  /**
+   * rootId → 该脚本在磁盘上对应的文件句柄（File System Access API）。
+   *
+   * 为什么要记住它：0.1.5 起**「保存」不再每次弹路径选择**，而是直接写回这个文件；
+   * 只有「另存为」（以及第一次保存、句柄失效后）才弹。句柄拿不到时（浏览器不支持
+   * 该 API、或用户是用 `<input type=file>` 打开的）就退回"每次都弹"的老行为。
+   *
+   * markRaw：它是浏览器给的句柄对象，被 Vue 代理没有任何好处。
+   */
+  const fileHandles = markRaw(new Map<string, any>())
   let seq = 0
 
   function nextId(prefix: string) {
@@ -94,6 +104,17 @@ export const useDocsStore = defineStore('docs', () => {
 
   function getRoot(rootId: string): RootData | undefined {
     return roots.get(rootId)
+  }
+
+  /** 这份脚本当前保存到哪个文件（拿不到就返回 null → 保存时会弹一次路径）。 */
+  function getFileHandle(rootId: string): any {
+    return fileHandles.get(rootId) || null
+  }
+
+  /** 记住 / 清掉脚本对应的文件句柄（传 null 表示忘掉）。 */
+  function setFileHandle(rootId: string, handle: any): void {
+    if (rootId && handle) fileHandles.set(rootId, handle)
+    else fileHandles.delete(rootId)
   }
 
   function refreshScriptIndex(rootId: string) {
@@ -221,7 +242,10 @@ export const useDocsStore = defineStore('docs', () => {
     if (idx < 0) return false
     if (tabs.value.length <= 1) return false
     const wasSub = tabs.value[idx]
-    if (wasSub.kind === 'root') roots.delete(wasSub.rootId)
+    if (wasSub.kind === 'root') {
+      roots.delete(wasSub.rootId)
+      fileHandles.delete(wasSub.rootId)
+    }
     tabs.value.splice(idx, 1)
     if (activeId.value === id) {
       const next = tabs.value[Math.min(idx, tabs.value.length - 1)]
@@ -284,6 +308,8 @@ export const useDocsStore = defineStore('docs', () => {
     scriptIndex,
     rev,
     getRoot,
+    getFileHandle,
+    setFileHandle,
     refreshScriptIndex,
     openRoot,
     openSub,

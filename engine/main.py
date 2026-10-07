@@ -529,7 +529,7 @@ async def lifespan(_: FastAPI):
     enginelog.info("清理完成，引擎退出")
 
 
-app = FastAPI(title="AutoTool Engine", version="0.1.4", lifespan=lifespan)
+app = FastAPI(title="AutoTool Engine", version="0.1.5", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），

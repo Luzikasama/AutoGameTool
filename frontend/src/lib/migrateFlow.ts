@@ -38,8 +38,20 @@ export interface MigrateResult {
   notes: string[]
 }
 
-/** 老节点类型 → 新节点参数：把老字段翻译成新字段（老的键保留，不删） */
-function upgradeParams(oldType: string, newType: NodeType, old: Record<string, any>): Record<string, any> {
+/**
+ * 老节点类型 → 新节点参数：把老字段翻译成新字段（老的键保留，不删）。
+ *
+ * `legacy`：这份文件是不是 `version < 3` 的老文件。**只有老文件才补输出变量名** ——
+ * 0.1.2 的找图节点是"隐式"写 `found / found_x / …` 的，为了不改变老脚本的行为，
+ * 升级时必须把变量名补成明文。而 0.1.5 起输出变量是"用户添加了才有"，
+ * 新文件里这些键本来就存在（值可能是空串），再补 = 又把"自带变量"塞回去。
+ */
+function upgradeParams(
+  oldType: string,
+  newType: NodeType,
+  old: Record<string, any>,
+  legacy = false,
+): Record<string, any> {
   const p: Record<string, any> = { ...(old || {}) }
 
   if (oldType === 'click' && newType === 'mouse') {
@@ -61,8 +73,9 @@ function upgradeParams(oldType: string, newType: NodeType, old: Record<string, a
     // 老的 terminate 语义就是"停掉整次运行"
     if (p.level === undefined) p.level = 'workflow'
   }
-  if (newType === 'find_image') {
+  if (legacy && newType === 'find_image') {
     // 老找图的 click / on_timeout 已由拆图处理；这里只补输出变量名
+    // （0.1.2 的找图是隐式写这几个变量的，不补成明文老脚本就断了）
     if (p.save_found === undefined) p.save_found = 'found'
     if (p.save_x === undefined) p.save_x = 'found_x'
     if (p.save_y === undefined) p.save_y = 'found_y'
@@ -126,7 +139,11 @@ function mkNode(id: string, t: NodeType, params: Record<string, any>, pos: { x: 
 }
 
 /** 升级整张图（根脚本或某个子脚本），幂等。 */
-export function migrateFlow(nodesIn: any[] | undefined, edgesIn: any[] | undefined): MigrateResult {
+export function migrateFlow(
+  nodesIn: any[] | undefined,
+  edgesIn: any[] | undefined,
+  legacy = false,
+): MigrateResult {
   const notes: string[] = []
   const nodes: any[] = Array.isArray(nodesIn) ? nodesIn.map((n) => ({ ...n })) : []
   const edges: any[] = Array.isArray(edgesIn) ? edgesIn.map((e) => ({ ...e })) : []
@@ -148,7 +165,7 @@ export function migrateFlow(nodesIn: any[] | undefined, edgesIn: any[] | undefin
     // 比如把一个老文件里的节点合并后再读回来），所以要钻进去。
     if (oldType === GROUP_TYPE) {
       const gp = { ...params }
-      const inner = migrateFlow(gp.nodes, gp.edges)
+      const inner = migrateFlow(gp.nodes, gp.edges, legacy)
       gp.nodes = inner.nodes
       gp.edges = inner.edges
       if (!Array.isArray(gp.variables)) gp.variables = []
@@ -167,11 +184,17 @@ export function migrateFlow(nodesIn: any[] | undefined, edgesIn: any[] | undefin
       const fi = mkNode(
         fiId,
         'find_image',
-        upgradeParams('find_image', 'find_image', {
-          template: params.template,
-          threshold: params.threshold,
-          timeout_ms: params.timeout_ms,
-        }),
+        // 这条路径本身就是"老找图判断拆图"，必然是老文件 → 补输出变量名
+        upgradeParams(
+          'find_image',
+          'find_image',
+          {
+            template: params.template,
+            threshold: params.threshold,
+            timeout_ms: params.timeout_ms,
+          },
+          true,
+        ),
         { x: pos.x - COL_PITCH_FALLBACK, y: pos.y },
       )
       // 入边改指到找图节点
@@ -194,7 +217,7 @@ export function migrateFlow(nodesIn: any[] | undefined, edgesIn: any[] | undefin
       const wantClick = params.click === true
       const wantExit = params.on_timeout === 'exit'
       writeType(node, 'find_image')
-      writeParams(node, upgradeParams('find_image', 'find_image', params))
+      writeParams(node, upgradeParams('find_image', 'find_image', params, legacy))
       out.push(node)
       if (!wantClick && !wantExit) continue
 
@@ -271,7 +294,7 @@ export function migrateFlow(nodesIn: any[] | undefined, edgesIn: any[] | undefin
       continue
     }
     writeType(node, mapped)
-    writeParams(node, upgradeParams(oldType, mapped, params))
+    writeParams(node, upgradeParams(oldType, mapped, params, legacy))
     out.push(node)
   }
 
@@ -331,7 +354,7 @@ export function migrateScript(data: any): { data: any; notes: string[] } {
   const version = Number(data.version) || 1
   const legacy = version < 3
   const notes: string[] = []
-  const root = migrateFlow(data.nodes, data.edges)
+  const root = migrateFlow(data.nodes, data.edges, legacy)
   notes.push(...root.notes)
   const scripts: Record<string, any> = {}
   const raw = data.scripts
@@ -341,7 +364,7 @@ export function migrateScript(data: any): { data: any; notes: string[] } {
         scripts[key] = sub
         continue
       }
-      const r = migrateFlow(sub.nodes, sub.edges)
+      const r = migrateFlow(sub.nodes, sub.edges, legacy)
       notes.push(...r.notes)
       scripts[key] = { ...sub, nodes: r.nodes, edges: r.edges }
     }

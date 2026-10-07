@@ -720,6 +720,41 @@ async def case_input_mode_per_node() -> None:
     check("老脚本的流程级 input_mode 仍作为兜底默认", bool(mm) and mm[0][1][4] == "simulated", str(mm))
 
 
+async def case_output_var_optional() -> None:
+    """输出变量是"用户在变量页添加了才有"（0.1.5）。
+
+    以前 calculate / text_process / clipboard 在参数为空时会**兜底**写一个
+    `result` / `text_result` / `clip` 变量 —— 那就是"节点自带的变量"，
+    用不到也照样塞进变量表。现在空参数 = 不写。
+    """
+    print("[14] 输出变量：没添加就不产生（0.1.5）")
+
+    flow = {
+        "name": "无输出变量",
+        "repeat": 1,
+        "nodes": [
+            {"id": "c1", "type": "calculate", "params": {"expr": "1 + 1"}},
+            {"id": "t1", "type": "text_process", "params": {"action": "trim", "input": "  x  "}},
+            {"id": "cb1", "type": "clipboard", "params": {"action": "get"}},
+        ],
+        "edges": [edge("c1", "t1"), edge("t1", "cb1")],
+    }
+    ex, logs, _ = await drive(flow)
+    for name in ("result", "text_result", "clip"):
+        check(f"没添加输出变量就不产生 {name}", not ex.vars.has(name), repr(ex.vars.get(name)))
+
+    flow2 = {
+        "name": "有输出变量",
+        "repeat": 1,
+        "nodes": [
+            {"id": "c1", "type": "calculate", "params": {"expr": "2 * 3", "save_var": "n"}},
+        ],
+        "edges": [],
+    }
+    ex2, _, _ = await drive(flow2)
+    check("添加了输出变量就照常写入", ex2.vars.get("n") == 6, repr(ex2.vars.get("n")))
+
+
 async def main() -> int:
     case_node_coverage()
     await case_legacy_and_nodes()
@@ -734,6 +769,7 @@ async def main() -> int:
     await case_group_node()
     await case_var_scope()
     await case_input_mode_per_node()
+    await case_output_var_optional()
 
     print()
     if FAILED:
