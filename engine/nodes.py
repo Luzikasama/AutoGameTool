@@ -757,8 +757,14 @@ async def variable(ex, p) -> None:
     if not name:
         await ex.log('warn', '变量节点：没有填写变量名')
         return
+    # 作用域：local = 只写当前这一层（子脚本 / 组合节点的「局部变量」），
+    #         global = 直接写最外层（主脚本的「全局变量」，外层也能看到）
+    to_global = str(p.get('scope') or 'local') == 'global'
     if action == 'delete':
-        scope.delete(name)
+        if to_global:
+            scope.delete_global(name)
+        else:
+            scope.delete(name)
         await ex.log('debug', f'已删除变量 {name}')
         return
     if action == 'get':
@@ -767,7 +773,10 @@ async def variable(ex, p) -> None:
             await ex.log('warn', '变量节点：没有填写"复制到变量"的目标名')
             return
         value = scope.get(name)
-        scope.set(target, value)
+        if to_global:
+            scope.set_global(target, value)
+        else:
+            scope.set(target, value)
         await ex.log('debug', f'变量 {name} → {target}（{value!r}）')
         return
     raw = p.get('value')
@@ -776,8 +785,11 @@ async def variable(ex, p) -> None:
         value = resolve(raw, scope, str(p.get('var_type') or 'auto'))
     else:
         value = coerce(raw, str(p.get('var_type') or 'auto'))
-    scope.set(name, value)
-    await ex.log('debug', f'变量 {name} = {value!r}')
+    if to_global:
+        scope.set_global(name, value)
+    else:
+        scope.set(name, value)
+    await ex.log('debug', f'变量 {name} = {value!r}{"（全局）" if to_global else ""}')
 
 
 async def calculate(ex, p) -> None:

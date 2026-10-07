@@ -9,15 +9,16 @@
  *  · 引擎连接、运行状态、日志、悬浮框、模板列表是**全应用一份**，分别在
  *    `stores/engine.ts` 与 `stores/project.ts` —— 引擎只允许一条页面连接。
  *
- * 标签分两类：
- *  · root —— 一个独立的脚本（顶层文件）
- *  · sub  —— 某个脚本内部的子脚本，用独立标签编辑，保存时随父脚本一起写回
+ * 标签分三类：
+ *  · root  —— 一个独立的脚本（顶层文件）
+ *  · sub   —— 某个脚本内部的子脚本，用独立标签编辑，保存时随父脚本一起写回
+ *  · group —— 画布上某个「组合节点」的内部图（双击该节点进入），0.1.4 新增
  *
  * 标签栏（`.tabstrip`）不在本组件里直接渲染位置，而是作为 `#tabs` 插槽交给各 pane，
  * 由 pane 放在自己的「新建 / 加载 / 保存」行下面 —— 标签属于那个编辑器，位置就该由它决定。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { NButton, NTooltip, useDialog, useMessage } from 'naive-ui'
+import { NButton, useDialog, useMessage } from 'naive-ui'
 import EditorPane from './EditorPane.vue'
 import SettingsModal from '../components/SettingsModal.vue'
 import { goodbyeBeacon } from '../api/client'
@@ -37,9 +38,11 @@ const settingsVisible = ref(false)
 const tabs = computed(() => docs.tabs)
 const activeId = computed(() => docs.activeId)
 
-/** 子脚本标签的父脚本名（悬停提示用） */
-function parentName(t: DocMeta) {
-  return docs.getRoot(t.rootId)?.name || ''
+/** 标签图标：根脚本=文档、子脚本=包裹、组合节点=拼图（组合节点的编辑标签） */
+function tabIcon(t: DocMeta) {
+  if (t.kind === 'sub') return '📦'
+  if (t.kind === 'group') return '🧩'
+  return '📄'
 }
 
 function addTab() {
@@ -235,26 +238,20 @@ onBeforeUnmount(() => {
               @pointerdown="onTabPointerDown(i, $event)"
               @click="onTabClick(t2.id)"
             >
-              <span class="tab-icon">{{ t2.kind === 'sub' ? '📦' : '📄' }}</span>
-              <span
-                class="tab-name"
-                :title="t2.kind === 'sub' ? `子脚本 · 属于「${parentName(t2)}」` : t2.name"
-              >
-                {{ t2.name }}
-              </span>
-              <span v-if="t2.dirty" class="tab-dot" title="有未保存的改动" />
+              <span class="tab-icon">{{ tabIcon(t2) }}</span>
+              <span class="tab-name">{{ t2.name }}</span>
+              <span v-if="t2.dirty" class="tab-dot" />
               <button
                 v-if="tabs.length > 1"
                 class="tab-close"
                 type="button"
                 draggable="false"
-                title="关闭这个编辑器"
                 @click.stop="requestClose(t2)"
               >
                 ×
               </button>
             </div>
-            <button class="tab-add" type="button" title="新建脚本（新标签）" @click="addTab">＋</button>
+            <button class="tab-add" type="button" @click="addTab">＋</button>
           </div>
         </template>
       </EditorPane>
@@ -268,7 +265,7 @@ onBeforeUnmount(() => {
       <div class="logpanel-head">
         <span class="logpanel-title">运行日志</span>
         <button class="lf-btn" type="button" @click="project.clearLogs()">清空</button>
-        <button class="lf-btn" type="button" title="收起日志" @click="logOpen = false">—</button>
+        <button class="lf-btn" type="button" @click="logOpen = false">—</button>
       </div>
       <div ref="logBody" class="logpanel-body">
         <div v-for="(l, i) in project.logs" :key="i" class="log-line" :class="l.level">
@@ -280,37 +277,22 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 底部控制条：左下角设定齿轮（只有图标），右下角日志 / 悬浮框开关
-         （同样只有图标，名称挂在鼠标悬停提示上） -->
+         （同样只有图标）。0.1.4 起**不再挂悬停说明**：按钮的含义靠图标本身表达。 -->
     <div class="bottombar">
-      <n-tooltip trigger="hover" :delay="400">
-        <template #trigger>
-          <button class="bb-gear" type="button" @click="settingsVisible = true">⚙</button>
-        </template>
-        设定
-      </n-tooltip>
+      <button class="bb-gear" type="button" @click="settingsVisible = true">⚙</button>
       <div class="spacer" />
-      <n-tooltip trigger="hover" :delay="400">
-        <template #trigger>
-          <button class="bb-btn" type="button" :class="{ on: logOpen }" @click="logOpen = !logOpen">
-            <span class="bb-icon">▤</span>
-          </button>
-        </template>
-        运行日志
-      </n-tooltip>
-      <n-tooltip trigger="hover" :delay="400">
-        <template #trigger>
-          <button
-            class="bb-btn"
-            type="button"
-            :class="{ on: eng.overlayEnabled }"
-            :disabled="!eng.overlayAvailable"
-            @click="toggleOverlay"
-          >
-            <span class="bb-icon">🪟</span>
-          </button>
-        </template>
-        悬浮框
-      </n-tooltip>
+      <button class="bb-btn" type="button" :class="{ on: logOpen }" @click="logOpen = !logOpen">
+        <span class="bb-icon">▤</span>
+      </button>
+      <button
+        class="bb-btn"
+        type="button"
+        :class="{ on: eng.overlayEnabled }"
+        :disabled="!eng.overlayAvailable"
+        @click="toggleOverlay"
+      >
+        <span class="bb-icon">🪟</span>
+      </button>
     </div>
 
     <SettingsModal v-model:show="settingsVisible" />
@@ -472,7 +454,7 @@ onBeforeUnmount(() => {
 .bottombar .spacer {
   flex: 1;
 }
-/* 只有图标的按钮：名称改为悬停时显示，所以按钮做成固定小方块，图标放大一点 */
+/* 只有图标的按钮：含义由图标本身表达（0.1.4 起不再挂悬停说明） */
 .bb-btn {
   display: inline-flex;
   align-items: center;

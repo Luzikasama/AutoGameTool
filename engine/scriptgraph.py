@@ -30,11 +30,18 @@ ROOT_NODE = "__root__"
 # 环检测是更根本的防线，这个上限只用来兜住"环检测漏掉的、或运行时才出现的"极端情况。
 MAX_SCRIPT_DEPTH = 16
 
+# 遍历流程图（钻组合节点）时的最大深度，防手工构造的畸形文件把递归打爆。
+_MAX_WALK_DEPTH = 24
 
-def collect_calls(flow) -> list[str]:
-    """一段流程里被调用的脚本 id（按出现顺序、去重）。"""
+
+def collect_calls(flow, _depth: int = 0) -> list[str]:
+    """一段流程里被调用的脚本 id（按出现顺序、去重）。
+
+    **会钻进组合节点**：组合节点把内部图存在自己的 params 里，里面同样可能有
+    「调用脚本」节点；漏掉它们会让"子脚本找不到 / 循环调用"这两类错误从组合节点里溜过去。
+    """
     out: list[str] = []
-    if not isinstance(flow, dict):
+    if not isinstance(flow, dict) or _depth > _MAX_WALK_DEPTH:
         return out
     for n in flow.get("nodes") or []:
         if not isinstance(n, dict):
@@ -45,9 +52,14 @@ def collect_calls(flow) -> list[str]:
         #   引擎负载的扁平 {type, params}
         data = n.get("data") if isinstance(n.get("data"), dict) else {}
         ntype = data.get("nodeType") or data.get("stepType") or n.get("type")
+        params = (data.get("params") if data else None) or n.get("params") or {}
+        if ntype == "group":
+            for sid in collect_calls(params, _depth + 1):
+                if sid not in out:
+                    out.append(sid)
+            continue
         if ntype != "script_call":
             continue
-        params = (data.get("params") if data else None) or n.get("params") or {}
         sid = str(params.get("script_id") or "").strip()
         if sid and sid not in out:
             out.append(sid)
@@ -67,11 +79,14 @@ def normalize_scripts(raw) -> dict[str, dict]:
             continue
         nodes = value.get("nodes")
         edges = value.get("edges")
+        variables = value.get("variables")
         out[sid] = {
             "id": sid,
             "name": str(value.get("name") or sid),
             "nodes": nodes if isinstance(nodes, list) else [],
             "edges": edges if isinstance(edges, list) else [],
+            # 子脚本自己的「局部变量」声明（0.1.4 起）。执行时初始化到子作用域。
+            "variables": variables if isinstance(variables, list) else [],
         }
     return out
 

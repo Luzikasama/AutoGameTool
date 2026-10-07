@@ -14,16 +14,25 @@
   用异常实现（BreakLoop / EndScript）——嵌套循环时"break 最近一层"的语义天然正确。
 
 子脚本（嵌套调用）：
-- 流程可携带 scripts={id: {id, name, nodes, edges}}（子脚本库），
+- 流程可携带 scripts={id: {id, name, nodes, edges, variables}}（子脚本库），
   「调用脚本」节点按 params.script_id 就地展开执行。
 - 防递归三道防线（见 scriptgraph.py）：编辑器拦截 / 运行前整图环检测 /
   运行时调用栈 + MAX_SCRIPT_DEPTH。
 
-变量作用域：整个工作流共享一份（主脚本与所有层子脚本），见 runvars.VarScope。
+组合节点（0.1.4 起，「合并节点」的产物）：
+- 一个 `group` 节点把内部 nodes/edges 直接存在它自己的 params 里（不是外部脚本库），
+  执行时在**子作用域**里就地走一遍。它对上层的控制流是**透明**的：
+  内部触发的「终止-结束当前脚本 / 结束当前循环」会穿透到外层，
+  所以"把一段流程合并起来"不会改变这段流程原本的语义。
+
+变量作用域（0.1.4 起改为层级）：
+- 主脚本那一份是「全局变量」，子脚本 / 组合节点各自持有「局部变量」；
+- 读逐级往上找、写只落本层，见 runvars.VarScope。
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 import time
 import traceback
@@ -70,6 +79,8 @@ _STEP_LABEL = {
     'process': '进程',
     'file': '文件',
     'command': '命令',
+    # 容器节点（不属于六大类）：由「合并节点」产生，双击可进入编辑
+    'group': '组合节点',
 }
 
 # 0.1.2 及更早的步骤类型 → 0.1.3 节点类型。
@@ -97,8 +108,23 @@ def normalize_type(t: Any) -> str:
     return _LEGACY_TYPES.get(s, s)
 
 
-def _validate_graph(nodes, edges, where: str) -> None:
-    """校验一张图（根流程或某个子脚本）的节点与连线，非法时抛 ValueError。"""
+# 组合节点（容器节点）的类型名。它**不属于六大类的 25 个核心节点**：
+# 「合并节点」把画布上选中的一串相邻节点装进它内部，双击可进入编辑。
+GROUP_NODE = 'group'
+
+# 组合节点允许的最大嵌套层数。
+#
+# 组合节点的内部图是**嵌在节点参数里**的，天然不可能成环（不像子脚本可以互相调用），
+# 所以这里只需防"手工改 JSON 手滑嵌套几千层"这种极端输入。
+MAX_GROUP_DEPTH = 16
+
+
+def _validate_graph(nodes, edges, where: str, depth: int = 0) -> None:
+    """校验一张图（根流程 / 子脚本 / 组合节点内部）的节点与连线，非法时抛 ValueError。
+
+    组合节点把内部图放在自己的 params 里，所以这里要**递归**下去 ——
+    否则一个"内部连线指向不存在节点"的组合节点会一直藏到运行时才炸。
+    """
     if not isinstance(nodes, list) or not isinstance(edges, list):
         raise ValueError(f"{where}的 nodes/edges 必须是数组")
     ids = set()
@@ -109,6 +135,17 @@ def _validate_graph(nodes, edges, where: str) -> None:
     for e in edges:
         if not isinstance(e, dict) or e.get("source") not in ids or e.get("target") not in ids:
             raise ValueError(f"{where}里存在指向不存在节点的连线: {e!r}")
+    if depth >= MAX_GROUP_DEPTH:
+        raise ValueError(f"{where}的组合节点嵌套层数超过上限（{MAX_GROUP_DEPTH} 层）")
+    for n in nodes:
+        if normalize_type(n.get("type")) != GROUP_NODE:
+            continue
+        params = n.get("params") or {}
+        inner_nodes, inner_edges = params.get("nodes") or [], params.get("edges") or []
+        if not inner_nodes and not inner_edges:
+            continue
+        label = str(params.get("name") or "组合节点")
+        _validate_graph(inner_nodes, inner_edges, f"{where} → 组合节点「{label}」", depth + 1)
 
 
 def validate_flow(flow: dict) -> None:
@@ -158,7 +195,12 @@ class Executor:
 
         # ---- 一次运行的执行上下文（run() 里设置，节点实现直接读）----
         self.vars = VarScope()
+        # 输入模式由**每个输入节点自己**的参数决定（0.1.4 起）；
+        # 这里是流程级的兜底默认值：老脚本 / 没写 input_mode 的节点用它。
         self.input_mode = 'real'
+        self._default_input_mode = 'real'
+        # 组合节点嵌套深度（见 MAX_GROUP_DEPTH）
+        self._group_depth = 0
         self.window_hwnd: int | None = None
         self.scale: Callable[[Any, Any], tuple[int, int]] | None = None
         # 当前节点往悬浮框/日志里报的"一句话结果"（节点实现可写）
@@ -414,8 +456,11 @@ class Executor:
         self.call_stack = []
         self.scripts = normalize_scripts(flow.get("scripts") if isinstance(flow, dict) else None)
         self._ov_loop, self._ov_total = 0, 0
-        # 每次开跑都是一份全新的变量表：上一次运行残留的变量会让本次判断读到脏数据
+        # 每次开跑都是一份全新的变量表：上一次运行残留的变量会让本次判断读到脏数据。
+        # 这份就是「全局变量」—— 主脚本声明的变量在开跑时先初始化进去。
         self.vars = VarScope()
+        self.vars.seed(flow.get("variables") if isinstance(flow, dict) else None)
+        self._group_depth = 0
         self.last_message = ''
         try:
             await self._state("running")
@@ -438,13 +483,16 @@ class Executor:
 
             nodes = flow.get("nodes", [])
             edges = flow.get("edges", [])
-            self.input_mode = flow.get("input_mode", "real")
+            # 流程级兜底输入方式（老脚本 / 没有单独设定 input_mode 的输入节点用它）
+            self._default_input_mode = str(flow.get("input_mode") or "real")
+            self.input_mode = self._default_input_mode
             win = flow.get("window")
             self.window_hwnd = win.get("hwnd") if isinstance(win, dict) else None
 
             await self.log(
                 "info",
-                f"开始执行「{flow.get('name', '未命名')}」：{len(nodes)} 个节点 × {repeat} 轮，输入模式={self.input_mode}"
+                f"开始执行「{flow.get('name', '未命名')}」：{len(nodes)} 个节点 × {repeat} 轮，"
+                f"默认输入方式={'真实键鼠' if self._default_input_mode == 'real' else '后台消息'}"
                 + (f"，内嵌 {len(self.scripts)} 个子脚本" if self.scripts else ""),
             )
             try:
@@ -472,11 +520,17 @@ class Executor:
             except Exception:
                 pass
 
-    async def _run_graph(self, nodes: list, edges: list, repeat: int, scope: str = "") -> None:
-        """走完一张流程图（根脚本或某一层子脚本），共 repeat 轮。
+    async def _run_graph(
+        self, nodes: list, edges: list, repeat: int, scope: str = "", as_script: bool = True
+    ) -> None:
+        """走完一张流程图（根脚本 / 某一层子脚本 / 某个组合节点内部），共 repeat 轮。
 
         子脚本一律 repeat=1：循环由最外层决定，这样"调用脚本"与"把这些节点直接
-        合并进主流程"（打包合并）的运行语义才一致。
+        合并进主流程"（合并节点）的运行语义才一致。
+
+        as_script=False（组合节点内部）时**不吞** EndScript / BreakLoop ——
+        组合节点只是把一段流程装起来，里面写的"结束当前脚本 / 结束当前循环"
+        应该照旧作用到真正的脚本 / 循环上。
         """
         prefix = f"{scope}：" if scope else ""
         node_map = {n["id"]: n for n in nodes}
@@ -510,8 +564,12 @@ class Executor:
                     await self.log("debug", f"{prefix}开始（第 {r + 1}/{repeat} 遍）")
                 await self._walk(start_id, node_map, adj, prefix, executed_once)
         except EndScript:
+            if not as_script:
+                raise
             await self.log("info", f"{prefix}脚本被「终止」节点结束")
         except BreakLoop:
+            if not as_script:
+                raise
             # 顶层（不在任何循环里）用了「结束当前循环」：没有循环可结束，当作这一段结束
             await self.log("warn", f"{prefix}「终止」节点设置了结束循环，但这里不在任何循环里，已忽略")
         if self.stopped:
@@ -599,6 +657,10 @@ class Executor:
         self, node: dict, ntype: str, params: dict, node_map: dict, adj: dict, prefix: str
     ) -> str | None:
         """执行一个节点。返回出口名（分支节点）或 None（普通节点 / 已处理）。"""
+        # 输入方式（真实键鼠 / 后台消息）0.1.4 起挂在**节点自己**的参数上；
+        # 这里统一取一次，节点实现照旧读 ex.input_mode，不需要各自解析参数。
+        self.input_mode = str(params.get('input_mode') or self._default_input_mode or 'real')
+
         if ntype == 'terminate':
             await self._do_terminate(params, prefix)
             return None
@@ -621,6 +683,10 @@ class Executor:
             await self._call_script(params, prefix)
             return None
 
+        if ntype == GROUP_NODE:
+            await self._exec_group(params, prefix)
+            return None
+
         handler = nodemod.HANDLERS.get(ntype)
         if handler is None:
             await self.log("warn", f"{prefix}未知节点类型: {ntype}")
@@ -631,6 +697,50 @@ class Executor:
             # 单步失败只记录，不中断整个流程（挂机场景更稳）
             await self.log("error", f"{prefix}节点执行失败({ntype}): {e}", node.get("id"))
         return None
+
+    async def _exec_group(self, params: dict, prefix: str) -> None:
+        """执行「组合节点」：把内部那张图在**子作用域**里就地走一遍。
+
+        - 组合节点是**透明**的：内部触发的「结束当前脚本 / 结束当前循环」会穿透到外层
+          （`as_script=False`），所以合并 / 拆开不会改变这段流程的语义。
+        - 内部只能跑一遍（repeat=1）：循环由最外层决定，和子脚本一致。
+        - 局部变量：params.variables 声明的值会在进入时初始化到子作用域。
+        """
+        nodes = params.get('nodes') or []
+        edges = params.get('edges') or []
+        name = str(params.get('name') or '组合节点')
+        if not nodes:
+            await self.log('warn', f'{prefix}组合节点「{name}」里没有节点，已跳过')
+            return
+        if self._group_depth >= MAX_GROUP_DEPTH:
+            await self.log(
+                'error',
+                f'{prefix}组合节点「{name}」嵌套层数超过上限（{MAX_GROUP_DEPTH} 层），已跳过',
+            )
+            return
+
+        await self.log('info', f'{prefix}进入组合节点「{name}」（{len(nodes)} 个节点）')
+        self._group_depth += 1
+        try:
+            with self._child_scope(params.get('variables')):
+                await self._run_graph(
+                    nodes, edges, 1, scope=f'组合节点「{name}」', as_script=False
+                )
+        finally:
+            self._group_depth -= 1
+        if self.stopped:
+            return
+        await self.log('info', f'{prefix}组合节点「{name}」执行完成')
+
+    @contextlib.contextmanager
+    def _child_scope(self, declared):
+        """临时把 self.vars 换成子作用域（读向上找、写只落本层）。"""
+        prev = self.vars
+        self.vars = prev.child(declared)
+        try:
+            yield self.vars
+        finally:
+            self.vars = prev
 
     async def _do_terminate(self, params: dict, prefix: str) -> None:
         """终止节点：按 level 决定终止范围。"""
@@ -762,7 +872,10 @@ class Executor:
         await self.log("info", f"{prefix}进入子脚本「{sub['name']}」（第 {len(self.call_stack) + 1} 层）")
         self.call_stack.append({"id": sid, "name": sub["name"]})
         try:
-            await self._run_graph(nodes, sub.get("edges") or [], 1, scope=f"子脚本「{sub['name']}」")
+            # 子脚本有自己的「局部变量」：进入时初始化到子作用域，
+            # 里面新建/改动的变量**不会**回流到调用方（要共享就显式写全局）。
+            with self._child_scope(sub.get("variables")):
+                await self._run_graph(nodes, sub.get("edges") or [], 1, scope=f"子脚本「{sub['name']}」")
         finally:
             # 异常安全出栈：漏掉一次 pop，之后所有调用都会被误判成"嵌套过深"
             self.call_stack.pop()

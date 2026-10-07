@@ -19,11 +19,8 @@ import {
   NInputNumber,
   NModal,
   NPopconfirm,
-  NRadioButton,
-  NRadioGroup,
   NSelect,
   NSwitch,
-  NTooltip,
   useDialog,
   useMessage,
 } from 'naive-ui'
@@ -38,24 +35,26 @@ import { useClipboardStore } from '../stores/clipboard'
 import {
   CATEGORY_META,
   CATEGORY_ORDER,
+  GROUP_META,
+  GROUP_TYPE,
   NODE_META,
   nodesOfCategory,
+  VAR_TYPES,
   type FlowFile,
   type NodeCategory,
   type NodeType,
+  type VarItem,
   type WindowInfo,
 } from '../types'
 import { CONDITION_OPS, UNARY_OPS, defaultsFor, fieldVisible, mergeWithDefaults, NODE_SCHEMA, type NodeField } from '../lib/nodeSchema'
 import { migrateScript } from '../lib/migrateFlow'
 import {
-  canPack,
   COL_PITCH,
   compileMacroPieces,
   expandPieces,
   NODE_H,
   NODE_W,
   orderChain,
-  packStepsToMacro,
   ROW_PITCH,
   splitGridLayout,
   splitGridPositions,
@@ -87,6 +86,8 @@ const root = computed(() => {
   return t ? docs.getRoot(t.rootId) : undefined
 })
 const isSub = computed(() => tab.value?.kind === 'sub')
+/** 本标签是不是在编辑某个「组合节点」的内部图（双击组合节点进来） */
+const isGroup = computed(() => tab.value?.kind === 'group')
 
 const nodeTypes: any = { step: markRaw(StepNode) }
 /** 目前 palette 里展开的是哪一类（六大类通过上方切换） */
@@ -96,7 +97,7 @@ const nodes = ref<any[]>([])
 const edges = ref<any[]>([])
 const selectedId = ref<string | null>(null)
 // 多选（Vue Flow 内建：空白处左键拖拽框选、Ctrl+点击逐个加选）选中的节点 id。
-// 用 selection-change 事件单独记一份，而不是依赖 node.selected —— 打包按钮的
+// 用 selection-change 事件单独记一份，而不是依赖 node.selected —— 合并按钮的
 // 可用状态/数量要能跟着选择实时变。
 const selIds = ref<string[]>([])
 const selectedWinHwnd = ref<number>(0)
@@ -106,38 +107,77 @@ const selectedWinHwnd = ref<number>(0)
 // 上万节点的图不需要 Vue 去追），镜像则保证「保存 / 另一个标签读得到」。
 const flowName = ref('未命名脚本')
 const repeat = ref(1)
-const inputMode = ref<'real' | 'simulated'>('real')
 const boundWindow = ref<{ hwnd: number; title: string } | null>(null)
 const fileScreen = ref<{ width: number; height: number } | null>(null)
 const fileWindowRect = ref<WindowInfo['rect'] | null>(null)
+/**
+ * 本层作用域声明的变量。
+ *
+ * 局部持有 + 镜像进容器（和 nodes/edges 同一套路）：容器对象是 markRaw 的普通数据，
+ * 直接改它不会触发任何响应式刷新，右侧变量面板就永远是打开时那一份。
+ */
+const variables = ref<VarItem[]>([])
 
-/** 本视图编辑的流程是根脚本还是子脚本 */
-function flowOfRoot(): { nodes: any[]; edges: any[]; name: string } {
-  const r = root.value
+/** 右侧面板当前显示哪一页 */
+const inspTab = ref<'params' | 'vars'>('params')
+
+/**
+ * 本标签编辑的「流程容器」——节点与连线的实际落点。
+ *
+ * 三种可能：
+ *  · 根脚本标签    → 根文档本身（里面就是主流程）
+ *  · 子脚本标签    → 根文档 scripts 里的某个子脚本
+ *  · 组合节点标签  → 沿 groupPath 逐层下钻，最终落在某个组合节点的 params 上
+ *
+ * 之所以要一个统一的"容器"概念：0.1.4 起同一个编辑器要能编辑这三种东西，
+ * 而它们的 nodes/edges/name/variables 形状是一样的，只是所在对象不同。
+ */
+function container(): { kind: 'root' | 'sub' | 'group'; obj: any } | null {
   const t = tab.value
-  if (!r || !t) return { nodes: [], edges: [], name: '未命名脚本' }
+  const r = root.value
+  if (!t || !r) return null
+  if (t.kind === 'root') return { kind: 'root', obj: r }
   if (t.kind === 'sub') {
     const s = r.scripts[t.scriptId]
-    return s ? { nodes: s.nodes, edges: s.edges, name: s.name } : { nodes: [], edges: [], name: t.scriptId }
+    return s ? { kind: 'sub', obj: s } : null
   }
-  return { nodes: r.nodes, edges: r.edges, name: r.name }
+  // 组合节点：起点是"它所在的那份脚本"（根脚本或某个子脚本），然后沿路径下钻
+  let arr: any[] = t.scriptId ? r.scripts[t.scriptId]?.nodes || [] : r.nodes
+  let params: any = null
+  for (const id of t.groupPath || []) {
+    const n = arr.find((x: any) => x?.id === id)
+    if (!n || n?.data?.nodeType !== GROUP_TYPE) return null
+    params = n.data.params || {}
+    arr = params.nodes || []
+  }
+  return params ? { kind: 'group', obj: params } : null
+}
+
+/** 本视图的流程是根脚本、子脚本还是组合节点内部（读初始状态用） */
+function flowOfRoot(): { nodes: any[]; edges: any[]; name: string; variables: VarItem[] } {
+  const c = container()
+  const t = tab.value
+  if (!c || !t) return { nodes: [], edges: [], name: '未命名脚本', variables: [] }
+  return {
+    nodes: c.obj.nodes || [],
+    edges: c.obj.edges || [],
+    name: c.obj.name || (t.kind === 'group' ? '组合节点' : '未命名脚本'),
+    variables: Array.isArray(c.obj.variables) ? c.obj.variables : [],
+  }
 }
 
 /** 把本视图的编辑结果写回文档存储（保存、标签标题、子脚本列表都读它） */
 function mirrorToStore() {
-  const r = root.value
+  const c = container()
   const t = tab.value
-  if (!r || !t) return
-  const flow = flowOfRoot()
-  flow.nodes = nodes.value
-  flow.edges = edges.value
-  if (t.kind === 'sub') {
-    const s = r.scripts[t.scriptId]
-    if (s) s.name = flowName.value
-  } else {
-    r.name = flowName.value
+  const r = root.value
+  if (!c || !t || !r) return
+  c.obj.nodes = nodes.value
+  c.obj.edges = edges.value
+  c.obj.name = flowName.value
+  c.obj.variables = variables.value
+  if (c.kind === 'root') {
     r.repeat = repeat.value
-    r.inputMode = inputMode.value
     r.boundWindow = boundWindow.value ? { ...boundWindow.value } : null
     r.screen = fileScreen.value
     r.windowRect = fileWindowRect.value
@@ -371,16 +411,17 @@ async function exportSubScript(scriptId: string) {
   const payload = {
     name: s.name,
     repeat: repeat.value,
-    input_mode: inputMode.value,
     window: flowWindow(),
     screen: fileScreen.value ?? currentScreen(),
     nodes: s.nodes || [],
     edges: s.edges || [],
+    // 子脚本自己的「局部变量」导出成独立文件后，就成了那份文件的全局变量
+    variables: Array.isArray(s.variables) ? cloneData(s.variables) : [],
     scripts: {},
   }
   const ok = await saveJsonToFile({
     format: 'agflow',
-    version: 2,
+    version: 3,
     ...payload,
   } as FlowFile)
   if (ok) message.success(`已导出子脚本「${s.name}」`)
@@ -419,13 +460,35 @@ function openScriptTab(scriptId: string) {
 }
 
 /**
- * 双击「调用脚本」节点：直接在新编辑器里打开它指向的子脚本。
- * 还没选子脚本（或指向的已不存在）时，双击等同于打开选择框。
+ * 打开某个「组合节点」的编辑器标签（双击画布上的组合节点）。
+ *
+ * 路径是**逐层累加**的：在一张组合节点内部再双击里层的组合节点时，
+ * 新标签的 groupPath = 当前标签的路径 + 这个节点 id。
+ */
+function openGroupTab(node: any) {
+  const t = tab.value
+  if (!t || !node) return
+  const basePath = t.kind === 'group' ? t.groupPath : []
+  const path = [...basePath, node.id]
+  const name = String(node.data?.params?.name || GROUP_META.label)
+  docs.openGroup(t.rootId, t.scriptId, path, name)
+}
+
+/**
+ * 双击节点：
+ *  · 「调用脚本」→ 打开它指向的子脚本
+ *  · 「组合节点」→ 打开它内部的编辑界面
+ *  · 其它      → 不做任何事（保持和以前一致）
  */
 function onNodeDoubleClick(payload: any) {
   const n = payload?.node
-  if (!n || n?.data?.nodeType !== 'script_call') return
+  if (!n) return
   selectedId.value = n.id
+  if (n?.data?.nodeType === GROUP_TYPE) {
+    openGroupTab(n)
+    return
+  }
+  if (n?.data?.nodeType !== 'script_call') return
   const sid = n.data?.params?.script_id
   if (sid && scriptExists(sid)) openScriptTab(sid)
   else openScriptPicker()
@@ -525,9 +588,59 @@ const winOptions = computed(() => [
  * 一眼就能看出一段流程在干什么（输入=蓝 / 视觉=绿 / 流程=青 / 工具=橙 / 数据=紫 / 系统=灰）。
  */
 function metaOf(type: string) {
+  if (type === GROUP_TYPE) {
+    return { label: GROUP_META.label, icon: GROUP_META.icon, color: GROUP_META.color }
+  }
   const m = NODE_META[type as NodeType]
   if (!m) return { label: type, icon: '❓', color: '#888' }
   return { label: m.label, icon: m.icon, color: CATEGORY_META[m.category].color }
+}
+
+// ---------- 变量管理（右侧「变量」标签页）----------
+/**
+ * 当前这一层变量叫什么、给谁看。
+ *
+ * 0.1.4 的语义：主脚本那份是**全局变量**（整个工作流可见）；
+ * 子脚本 / 组合节点各有一份**局部变量**（只在自己内部有效）。
+ */
+const scopeInfo = computed(() => {
+  const k = container()?.kind
+  if (k === 'root') {
+    return {
+      title: '全局变量',
+      desc: '整个工作流（含所有子脚本与组合节点）都能读到；在子脚本里要改它得把「变量」节点的作用域选成「全局」。',
+    }
+  }
+  const owner = k === 'sub' ? `子脚本「${flowName.value}」` : `组合节点「${flowName.value}」`
+  return {
+    title: '局部变量',
+    desc: `只在${owner}内部有效（读得到全局，写不外泄）。要跨层共享就用全局变量。`,
+  }
+})
+
+/** 新增一条变量声明（名称自动避重） */
+function addVariable() {
+  const used = new Set(variables.value.map((v) => v.name))
+  let n = variables.value.length + 1
+  while (used.has(`var${n}`)) n += 1
+  variables.value = [...variables.value, { name: `var${n}`, type: 'auto', value: '' }]
+}
+
+function removeVariable(idx: number) {
+  variables.value = variables.value.filter((_, i) => i !== idx)
+}
+
+/** 变量名重复检查（重名会让后面的覆盖前面的，必须提醒） */
+function duplicateVarNames(): string[] {
+  const seen = new Set<string>()
+  const dup = new Set<string>()
+  for (const v of variables.value) {
+    const n = String(v.name || '').trim()
+    if (!n) continue
+    if (seen.has(n)) dup.add(n)
+    seen.add(n)
+  }
+  return [...dup]
 }
 
 // ---------- 属性面板（由参数模式表驱动）----------
@@ -882,6 +995,13 @@ const canUndo = computed(() => hIndex.value > 0)
 const canRedo = computed(() => hIndex.value < history.value.length - 1)
 // 应用快照期间不要记录历史（否则撤销本身会被记成一步，撤销就再也回不去）
 let restoring = false
+/**
+ * 首次装载（新建 / 加载 / 就地替换）期间不要标"未保存"。
+ *
+ * 装载会把 nodes / flowName / variables 等 ref 重新赋值，随后各 watcher 会照常触发一次；
+ * 若不区分，刚打开的脚本会立刻显示成"有改动"。装载完成后的下一个 tick 才置 true。
+ */
+let ready = false
 let histTimer: ReturnType<typeof setTimeout> | null = null
 
 function cloneData<T>(v: T): T {
@@ -913,11 +1033,27 @@ function pushHistory(force = false) {
   const snap = snapshotOf()
   const top = history.value[hIndex.value]
   if (!force && top && top.json === snap.json) return
+  // 真正的内容改动才标"未保存"（force=true 是新建 / 加载时的初始化，不算改动）
+  if (!force) markEdited()
   // 撤销之后又做了新改动 → 丢弃原来的「未来」分支
   if (hIndex.value < history.value.length - 1) history.value = history.value.slice(0, hIndex.value + 1)
   history.value.push(snap)
   if (history.value.length > HISTORY_MAX) history.value.shift()
   hIndex.value = history.value.length - 1
+}
+
+/**
+ * 标"有未保存的改动"。
+ *
+ * 本标签 + 所属根脚本标签都要标：子脚本 / 组合节点的内容随根脚本文件一起保存，
+ * 所以它们的改动同样让根文件变脏（关标签时的确认弹窗据此触发）。
+ */
+function markEdited() {
+  if (!ready) return
+  const t = tab.value
+  if (!t) return
+  docs.patchTab(t.id, { dirty: true })
+  if (t.kind !== 'root') docs.patchTab(t.rootId, { dirty: true })
 }
 
 /** 重置历史（新建 / 加载脚本时调用）：撤销不应该跨脚本跳回上一个流程。 */
@@ -972,11 +1108,17 @@ watch(
   { deep: true },
 )
 
-// 元信息（脚本名 / 轮数 / 输入方式 / 绑定窗口）也要实时镜像，否则保存时读到旧值
-watch([flowName, repeat, inputMode, boundWindow, fileScreen, fileWindowRect], () => {
-  if (restoring) return
-  mirrorToStore()
-})
+// 元信息（脚本名 / 轮数 / 变量 / 绑定窗口）也要实时镜像，否则保存时读到旧值。
+// variables 是数组，改动（改名/改值/增删）要 deep 才观察得到。
+watch(
+  [flowName, repeat, boundWindow, fileScreen, fileWindowRect, variables],
+  () => {
+    if (restoring) return
+    mirrorToStore()
+    markEdited()
+  },
+  { deep: true },
+)
 
 // 键盘：Ctrl+Z 撤销、Ctrl+Y（或 Ctrl+Shift+Z）重做、Ctrl+C/X/V 复制剪切粘贴、Delete 删除选中。
 // 输入框内不拦截：那里让浏览器做原生的文本编辑更符合直觉。
@@ -1253,24 +1395,33 @@ function onWindowChange(hwnd: number) {
 }
 
 // ---------- 保存 / 加载 ----------
-/** 组装成 .agflow 的 JSON（含内嵌的子脚本库）。 */
+/**
+ * 组装成 .agflow 的 JSON（含内嵌的子脚本库）。
+ *
+ * ⚠️ 保存的永远是**整份根脚本**，与当前停在哪个标签无关：0.1.4 起一个根文档下可以有
+ * 子脚本标签、组合节点标签，若按"当前标签的 nodes"来写，在子脚本 / 组合节点里点保存
+ * 就会把内部图当成主流程写进文件（数据直接被改坏）。所以这里先把当前视图镜像回容器，
+ * 再统一取根文档的 nodes/edges/variables。
+ */
 function buildFile(): FlowFile {
+  mirrorToStore()
   const screenRef = fileScreen.value ?? currentScreen()
   const windowRef = fileWindowRect.value ?? currentWindowRect()
   const r = root.value
   const subScripts = r ? normalizeScripts(r.scripts) : {}
   return {
     format: 'agflow',
-    version: 2,
-    name: flowName.value,
-    repeat: repeat.value,
-    input_mode: inputMode.value,
-    window: boundWindow.value ? { ...boundWindow.value, rect: windowRef } : null,
+    version: 3,
+    name: r?.name || flowName.value,
+    repeat: r?.repeat ?? repeat.value,
+    window: r?.boundWindow ? { ...r.boundWindow, rect: windowRef } : null,
     screen: screenRef,
-    nodes: cloneData(nodes.value),
-    edges: cloneData(edges.value),
+    nodes: cloneData(r?.nodes || []),
+    edges: cloneData(r?.edges || []),
+    // 主脚本的「全局变量」声明
+    variables: cloneData(r?.variables || []),
     // 子脚本一并写进同一个文件：脚本拖到别的机器上也能完整跑起来
-    scripts: isSub.value ? {} : subScripts,
+    scripts: subScripts,
   }
 }
 
@@ -1312,7 +1463,12 @@ async function saveFlow() {
   if (!ok) return
   fileScreen.value = data.screen ?? null
   fileWindowRect.value = data.window?.rect ?? null
-  docs.patchTab(props.docId, { dirty: false })
+  // 存的是整份根脚本（含子脚本 / 组合节点），所以这些标签都算"已保存"
+  const t = tab.value
+  if (t) {
+    docs.patchTab(t.id, { dirty: false })
+    if (t.kind !== 'root') docs.patchTab(t.rootId, { dirty: false })
+  }
   message.success('脚本已保存')
 }
 
@@ -1385,7 +1541,6 @@ async function openLoaded(data: FlowFile, name: string, hadWindow: boolean) {
   const init = {
     name,
     repeat: data.repeat || 1,
-    inputMode: data.input_mode || 'real',
     // 默认全局：不恢复脚本里保存的窗口绑定。
     // 旧文件里的 hwnd 早就失效，直接恢复会让下拉框显示成一个「空进程」并要求手动重选。
     boundWindow: null,
@@ -1393,6 +1548,8 @@ async function openLoaded(data: FlowFile, name: string, hadWindow: boolean) {
     windowRect: null,
     nodes: data.nodes || [],
     edges: data.edges || [],
+    // 0.1.4：主脚本的全局变量声明（老文件没有这个字段，按空处理）
+    variables: Array.isArray(data.variables) ? data.variables : [],
     scripts: normalizeScripts(data.scripts),
   }
   const t = tab.value
@@ -1476,6 +1633,8 @@ function graphScripts(): Record<string, any> {
       name: s.name,
       nodes: toGraphNodes(s.nodes || []),
       edges: toGraphEdges(s.edges || []),
+      // 子脚本自己的「局部变量」：引擎执行到 script_call 时用它初始化子作用域
+      variables: Array.isArray(s.variables) ? cloneData(s.variables) : [],
     }
   }
   return out
@@ -1485,16 +1644,18 @@ function graphScripts(): Record<string, any> {
  * 交给引擎的完整负载。
  *
  * 子脚本随负载一起下发（`scripts`），由引擎在执行 script_call 节点时就地展开 ——
- * 因此"调用脚本"在运行上与"打包合并"基本等价，区别只是子脚本体面可复用、可单独编辑导出。
+ * 因此"调用脚本""组合节点"在运行上与"内联展开"基本等价，区别只是子脚本体面可复用、
+ * 可单独编辑导出，而组合节点双击就能进去改。
  */
 function runPayload() {
   return {
     name: flowName.value,
     repeat: repeat.value,
-    input_mode: inputMode.value,
     window: flowWindow(),
     screen: fileScreen.value ?? currentScreen(),
     ...flowGraph(),
+    // 本层的变量声明（根脚本 = 全局；单独跑子脚本时 = 该子脚本的局部）
+    variables: cloneData(variables.value),
     scripts: graphScripts(),
   }
 }
@@ -1609,7 +1770,7 @@ function onRecorded(events: any[]) {
   } as any)
   selectedId.value = id
   message.success(
-    `已录制 ${events.length} 个事件，并生成一个录制节点（可点顶栏「✂ 拆分录制」拆成可编辑节点）`,
+    `已录制 ${events.length} 个事件，并生成一个录制节点（可点顶栏「✂ 拆分节点」拆成可编辑节点）`,
     { duration: 6000 },
   )
   loadFlowToEngine()
@@ -1715,7 +1876,7 @@ function splitMacro(nodeArg?: any) {
   nextTick(() => fitView())
 }
 
-// 工具栏上的「✂ 拆分录制」入口。
+// 工具栏上的「✂ 拆分节点」入口。
 // 之所以要有它：拆分按钮原先只在「选中录制节点」时出现在右侧属性面板里，
 // 不在工具栏、也不在左侧节点面板，用户根本找不到。现在流程里只要有录制节点，
 // 顶栏就有一个常驻可见的入口。
@@ -1734,7 +1895,7 @@ function splitMacroFromToolbar() {
   return splitMacro(list[0])
 }
 
-// ---------- 打包合并（拆分的逆操作）----------
+// ---------- 合并节点（把一段流程收成一个「组合节点」）----------
 
 // 当前选中的节点。以 selection-change 记下的 id 为准，并用节点自身的 selected
 // 标记兜底（不同 Vue Flow 版本对选择状态的同步方式略有差异）。
@@ -1744,14 +1905,14 @@ const selNodes = computed(() => {
   return flagged.length > byId.length ? flagged : byId
 })
 
-/** 把选中的节点按连线顺序排成一条链；不是「一条连续链」时返回 null。
- *  判定规则见 src/lib/macroSplit.ts 的 orderChain（纯函数，可单独断言）。 */
+/** 把选中的节点按连线顺序排成一条链；不是「一条连续、干净的链」时返回 null。
+ *  判定规则见 src/lib/macroSplit.ts 的 orderChain / isCleanSegment（纯函数，可单独断言）。 */
 function orderSelectedChain(sel: any[]): any[] | null {
   return orderChain(sel, edges.value)
 }
 
-/** 打包时真正要用的选中集合：优先向 Vue Flow 要（权威），再退回本地记录。
- *  这样即使响应式刷新慢一拍，按钮亮着就一定能打包。
+/** 合并时真正要用的选中集合：优先向 Vue Flow 要（权威），再退回本地记录。
+ *  这样即使响应式刷新慢一拍，按钮亮着就一定能合并。
  *  同样注意 getSelectedNodes 在实例上是**数组**，不是函数（见 refreshSelection 的注释）。 */
 function currentSelection(): any[] {
   const list: any = (vf as any)?.getSelectedNodes
@@ -1759,7 +1920,13 @@ function currentSelection(): any[] {
   return selNodes.value
 }
 
-/** 打包合并：把选中的一串相邻节点合并成一个「键鼠录制」节点。 */
+/**
+ * 合并节点：把选中的一串相邻节点收成一个「组合节点」。
+ *
+ * 与 0.1.3 的「打包合并」本质不同：那时是把键鼠动作压回一个录制节点（有损、只认键鼠），
+ * 现在是把这段流程**原样**装进一个容器（任意节点都能收，语义不变），双击可进去编辑。
+ * 选中链的合法性由 orderChain（含 isCleanSegment）把关：不跨边界分支、尾部最多一条出边。
+ */
 function mergeSelected() {
   const sel = currentSelection()
   if (sel.length < 2) {
@@ -1768,35 +1935,33 @@ function mergeSelected() {
   }
   const chain = orderSelectedChain(sel)
   if (!chain) {
-    message.warning('只能打包连成一串的相邻节点：请确认选中的节点首尾相接、且中间没有分支')
-    return
-  }
-  const badTypes = [...new Set(chain.filter((n) => !canPack(n.data.nodeType)).map((n) => n.data.nodeType))]
-  if (badTypes.length) {
     message.warning(
-      '这些节点没法打包进录制：' +
-        badTypes.map((t) => NODE_META[t as NodeType]?.label || t).join('、') +
-        '（录制只表达键鼠动作）',
+      '只能合并连成一串、且中间没有分支的相邻节点：请确认选中的节点首尾相接，并且没有连到这段之外的线',
     )
-    return
-  }
-  const onceOn = chain.filter((n) => n.data.once)
-  if (onceOn.length) {
-    message.warning(`选中的节点里有 ${onceOn.length} 个勾了「单次执行」，录制节点表达不了，请先取消勾选`)
-    return
-  }
-
-  const res = packStepsToMacro(
-    chain.map((n) => ({ nodeType: n.data.nodeType, params: n.data.params || {} })),
-  )
-  if (!res.ok) {
-    message.warning(res.badTypes.length ? '选中的节点里没有可打包的键鼠动作' : '选中的节点打包后没有任何事件')
     return
   }
 
   const ids = chain.map((n) => n.id)
   const idSet = new Set(ids)
   const head = chain[0]
+
+  // 内部图：把选中链的节点与它们**内部**的连线原样装进组合节点；
+  // 坐标平移到以 head 为原点，免得内部图落在很远的地方（进去编辑时得先 fitView）。
+  const baseX = head.position?.x ?? 0
+  const baseY = head.position?.y ?? 0
+  const innerNodes = chain.map((n) => ({
+    id: n.id,
+    type: n.type ?? 'step',
+    position: {
+      x: Math.round((n.position?.x ?? 0) - baseX),
+      y: Math.round((n.position?.y ?? 0) - baseY),
+    },
+    data: cloneData(n.data),
+  }))
+  const innerEdges = edges.value
+    .filter((e) => idSet.has(e.source) && idSet.has(e.target))
+    .map((e) => ({ id: e.id, source: e.source, target: e.target, sourceHandle: e.sourceHandle ?? null }))
+
   const newId = `n${++nodeSeq}`
   const incoming = edges.value.filter((e) => !idSet.has(e.source) && idSet.has(e.target))
   const outgoing = edges.value.filter((e) => idSet.has(e.source) && !idSet.has(e.target))
@@ -1806,9 +1971,19 @@ function mergeSelected() {
   nodes.value.push({
     id: newId,
     type: 'step',
-    position: { x: head.position?.x ?? 0, y: head.position?.y ?? 0 },
-    data: { nodeType: 'record', label: '键鼠录制', params: mergeWithDefaults('record', { events: res.events, speed: 1.0 }), once: false },
-  })
+    position: { x: baseX, y: baseY },
+    data: {
+      nodeType: GROUP_TYPE,
+      label: GROUP_META.label,
+      params: mergeWithDefaults(GROUP_TYPE, {
+        name: GROUP_META.label,
+        nodes: innerNodes,
+        edges: innerEdges,
+        variables: [],
+      }),
+      once: false,
+    },
+  } as any)
   for (const e of incoming) {
     edges.value.push({ ...e, id: `e-${e.source}-${newId}`, target: newId })
   }
@@ -1818,7 +1993,70 @@ function mergeSelected() {
 
   selectedId.value = newId
   refreshSelection()
-  message.success(`已把 ${chain.length} 个节点打包成一个录制节点（${res.events.length} 个键鼠事件）`)
+  message.success(`已把 ${chain.length} 个节点合并成一个「组合节点」（双击可进入编辑）`)
+  loadFlowToEngine()
+  nextTick(() => fitView())
+}
+
+/**
+ * 取消组合：把「组合节点」拆回它内部的那串节点（合并节点的逆操作）。
+ *
+ * 内部节点 id 一律**重新编号**再放回画布：组合节点的内部图可能在别的标签里被编辑过、
+ * 加过新节点，直接沿用原 id 有和画布上现有节点撞车的风险。连线按 id 映射同步重写。
+ */
+function unmergeGroup(node?: any) {
+  const grp = node || selectedNode.value
+  if (!grp || grp.data?.nodeType !== GROUP_TYPE) return
+  const params = grp.data.params || {}
+  const innerNodes: any[] = Array.isArray(params.nodes) ? params.nodes : []
+  const innerEdges: any[] = Array.isArray(params.edges) ? params.edges : []
+  if (!innerNodes.length) {
+    message.warning('这个组合节点里还没有节点')
+    return
+  }
+
+  const base = grp.position || { x: 0, y: 0 }
+  const idMap = new Map<string, string>()
+  const created = innerNodes.map((n) => {
+    const nid = `n${++nodeSeq}`
+    idMap.set(n.id, nid)
+    return {
+      id: nid,
+      type: n.type ?? 'step',
+      position: {
+        x: Math.round(base.x + (n.position?.x ?? 0)),
+        y: Math.round(base.y + (n.position?.y ?? 0)),
+      },
+      data: cloneData(n.data),
+    }
+  })
+
+  const incoming = edges.value.filter((e) => e.target === grp.id)
+  const outgoing = edges.value.filter((e) => e.source === grp.id)
+  nodes.value = nodes.value.filter((n) => n.id !== grp.id)
+  edges.value = edges.value.filter((e) => e.source !== grp.id && e.target !== grp.id)
+
+  nodes.value.push(...created)
+  // 内部连线（id 一并重写，避免和画布上已有边撞 id）
+  for (const e of innerEdges) {
+    const s = idMap.get(e.source)
+    const t = idMap.get(e.target)
+    if (s && t) edges.value.push({ id: `e-${s}-${t}`, source: s, target: t, sourceHandle: e.sourceHandle ?? null })
+  }
+  // 原来连到组合节点上的线，改接到内部图的首个节点 / 末尾节点
+  // —— 用「无内部入边 / 无内部出边」判定首尾，不依赖内部图是否是一条直链
+  const hasInnerIn = new Set(innerEdges.map((e) => e.target))
+  const hasInnerOut = new Set(innerEdges.map((e) => e.source))
+  const entryId = idMap.get((innerNodes.find((n) => !hasInnerIn.has(n.id)) || innerNodes[0]).id)!
+  const exitId = idMap.get(
+    (innerNodes.find((n) => !hasInnerOut.has(n.id)) || innerNodes[innerNodes.length - 1]).id,
+  )!
+  for (const e of incoming) edges.value.push({ ...e, id: `e-${e.source}-${entryId}`, target: entryId })
+  for (const e of outgoing) edges.value.push({ ...e, id: `e-${exitId}-${e.target}`, source: exitId, sourceHandle: null })
+
+  selectedId.value = entryId
+  refreshSelection()
+  message.success(`已取消组合，拆回 ${created.length} 个节点`)
   loadFlowToEngine()
   nextTick(() => fitView())
 }
@@ -1878,7 +2116,7 @@ function resyncFlow() {
 
 // 流程变化时同步到引擎，供快捷键 alt+f1 启停（直接用 refs 监听 + 短防抖）
 watch(
-  [nodes, edges, flowName, repeat, inputMode, boundWindow],
+  [nodes, edges, flowName, repeat, boundWindow, variables],
   () => {
     if (loadTimer) clearTimeout(loadTimer)
     loadTimer = setTimeout(loadFlowToEngine, 150)
@@ -1911,8 +2149,8 @@ function initFromStore() {
   nodes.value = flow.nodes
   edges.value = flow.edges
   flowName.value = flow.name
+  variables.value = flow.variables
   repeat.value = r.repeat
-  inputMode.value = r.inputMode
   boundWindow.value = r.boundWindow ? { ...r.boundWindow } : null
   // 默认全局绑定：脚本里存下来的 hwnd 早就失效（旧文件尤其明显），不自动恢复
   selectedWinHwnd.value = 0
@@ -1925,6 +2163,11 @@ function initFromStore() {
   )
   mirrorToStore()
   resetHistory()
+  // 装载触发的那些 watcher 跑完之前，不把这一轮赋值当成"用户改动"
+  ready = false
+  nextTick(() => {
+    ready = true
+  })
 }
 
 /** 活动标签变化：接管引擎事件、把流程同步给引擎。 */
@@ -1995,9 +2238,10 @@ onBeforeUnmount(() => {
       <n-input
         v-model:value="flowName"
         class="name-input"
-        :placeholder="isSub ? '子脚本名称' : '脚本名称'"
+        :placeholder="isSub ? '子脚本名称' : isGroup ? '组合节点名称' : '脚本名称'"
       />
       <span v-if="isSub" class="sub-badge">子脚本 · 属于「{{ root?.name }}」</span>
+      <span v-else-if="isGroup" class="sub-badge">组合节点 · 属于「{{ root?.name }}」</span>
       <div class="spacer" />
       <!-- 右侧：循环轮数紧挨着运行按钮。设定齿轮与悬浮框开关在底部控制条上（views/Editor.vue）。 -->
       <span class="tb-label">循环轮数</span>
@@ -2010,14 +2254,9 @@ onBeforeUnmount(() => {
       />
       <n-button v-if="!project.running" type="primary" @click="run">▶ 运行</n-button>
       <template v-else>
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <n-button :type="project.paused ? 'warning' : 'default'" @click="togglePause">
-              {{ project.paused ? '▶ 继续' : '⏸ 暂停' }}
-            </n-button>
-          </template>
-          {{ project.paused ? '从暂停处继续执行' : '在当前节点结束后暂停，继续时从原地接着跑' }}
-        </n-tooltip>
+        <n-button :type="project.paused ? 'warning' : 'default'" @click="togglePause">
+          {{ project.paused ? '▶ 继续' : '⏸ 暂停' }}
+        </n-button>
         <n-button type="error" @click="stop">■ 停止</n-button>
       </template>
     </header>
@@ -2033,13 +2272,6 @@ onBeforeUnmount(() => {
 
     <div class="settings-bar">
       <div class="setting">
-        <span class="setting-label">输入方式</span>
-        <n-radio-group v-model:value="inputMode" size="small">
-          <n-radio-button value="real">🖱 键鼠输入</n-radio-button>
-          <n-radio-button value="simulated">📨 模拟输入</n-radio-button>
-        </n-radio-group>
-      </div>
-      <div class="setting">
         <span class="setting-label">绑定窗口</span>
         <n-select
           v-model:value="selectedWinHwnd"
@@ -2052,26 +2284,11 @@ onBeforeUnmount(() => {
         <n-button size="small" quaternary @click="refreshWindows">🔄</n-button>
       </div>
       <div class="setting">
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <n-button size="small" type="error" :disabled="!selNodes.length" @click="deleteSelected">
-              🗑 删除{{ selNodes.length > 1 ? ` (${selNodes.length})` : '' }}
-            </n-button>
-          </template>
-          删除所有选中的节点（Delete 键）。先在画布上左键拖拽框选，或按住 Ctrl 逐个点击加选
-        </n-tooltip>
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <n-button size="small" :disabled="!canUndo" @click="undo">↶ 撤销</n-button>
-          </template>
-          撤销上一步改动（Ctrl+Z）
-        </n-tooltip>
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <n-button size="small" :disabled="!canRedo" @click="redo">↷ 重做</n-button>
-          </template>
-          重做（Ctrl+Y 或 Ctrl+Shift+Z）
-        </n-tooltip>
+        <n-button size="small" type="error" :disabled="!selNodes.length" @click="deleteSelected">
+          🗑 删除{{ selNodes.length > 1 ? ` (${selNodes.length})` : '' }}
+        </n-button>
+        <n-button size="small" :disabled="!canUndo" @click="undo">↶ 撤销</n-button>
+        <n-button size="small" :disabled="!canRedo" @click="redo">↷ 重做</n-button>
       </div>
       <div class="setting">
         <n-button
@@ -2082,37 +2299,19 @@ onBeforeUnmount(() => {
           {{ eng.macroRecording ? '⏹ 停止录制' : '⏺ 开始录制' }}
         </n-button>
       </div>
-      <!-- 拆分与打包是一对逆操作，放在同一个不换行容器里，保证它们始终同一行 -->
+      <!-- 拆分（录制 → 节点）与合并（选中 → 组合节点）是两种"整段流程的整理"操作，
+           放在同一个不换行容器里，保证它们始终同一行。 -->
       <div class="setting nowrap-group">
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <n-button
-              size="small"
-              :disabled="!macroNodes.length"
-              @click="splitMacroFromToolbar"
-            >
-              ✂ 拆分录制{{ macroNodes.length > 1 ? ` (${macroNodes.length})` : '' }}
-            </n-button>
-          </template>
-          {{
-            macroNodes.length
-              ? '把「键鼠录制」节点拆成可单独编辑的鼠标点击 / 键盘按键 / 延时节点' +
-                (macroNodes.length > 1 ? '；流程里有多个录制节点，先在画布上选中要拆的那个' : '')
-              : '流程里还没有「键鼠录制」节点：先用「⏺ 开始录制」录一段操作'
-          }}
-        </n-tooltip>
-        <n-tooltip trigger="hover">
-          <template #trigger>
-            <n-button size="small" :disabled="selNodes.length < 2" @click="mergeSelected">
-              📦 打包合并{{ selNodes.length >= 2 ? ` (${selNodes.length})` : '' }}
-            </n-button>
-          </template>
-          {{
-            selNodes.length >= 2
-              ? `把选中的 ${selNodes.length} 个相邻节点合并成一个「键鼠录制」节点（拆分的逆操作）`
-              : '先选中至少 2 个相邻节点：在画布上左键拖拽框选，或按住 Ctrl 逐个点击加选'
-          }}
-        </n-tooltip>
+        <n-button
+          size="small"
+          :disabled="!macroNodes.length"
+          @click="splitMacroFromToolbar"
+        >
+          ✂ 拆分节点{{ macroNodes.length > 1 ? ` (${macroNodes.length})` : '' }}
+        </n-button>
+        <n-button size="small" :disabled="selNodes.length < 2" @click="mergeSelected">
+          📦 合并节点{{ selNodes.length >= 2 ? ` (${selNodes.length})` : '' }}
+        </n-button>
       </div>
     </div>
 
@@ -2129,7 +2328,6 @@ onBeforeUnmount(() => {
             class="cat-tab"
             :class="{ active: paletteCat === c }"
             :style="paletteCat === c ? { borderColor: CATEGORY_META[c].color, color: CATEGORY_META[c].color } : undefined"
-            :title="CATEGORY_META[c].desc"
             @click="paletteCat = c"
           >
             <span class="cat-tab-icon">{{ CATEGORY_META[c].icon }}</span>
@@ -2141,7 +2339,6 @@ onBeforeUnmount(() => {
           v-for="[t, meta] in nodesOfCategory(paletteCat)"
           :key="t"
           class="palette-item"
-          :title="meta.hint"
           @click="addStep(t)"
         >
           <span class="palette-icon" :style="{ background: CATEGORY_META[meta.category].color }">{{ meta.icon }}</span>
@@ -2192,13 +2389,13 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="flow-controls">
-          <n-tooltip trigger="hover"><template #trigger><button class="ctl" @click="zoomIn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="11" y1="8" x2="11" y2="14" /><line x1="8" y1="11" x2="14" y2="11" /></svg></button></template>放大</n-tooltip>
-          <n-tooltip trigger="hover"><template #trigger><button class="ctl" @click="zoomOut"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="8" y1="11" x2="14" y2="11" /></svg></button></template>缩小</n-tooltip>
-          <n-tooltip trigger="hover"><template #trigger><button class="ctl" @click="fitView"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></svg></button></template>适应视图</n-tooltip>
-          <n-tooltip trigger="hover"><template #trigger><button class="ctl" @click="pan(120, 0)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" /></svg></button></template>左移</n-tooltip>
-          <n-tooltip trigger="hover"><template #trigger><button class="ctl" @click="pan(-120, 0)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg></button></template>右移</n-tooltip>
-          <n-tooltip trigger="hover"><template #trigger><button class="ctl" @click="pan(0, 120)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg></button></template>上移</n-tooltip>
-          <n-tooltip trigger="hover"><template #trigger><button class="ctl" @click="pan(0, -120)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></svg></button></template>下移</n-tooltip>
+          <button class="ctl" @click="zoomIn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="11" y1="8" x2="11" y2="14" /><line x1="8" y1="11" x2="14" y2="11" /></svg></button>
+          <button class="ctl" @click="zoomOut"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="8" y1="11" x2="14" y2="11" /></svg></button>
+          <button class="ctl" @click="fitView"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></svg></button>
+          <button class="ctl" @click="pan(120, 0)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" /></svg></button>
+          <button class="ctl" @click="pan(-120, 0)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg></button>
+          <button class="ctl" @click="pan(0, 120)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg></button>
+          <button class="ctl" @click="pan(0, -120)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></svg></button>
         </div>
       </section>
 
@@ -2225,6 +2422,28 @@ onBeforeUnmount(() => {
       <div class="resize-handle inspector-handle" @mousedown="startResize('inspector', $event)" />
 
       <aside class="inspector" :style="{ width: inspectorWidth + 'px' }">
+        <!-- 右侧这块区域由两个标签页共用：参数配置 / 变量管理（0.1.4 起） -->
+        <div class="insp-tabs">
+          <button
+            type="button"
+            class="insp-tab"
+            :class="{ active: inspTab === 'params' }"
+            @click="inspTab = 'params'"
+          >
+            参数
+          </button>
+          <button
+            type="button"
+            class="insp-tab"
+            :class="{ active: inspTab === 'vars' }"
+            @click="inspTab = 'vars'"
+          >
+            变量
+          </button>
+        </div>
+
+        <!-- ============ 参数页 ============ -->
+        <template v-if="inspTab === 'params'">
         <template v-if="selectedNode">
           <div class="inspector-head">
             <span class="inspector-title">
@@ -2234,6 +2453,43 @@ onBeforeUnmount(() => {
             <n-button size="tiny" quaternary type="error" @click="removeSelected">删除</n-button>
           </div>
 
+          <!-- ============ 组合节点（0.1.4）============
+               它不属于输入 / 处理 / 输出的任何一类，只是一个"流程容器"：
+               单击选中即可在这里改名字等属性，双击进入内部编辑。 -->
+          <template v-if="selectedNode.data.nodeType === GROUP_TYPE">
+            <div class="field">
+              <label>名称</label>
+              <n-input v-model:value="selectedNode.data.params.name" :placeholder="GROUP_META.label" />
+              <p class="terminate-hint">这个名字只用于显示，不影响执行。</p>
+            </div>
+            <div class="field">
+              <label>内容</label>
+              <p class="terminate-hint">
+                里面装着 {{ (selectedNode.data.params.nodes || []).length }} 个节点 ·
+                {{ (selectedNode.data.params.edges || []).length }} 条连线 ·
+                {{ (selectedNode.data.params.variables || []).length }} 个局部变量。
+              </p>
+            </div>
+            <div class="field">
+              <n-button size="small" block type="primary" @click="openGroupTab(selectedNode)">
+                🧩 进入编辑（也可直接双击画布上的它）
+              </n-button>
+            </div>
+            <div class="field">
+              <n-button size="small" block type="warning" @click="unmergeGroup()">
+                ↩ 取消组合（拆回原节点）
+              </n-button>
+            </div>
+            <div class="field">
+              <p class="terminate-hint">
+                组合节点只是个流程容器，运行时会像普通节点一样被就地展开执行，不属于输入 / 处理 / 输出的任何一类。
+                它内部有自己的「局部变量」，在顶部切到「变量」页管理。
+              </p>
+            </div>
+          </template>
+
+          <!-- ============ 普通节点 ============ -->
+          <template v-else>
           <template v-if="!['judge', 'terminate'].includes(selectedNode.data.nodeType)">
             <div class="field">
               <label>单次执行（仅第一轮循环）</label>
@@ -2425,8 +2681,8 @@ onBeforeUnmount(() => {
                 拆分会把这一步替换成一串「鼠标操作 / 键盘按键 / 延时」节点，原录制节点将被删除（间隔 ≥80ms 会插入延时以保留节奏）。确定？
               </n-popconfirm>
               <p class="terminate-hint">
-                顶栏也有常驻入口「✂ 拆分录制」，不必先选中本节点（流程里只有一个录制节点时直接生效）。
-                想把拆开的节点再合回去：选中它们后点顶栏「📦 打包合并」。
+                顶栏也有常驻入口「✂ 拆分节点」，不必先选中本节点（流程里只有一个录制节点时直接生效）。
+                想把一串节点收拢起来：选中它们后点顶栏「📦 合并节点」，会生成一个可双击进去编辑的「组合节点」。
               </p>
             </div>
             <div class="field">
@@ -2491,16 +2747,62 @@ onBeforeUnmount(() => {
             <div class="field">
               <p class="terminate-hint">
                 子脚本存在本脚本文件内部（随脚本一起保存），运行时会被<b>就地展开执行</b> ——
-                与「打包合并」的运行效果基本相同，差别是子脚本可以单独编辑、单独导出，也能被多个脚本复用。<br />
+                与「组合节点」的运行效果基本相同，差别是子脚本可以单独编辑、单独导出，也能被多个脚本复用。<br />
                 子脚本之间不允许循环调用（例如 A 调 B、B 又调回 A），选择时会立刻检测并阻止。
               </p>
             </div>
+          </template>
+          <!-- 普通节点参数面板结束 -->
           </template>
         </template>
         <div v-else class="inspector-empty">
           <div class="empty-emoji">🖐</div>
           <div>选中画布中的节点以配置参数</div>
         </div>
+        </template>
+
+        <!-- ============ 变量页（0.1.4）============
+             管理本层的变量声明：主脚本 = 全局变量；子脚本 / 组合节点 = 局部变量。
+             变量声明只负责"初始值"，节点运行时用「变量」节点读写。 -->
+        <template v-else>
+          <div class="inspector-head">
+            <span class="inspector-title">🏷 {{ scopeInfo.title }}</span>
+          </div>
+          <div class="schema-help">{{ scopeInfo.desc }}</div>
+
+          <n-alert
+            v-if="duplicateVarNames().length"
+            type="warning"
+            :show-icon="true"
+            class="var-dup-alert"
+          >
+            变量名重复：{{ duplicateVarNames().join('、') }}。重名的会被后面的覆盖，建议先改掉。
+          </n-alert>
+
+          <div v-for="(v, i) in variables" :key="i" class="var-row">
+            <div class="var-row-top">
+              <n-input v-model:value="v.name" size="small" placeholder="变量名" />
+              <n-button size="tiny" quaternary type="error" @click="removeVariable(i)">✕</n-button>
+            </div>
+            <div class="var-row-bottom">
+              <n-select v-model:value="v.type" :options="VAR_TYPES" size="small" style="width: 108px" />
+              <n-input v-model:value="v.value" size="small" placeholder="初始值" />
+            </div>
+          </div>
+
+          <div v-if="!variables.length" class="vars-empty">本层还没有变量，点下面的按钮新增一条。</div>
+
+          <div class="field">
+            <n-button size="small" block type="primary" @click="addVariable">＋ 新增变量</n-button>
+          </div>
+          <div class="field">
+            <p class="terminate-hint">
+              这里声明的是本层的变量：主脚本是<b>全局变量</b>（整个工作流可见），
+              子脚本 / 组合节点是<b>局部变量</b>（读得到全局，写不外泄）。
+              要在子脚本里改全局变量，请用「变量」节点并把作用域选成「全局」。
+            </p>
+          </div>
+        </template>
       </aside>
     </div>
 
@@ -2654,7 +2956,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
 }
-/* 组内必须同一行（拆分录制 / 打包合并是一对逆操作，拆开看会很别扭） */
+/* 组内必须同一行（拆分节点 / 合并节点是两种"整段流程的整理"操作，拆开看会很别扭） */
 .nowrap-group {
   flex-wrap: nowrap;
   white-space: nowrap;
@@ -2874,6 +3176,61 @@ onBeforeUnmount(() => {
   background: var(--bg-soft);
   padding: 14px;
   overflow-y: auto;
+}
+/* 右侧面板顶部：参数 / 变量 两个标签页共用同一块区域（0.1.4 起） */
+.insp-tabs {
+  display: flex;
+  gap: 2px;
+  margin: -14px -14px 12px;
+  padding: 6px 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.insp-tab {
+  appearance: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+}
+.insp-tab:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.insp-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+/* 变量管理：一条声明一行小卡片（名字 / 类型 / 初始值） */
+.var-row {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  padding: 8px;
+  margin-bottom: 8px;
+}
+.var-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.var-row-bottom {
+  display: flex;
+  gap: 6px;
+}
+.vars-empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+  padding: 14px 0;
+}
+.var-dup-alert {
+  margin-bottom: 10px;
 }
 .inspector-head {
   display: flex;

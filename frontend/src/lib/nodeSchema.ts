@@ -97,6 +97,17 @@ const BUTTONS = [
   { label: '中键', value: 'middle' },
 ]
 
+/**
+ * 输入方式（0.1.4 起**挂在每个输入节点上**，不再是设置栏里的全局单选）。
+ *
+ * 为什么要挪到节点上：一次流程里常常"大部分动作要真实键鼠、只有某几步要走后台消息"
+ * （比如那条消息是发给一个不该被抢焦点的窗口），全局二选一表达不了。
+ */
+const INPUT_MODES = [
+  { label: '真实键鼠（占用鼠标键盘，最通用）', value: 'real' },
+  { label: '后台消息（不占用键鼠，需已绑定窗口）', value: 'simulated' },
+]
+
 const TIMEOUT_ON = [
   { label: '超时后继续（走「否」分支也可自行判断）', value: 'continue' },
   { label: '超时后终止工作流', value: 'terminate' },
@@ -122,6 +133,7 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'dx', label: '水平滚动', type: 'number', default: 0, hint: '正数向右', showIf: { key: 'action', equals: 'wheel' } },
       { key: 'dy', label: '垂直滚动', type: 'number', default: -3, hint: '正数向上、负数向下（一格 = 120）', showIf: { key: 'action', equals: 'wheel' } },
       { key: 'duration_ms', label: '移动耗时', type: 'number', default: 0, min: 0, max: 60000, hint: '仅「移动到坐标」时生效，0 表示瞬移', showIf: { key: 'action', equals: 'move' } },
+      { key: 'input_mode', label: '输入方式', type: 'select', options: INPUT_MODES, default: 'real', hint: '后台消息需要先绑定目标窗口' },
     ],
   },
 
@@ -135,6 +147,7 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       ] },
       { key: 'keys', label: '按键', type: 'keys', default: 'enter', hint: '点击输入框后直接按下组合键即可录入' },
       { key: 'hold_ms', label: '按住时长', type: 'number', default: 30, min: 0, max: 60000, hint: '仅「按一下」时生效', showIf: { key: 'action', equals: 'press' } },
+      { key: 'input_mode', label: '输入方式', type: 'select', options: INPUT_MODES, default: 'real', hint: '后台消息需要先绑定目标窗口' },
     ],
   },
 
@@ -148,6 +161,7 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       ] },
       { key: 'interval_ms', label: '字符间隔', type: 'number', default: 10, min: 0, max: 1000, hint: '仅「直接输入」时生效', showIf: { key: 'method', equals: 'direct' } },
       { key: 'restore_clipboard', label: '粘贴后恢复原剪贴板', type: 'switch', default: true, showIf: { key: 'method', equals: 'clipboard' } },
+      { key: 'input_mode', label: '输入方式', type: 'select', options: INPUT_MODES, default: 'real', hint: '后台消息需要先绑定目标窗口' },
     ],
   },
 
@@ -359,10 +373,11 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
   // ④ 工具
   // =====================================================================
   record: {
-    help: '一段录制的键鼠操作，可按速度整体回放。用「拆分」按钮可摊成普通节点继续编辑。',
+    help: '一段录制的键鼠操作，可按速度整体回放。用「✂ 拆分节点」可摊成普通节点继续编辑。',
     fields: [
       { key: 'speed', label: '回放速度', type: 'number', default: 1, min: 0.1, max: 10, step: 0.1, hint: '2 表示两倍速' },
       { key: 'repeat', label: '重复次数', type: 'number', default: 1, min: 1, max: 1000 },
+      { key: 'input_mode', label: '输入方式', type: 'select', options: INPUT_MODES, default: 'real', hint: '回放整段录制时统一使用；后台消息需要先绑定目标窗口' },
     ],
   },
 
@@ -374,6 +389,7 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'button', label: '按键', type: 'select', options: BUTTONS, default: 'left' },
       { key: 'count', label: '点击次数', type: 'number', default: 10, min: 1, max: 100000 },
       { key: 'interval_ms', label: '点击间隔', type: 'number', default: 100, min: 0, max: 600000, hint: '毫秒，两次点击之间' },
+      { key: 'input_mode', label: '输入方式', type: 'select', options: INPUT_MODES, default: 'real', hint: '后台消息需要先绑定目标窗口' },
     ],
   },
 
@@ -417,7 +433,7 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
   // ⑤ 数据
   // =====================================================================
   variable: {
-    help: '新建 / 赋值 / 删除一个运行变量。变量在整个工作流（含子脚本）内共享。',
+    help: '新建 / 赋值 / 删除一个变量。默认只写当前这一层（子脚本 / 组合节点里就是「局部变量」）；选「全局」才写回主脚本那份。',
     fields: [
       { key: 'action', label: '动作', type: 'select', default: 'set', options: [
         { label: '赋值（不存在则创建）', value: 'set' },
@@ -432,6 +448,10 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
         { label: '数字', value: 'number' },
         { label: '真/假', value: 'bool' },
       ], showIf: { key: 'action', equals: 'set' } },
+      { key: 'scope', label: '作用域', type: 'select', default: 'local', options: [
+        { label: '当前层（局部，不回流外层）', value: 'local' },
+        { label: '全局（整个工作流可见）', value: 'global' },
+      ], hint: '局部变量只在子脚本 / 组合节点内部有效；要跨层共享就选全局' },
       { key: 'target', label: '复制到变量', type: 'text', default: '', showIf: { key: 'action', equals: 'get' } },
     ],
   },
@@ -573,9 +593,11 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
   },
 }
 
-/** 某个节点的默认参数（字段默认值拼起来；未声明默认值的字段为 null） */
-export function defaultsFor(nodeType: NodeType): Record<string, any> {
-  const schema = NODE_SCHEMA[nodeType]
+/** 某个节点的默认参数（字段默认值拼起来；未声明默认值的字段为 null）。
+ *  参数类型放宽成 string：组合节点（GROUP_TYPE，不属于 25 个核心节点）没有模式表，
+ *  调用它应当安静地返回空对象，而不是编译不过。 */
+export function defaultsFor(nodeType: string): Record<string, any> {
+  const schema = NODE_SCHEMA[nodeType as NodeType]
   const out: Record<string, any> = {}
   if (!schema) return out
   for (const f of schema.fields) {
@@ -596,8 +618,8 @@ export function fieldVisible(f: NodeField, params: Record<string, any>): boolean
 }
 
 /** 该节点的全部字段 key（含隐藏的）——迁移补参、默认值合并用 */
-export function schemaKeys(nodeType: NodeType): string[] {
-  return (NODE_SCHEMA[nodeType]?.fields || []).map((f) => f.key)
+export function schemaKeys(nodeType: string): string[] {
+  return (NODE_SCHEMA[nodeType as NodeType]?.fields || []).map((f) => f.key)
 }
 
 /**
@@ -606,7 +628,7 @@ export function schemaKeys(nodeType: NodeType): string[] {
  *  - 新模式里有、老参数没有的键   → 用默认值补齐
  *  - 老参数里多出来的键           → 保留（引擎可能仍认，或用于兼容）
  */
-export function mergeWithDefaults(nodeType: NodeType, params: Record<string, any> | undefined): Record<string, any> {
+export function mergeWithDefaults(nodeType: string, params: Record<string, any> | undefined): Record<string, any> {
   const base = defaultsFor(nodeType)
   const old = params && typeof params === 'object' ? params : {}
   return { ...base, ...old }

@@ -11,21 +11,38 @@
  * 保持纯函数（不依赖 Vue / DOM），方便单独断言，也便于和引擎侧的实现对照。
  */
 import type { SubScript } from '../types'
+import { GROUP_TYPE } from '../types'
 
 /** 调用图里代表「根脚本」的虚拟节点。
  *  根脚本不可被调用（没有任何节点能指向它），所以它只会出现在边的起点。 */
 export const ROOT_NODE = '__root__'
 
-/** 一段流程里被调用的脚本 id（按出现顺序、去重）。 */
-export function collectCalls(flow: { nodes?: any[] } | null | undefined): string[] {
+/** 一段流程里被调用的脚本 id（按出现顺序、去重）。
+ *
+ *  **会钻进组合节点**：组合节点把内部图存在自己的 params 里，里面同样可能有
+ *  「调用脚本」节点。漏掉它们，"子脚本找不到 / 循环调用"这两类错误就会从组合节点里溜过去。
+ */
+export function collectCalls(flow: { nodes?: any[] } | null | undefined, depth = 0): string[] {
   const out: string[] = []
+  if (!flow || depth > MAX_WALK_DEPTH) return out
   for (const n of flow?.nodes || []) {
-    if (n?.data?.nodeType !== 'script_call' && n?.type !== 'script_call') continue
-    const id = String(n?.data?.params?.script_id ?? n?.params?.script_id ?? '').trim()
+    const ntype = n?.data?.nodeType ?? n?.type
+    const params = n?.data?.params ?? n?.params ?? {}
+    if (ntype === GROUP_TYPE) {
+      for (const sid of collectCalls(params, depth + 1)) {
+        if (!out.includes(sid)) out.push(sid)
+      }
+      continue
+    }
+    if (ntype !== 'script_call') continue
+    const id = String(params?.script_id ?? '').trim()
     if (id && !out.includes(id)) out.push(id)
   }
   return out
 }
+
+/** 遍历流程图（钻组合节点）时的最大深度，防畸形的深度嵌套把递归打爆。 */
+const MAX_WALK_DEPTH = 24
 
 /** 脚本注册表：id → 子脚本（缺 id 的会被忽略）。 */
 export function normalizeScripts(raw: unknown): Record<string, SubScript> {
@@ -39,6 +56,7 @@ export function normalizeScripts(raw: unknown): Record<string, SubScript> {
       name: String(value?.name || id),
       nodes: Array.isArray(value?.nodes) ? value.nodes : [],
       edges: Array.isArray(value?.edges) ? value.edges : [],
+      variables: Array.isArray(value?.variables) ? value.variables : [],
     }
   }
   return out

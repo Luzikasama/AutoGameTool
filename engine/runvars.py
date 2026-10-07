@@ -37,24 +37,113 @@ _SAFE_FUNCS: dict[str, Any] = {
 
 
 class VarScope:
-    """一次运行的变量表。子脚本与主脚本共用同一份（规范：变量作用域为整个工作流）。"""
+    """一次运行里的变量表，支持**层级作用域**。
 
-    def __init__(self) -> None:
+    0.1.3 及更早：整个工作流共享一张表（主脚本 + 所有子脚本）。
+    0.1.4 起改成层级作用域，对齐用户在界面上看到的「全局变量 / 局部变量」：
+
+      · 读：先看本层，找不到就逐级往上找 —— 所以子脚本 / 组合节点能直接读到全局变量；
+      · 写：**只落在本层**。子脚本里新建或改动的变量不会回流到外层（要共享就显式写全局，
+        见 nodes.variable 的 scope 参数 / VarScope.set_global）；
+      · 「全局变量」= 最外层那一份（主脚本的变量表）。
+
+    为什么不全隔离成"每次调用一份干净表"：那样连读都读不到外层的输入，
+    参数传递会变得很难用；向上查找是常见语言里局部变量的直觉行为。
+    """
+
+    def __init__(self, parent: "VarScope | None" = None) -> None:
         self.vars: dict[str, Any] = {}
+        # 父作用域：None 表示这就是最外层（全局）
+        self.parent = parent
+
+    # ------------------------------------------------------------ 读
+    def has(self, name: str) -> bool:
+        """变量是否可见（本层或任意上层）。"""
+        key = str(name)
+        if key in self.vars:
+            return True
+        return self.parent.has(key) if self.parent is not None else False
 
     def get(self, name: str, default: Any = None) -> Any:
-        return self.vars.get(str(name), default)
+        key = str(name)
+        if key in self.vars:
+            return self.vars[key]
+        if self.parent is not None:
+            return self.parent.get(key, default)
+        return default
 
+    # ------------------------------------------------------------ 写
     def set(self, name: str, value: Any) -> None:
+        """写变量。**只写本层** —— 这是"局部变量"语义的关键。"""
         key = str(name or '').strip()
         if key:
             self.vars[key] = value
 
+    def set_global(self, name: str, value: Any) -> None:
+        """显式写全局（`变量` 节点选了「全局」时用它）。"""
+        key = str(name or '').strip()
+        if not key:
+            return
+        self.root().vars[key] = value
+
+    def delete_global(self, name: str) -> None:
+        """显式删全局。"""
+        self.root().vars.pop(str(name or '').strip(), None)
+
+    def root(self) -> "VarScope":
+        """最外层（全局）作用域。"""
+        r = self
+        while r.parent is not None:
+            r = r.parent
+        return r
+
     def delete(self, name: str) -> None:
-        self.vars.pop(str(name or '').strip(), None)
+        """删除变量：本层有就删本层，否则继续往上层找（与"读"的查找顺序一致）。"""
+        key = str(name or '').strip()
+        if key in self.vars:
+            self.vars.pop(key, None)
+            return
+        if self.parent is not None:
+            self.parent.delete(key)
+
+    # ------------------------------------------------------------ 其它
+    def child(self, declared: Any = None) -> "VarScope":
+        """派生一个子作用域，并把声明的「局部变量」初始化进去。
+
+        declared 接受两种形状（界面从 0.1.4 起存的是前一种）：
+          · [{name, type, value}, …]
+          · {name: value, …}
+        """
+        sub = VarScope(parent=self)
+        sub.seed(declared)
+        return sub
+
+    def seed(self, declared: Any) -> None:
+        """把声明的变量写进本层（幂等；非法条目忽略）。"""
+        if not declared:
+            return
+        if isinstance(declared, dict):
+            for k, v in declared.items():
+                self.set(k, v)
+            return
+        if not isinstance(declared, (list, tuple)):
+            return
+        for item in declared:
+            if isinstance(item, dict):
+                name = str(item.get('name') or '').strip()
+                if not name:
+                    continue
+                raw = item.get('value')
+                self.set(name, coerce(raw, str(item.get('type') or 'auto')))
+            elif isinstance(item, str):
+                # 兼容"只给名字"的写法：初始值视为空串
+                self.set(item, '')
 
     def snapshot(self) -> dict[str, Any]:
-        return dict(self.vars)
+        """把整条作用域链拍平（就近优先），用于日志 / 调试。"""
+        out = self.parent.snapshot() if self.parent is not None else {}
+        out.update(self.vars)
+        return out
 
 
 def _to_number(v: Any) -> float | None:
@@ -142,7 +231,7 @@ def operand(raw: Any, scope: VarScope) -> Any:
 
     规则（写到界面上就是"左值可以直接写变量名"）：
       1. 形如 {{x}} → 变量 x 的值
-      2. 裸名字且**确实存在于变量表** → 变量值
+      2. 裸名字且**确实可见**（本层或上层作用域里有） → 变量值
       3. 其余 → 按字面量（数字文本转数字，否则字符串）
     """
     if not isinstance(raw, str):
@@ -151,8 +240,8 @@ def operand(raw: Any, scope: VarScope) -> Any:
     m = _VAR_RE.fullmatch(s)
     if m:
         return scope.get(m.group(1))
-    if s in scope.vars:
-        return scope.vars[s]
+    if scope.has(s):
+        return scope.get(s)
     if _VAR_RE.search(s):
         return interpolate(s, scope)
     return coerce(s)
@@ -257,8 +346,8 @@ def _eval_node(node: ast.AST, scope: VarScope) -> Any:
             return node.value
         raise ExprError('不支持的常量类型')
     if isinstance(node, ast.Name):
-        if node.id in scope.vars:
-            v = scope.vars[node.id]
+        if scope.has(node.id):
+            v = scope.get(node.id)
             n = _to_number(v)
             return n if n is not None else v
         if node.id in _SAFE_FUNCS:

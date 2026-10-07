@@ -34,7 +34,7 @@ function pick(id: string) {
 <template>
   <n-modal v-model:show="show" preset="card" title="选择要调用的子脚本" style="width: 620px; max-width: calc(100vw - 32px)">
     <p class="hint">
-      子脚本会保存在**当前脚本文件内部**，跟着脚本一起走。运行时它会被就地展开执行，效果与「打包合并」基本相同，
+      子脚本会保存在**当前脚本文件内部**，跟着脚本一起走。运行时它会被就地展开执行，效果与「组合节点」基本相同，
       区别是子脚本可以单独编辑、单独导出，也能被多个脚本复用。
     </p>
 

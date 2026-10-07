@@ -34,6 +34,8 @@ export interface SubScript {
   name: string
   nodes: any[]
   edges: any[]
+  /** 这个子脚本自己的「局部变量」声明（0.1.4 起；旧文件没有，按空处理） */
+  variables?: VarItem[]
 }
 
 /** 调用脚本节点的参数：只认 script_id（name 仅用于显示，丢了也能靠注册表补回来）。 */
@@ -52,7 +54,7 @@ export interface FlowEdge {
 export interface Flow {
   name: string
   repeat: number
-  input_mode: 'real' | 'simulated'
+  input_mode?: 'real' | 'simulated'
   window: { hwnd: number; title: string } | null
   nodes: FlowNode[]
   edges: FlowEdge[]
@@ -65,6 +67,56 @@ export interface Flow {
  * （输入=蓝 / 视觉=绿 / 流程=青 / 工具=橙 / 数据=紫 / 系统=灰）。
  */
 export type NodeCategory = 'input' | 'vision' | 'flow' | 'tool' | 'data' | 'system'
+
+/**
+ * 「组合节点」的类型名（0.1.4 起，「合并节点」的产物）。
+ *
+ * 它**不属于六大类**里的任何一类 —— 只是一个把若干节点装起来的「流程容器」：
+ *  · 单击选中 → 右侧参数页可以改名字等属性
+ *  · 双击     → 新开一个编辑标签，进去编辑它内部那张图
+ *  · 内部图与自己的「局部变量」都存在节点参数的 `nodes / edges / variables` 里
+ *
+ * 因此它既不在左侧节点面板里出现（不靠拖拽创建，只能由「合并节点」产生），
+ * 也不参与 CATEGORY_META 的配色体系，而是单给它一个色。
+ */
+export const GROUP_TYPE = 'group'
+
+export const GROUP_META = {
+  label: '组合节点',
+  icon: '🧩',
+  color: '#ec4899',
+  desc: '把一串节点收成一个；双击进入编辑',
+} as const
+
+/** 组合节点内部那张图 + 局部变量的参数形状（存在节点的 params 里） */
+export interface GroupParams {
+  name: string
+  nodes: any[]
+  edges: any[]
+  /** 这个组合节点自己的「局部变量」声明 */
+  variables: VarItem[]
+}
+
+/**
+ * 一条变量声明（右侧「变量」标签页里管理）。
+ *
+ * 全局变量属于主脚本、局部变量属于子脚本 / 组合节点；运行时按层级作用域初始化：
+ * 读逐级往上找，写只落本层（要共享就显式写全局，见「变量」节点的作用域参数）。
+ */
+export interface VarItem {
+  name: string
+  /** auto / string / number / bool */
+  type: string
+  /** 初始值（文本；按 type 转换） */
+  value: string
+}
+
+export const VAR_TYPES = [
+  { label: '自动识别', value: 'auto' },
+  { label: '文本', value: 'string' },
+  { label: '数字', value: 'number' },
+  { label: '真/假', value: 'bool' },
+]
 
 export const CATEGORY_ORDER: NodeCategory[] = [
   'input',
@@ -170,8 +222,9 @@ export function nodesOfCategory(cat: NodeCategory): Array<[NodeType, NodeMeta]> 
   )
 }
 
-/** 节点配色 = 它所属类目的颜色 */
+/** 节点配色 = 它所属类目的颜色；组合节点不属于任何类目，单给一个色。 */
 export function nodeColor(t: string): string {
+  if (t === GROUP_TYPE) return GROUP_META.color
   const m = NODE_META[t as NodeType]
   return m ? CATEGORY_META[m.category].color : '#888'
 }
@@ -226,11 +279,18 @@ export interface BoundWindow {
 
 export interface FlowFile {
   format: 'agflow'
-  /** 1 = 0.1.1 及更早（无 scripts）；2 = 0.1.2 起（可携带子脚本）。读取时两者都接受。 */
+  /**
+   * 1 = 0.1.1 及更早（无 scripts）
+   * 2 = 0.1.2 起（可携带子脚本）
+   * 3 = 0.1.4 起（变量管理：主脚本的 variables + 子脚本/组合节点的局部变量；
+   *     输入方式从流程级单选取下，改为挂在各输入节点上）。读取时 1/2/3 都接受。
+   */
   version: number
   name: string
   repeat: number
-  input_mode: 'real' | 'simulated'
+  /** 脚本级输入方式。0.1.4 起已废弃：输入方式挂在各输入节点自己的参数上；
+   *  这里只在读老文件（version < 3）时作为分发来源，新存的文件不写这个字段。 */
+  input_mode?: 'real' | 'simulated'
   window: BoundWindow | null
   /** 保存时的主显示器物理分辨率，跨分辨率运行时坐标按比例换算 */
   screen?: ScreenRef | null
@@ -238,4 +298,6 @@ export interface FlowFile {
   edges: any[]
   /** 本脚本内嵌的子脚本（脚本库）。旧文件没有这个字段，按空处理。 */
   scripts?: Record<string, SubScript>
+  /** 主脚本的「全局变量」声明（0.1.4 起）。旧文件没有这个字段，按空处理。 */
+  variables?: VarItem[]
 }

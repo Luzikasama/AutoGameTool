@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
-import { BRANCH_BODY, BRANCH_NEXT, BRANCH_NO, BRANCH_YES, CATEGORY_META, NODE_META } from '../types'
+import { BRANCH_BODY, BRANCH_NEXT, BRANCH_NO, BRANCH_YES, CATEGORY_META, GROUP_META, GROUP_TYPE, NODE_META } from '../types'
 import { UNARY_OPS } from '../lib/nodeSchema'
 
 const props = defineProps<{
@@ -16,15 +16,22 @@ const props = defineProps<{
  */
 const scriptExists = inject<(id: string) => boolean>('scriptExists', () => true)
 
-const meta = computed(() => NODE_META[props.data.nodeType as keyof typeof NODE_META])
+/** 组合节点：不属于六大类，用一整套独立的外观（配色 + 图标 + 双击提示） */
+const isGroup = computed(() => props.data.nodeType === GROUP_TYPE)
+const meta = computed(() =>
+  isGroup.value ? undefined : NODE_META[props.data.nodeType as keyof typeof NODE_META],
+)
 const cat = computed(() => (meta.value ? CATEGORY_META[meta.value.category] : undefined))
-const color = computed(() => cat.value?.color || '#888')
+const color = computed(() => (isGroup.value ? GROUP_META.color : cat.value?.color || '#888'))
 
 const isJudge = computed(() => props.data.nodeType === 'judge')
 const isLoop = computed(() => props.data.nodeType === 'loop')
 /** 终止节点没有出口：它的作用就是断在这里 */
 const isTerminate = computed(() => props.data.nodeType === 'terminate')
 const isScriptCall = computed(() => props.data.nodeType === 'script_call')
+
+/** 组合节点内部有多少个节点（内部图存在 params.nodes 里） */
+const groupSize = computed(() => (props.data.params?.nodes || []).length)
 
 /** 子脚本缺失（被删掉 / 导入时没带上）——节点上要显示出来，别让问题藏到运行时 */
 const scriptMissing = computed(() => {
@@ -46,6 +53,8 @@ function condText(c: any): string {
 const summary = computed(() => {
   const p = props.data.params || {}
   switch (props.data.nodeType) {
+    case GROUP_TYPE:
+      return groupSize.value ? `${groupSize.value} 个节点 · 双击编辑` : '（空）双击编辑'
     case 'mouse': {
       const act = String(p.action || 'click')
       const label: Record<string, string> = {
@@ -133,8 +142,13 @@ const summary = computed(() => {
   }
 })
 
-const icon = computed(() => meta.value?.icon || '❓')
-const title = computed(() => props.data.label || meta.value?.label || props.data.nodeType)
+const icon = computed(() => (isGroup.value ? GROUP_META.icon : meta.value?.icon || '❓'))
+const title = computed(
+  () =>
+    (isGroup.value ? String(props.data.params?.name || '') : props.data.label) ||
+    (isGroup.value ? GROUP_META.label : meta.value?.label) ||
+    props.data.nodeType,
+)
 </script>
 
 <template>
@@ -142,7 +156,7 @@ const title = computed(() => props.data.label || meta.value?.label || props.data
        内联样式优先级高于样式表，一旦写死就没法用 .is-selected 类覆盖了。 -->
   <div
     class="step-node"
-    :class="{ 'is-selected': selected, 'is-broken': scriptMissing }"
+    :class="{ 'is-selected': selected, 'is-broken': scriptMissing, 'is-group': isGroup }"
     :style="{ '--node-color': color }"
   >
     <Handle type="target" :position="Position.Left" />
@@ -195,6 +209,23 @@ const title = computed(() => props.data.label || meta.value?.label || props.data
   transition:
     border-color 0.15s,
     box-shadow 0.15s;
+}
+/* ---------- 组合节点 ----------
+   它是"装了一段流程的容器"，所以刻意长得和普通节点不一样：虚线外框 + 双层投影，
+   暗示"这里面还有一层"。颜色单独给（不属于六大类）。 */
+.step-node.is-group {
+  border-style: dashed;
+  border-width: 2px;
+  background: var(--bg-soft, var(--bg-panel));
+  box-shadow:
+    0 0 0 3px rgba(236, 72, 153, 0.12),
+    0 2px 10px rgba(0, 0, 0, 0.28);
+}
+.step-node.is-group .step-icon {
+  border-radius: 7px 7px 7px 0;
+}
+.step-node.is-group .step-title {
+  color: #ec4899;
 }
 /* ---------- 选中反馈 ----------
    只换边框颜色在深色底上根本认不出来（尤其是本来边框就有节点类型色的时候）。

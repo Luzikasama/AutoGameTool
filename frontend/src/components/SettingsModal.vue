@@ -506,7 +506,7 @@ onBeforeUnmount(() => {
               {{ draft ? '按当前窗口比例裁切，所见即所得' : NAV_HINT[nav] }}
             </div>
           </div>
-          <button class="st-close" type="button" title="关闭" @click="show = false">×</button>
+          <button class="st-close" type="button" @click="show = false">×</button>
         </header>
 
         <div class="st-scroll">

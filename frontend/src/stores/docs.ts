@@ -1,31 +1,37 @@
 /**
- * 多标签文档（标签页 = 一个脚本编辑器）。
+ * 多标签文档（标签页 = 一个编辑器）。
  *
  * 为什么需要这一层：0.1.2 起「同时打开多个脚本 + 子脚本」成为常态，
  * 原先 Editor.vue 里那一堆 `nodes/edges/flowName/历史` 全局 ref 只够一个文档用。
+ * 0.1.4 起又多了一种标签：**组合节点**（双击画布上的组合节点进入，编辑它内部那张图）。
  *
  * 状态怎么分：
- *  - **文档数据**（nodes / edges / scripts / 各种元信息）由各标签对应的编辑器实例
- *    持有并实时镜像到这里的 `roots`（普通 Map，刻意 markRaw 掉，避免整棵流程图
- *    被 Vue 深度代理 —— 上万节点时那是纯浪费）；
- *  - **标签元信息**（标题、是否改动、指向哪个子脚本）放在这里，标签栏与「保存全部」
- *    需要一个能观察的小数据面。
+ *  - **文档数据**（nodes / edges / scripts / variables / 各种元信息）由各标签对应的
+ *    编辑器实例持有并实时镜像到这里的 `roots`（普通 Map，刻意 markRaw 掉，避免整棵
+ *    流程图被 Vue 深度代理 —— 上万节点时那是纯浪费）；
+ *  - **标签元信息**（标题、是否改动、指向哪个子脚本 / 哪个组合节点）放在这里，
+ *    标签栏与「保存全部」需要一个能观察的小数据面。
  *
  * 子脚本的 id（`s1` / `s2` …）由这里统一发放，保证同一父脚本内不重复。
  */
 import { defineStore } from 'pinia'
 import { markRaw, ref } from 'vue'
-import type { SubScript } from '../types'
+import type { SubScript, VarItem } from '../types'
 import { normalizeScripts } from '../lib/scriptGraph'
 
 export interface DocMeta {
   /** 标签 id（与脚本 id 无关；子脚本标签可以关掉再打开，标签 id 会换） */
   id: string
-  kind: 'root' | 'sub'
+  kind: 'root' | 'sub' | 'group'
   /** 所属根文档的标签 id（root 文档就是它自己） */
   rootId: string
-  /** 子脚本 id；root 为空串 */
+  /** 子脚本 id；root 为空串。组合节点标签沿用"它所在的那份脚本"的 id */
   scriptId: string
+  /**
+   * 组合节点标签专用：从所在脚本往下走到这个组合节点的**节点 id 路径**。
+   * 逐层下钻（组合节点里还能再套组合节点），空数组表示不是组合节点标签。
+   */
+  groupPath: string[]
   /** 标签上显示的名字 */
   name: string
   /** 有未保存的改动 */
@@ -35,7 +41,6 @@ export interface DocMeta {
 export interface RootData {
   name: string
   repeat: number
-  inputMode: 'real' | 'simulated'
   boundWindow: { hwnd: number; title: string } | null
   screen: { width: number; height: number } | null
   windowRect: any | null
@@ -43,19 +48,21 @@ export interface RootData {
   edges: any[]
   /** 内嵌在本脚本下的子脚本库 */
   scripts: Record<string, SubScript>
+  /** 主脚本的「全局变量」声明（0.1.4 起） */
+  variables: VarItem[]
 }
 
 function emptyRoot(name = '未命名脚本'): RootData {
   return {
     name,
     repeat: 1,
-    inputMode: 'real',
     boundWindow: null,
     screen: null,
     windowRect: null,
     nodes: [],
     edges: [],
     scripts: {},
+    variables: [],
   }
 }
 
@@ -110,6 +117,7 @@ export const useDocsStore = defineStore('docs', () => {
       kind: 'root',
       rootId: id,
       scriptId: '',
+      groupPath: [],
       name: data.name,
       dirty: false,
     }
@@ -135,7 +143,38 @@ export const useDocsStore = defineStore('docs', () => {
       kind: 'sub',
       rootId,
       scriptId,
+      groupPath: [],
       name: script.name || scriptId,
+      dirty: false,
+    })
+    activeId.value = id
+    return id
+  }
+
+  /**
+   * 打开（或聚焦）某个「组合节点」的编辑器标签。
+   *
+   * @param scriptId 空的组合节点在根脚本里，否则在对应子脚本里
+   * @param groupPath 从该脚本往下逐层的节点 id（支持组合节点里再套组合节点）
+   */
+  function openGroup(rootId: string, scriptId: string, groupPath: string[], name: string): string {
+    const key = groupPath.join('/')
+    const exist = tabs.value.find(
+      (t) => t.kind === 'group' && t.rootId === rootId && t.scriptId === scriptId && (t.groupPath || []).join('/') === key,
+    )
+    if (exist) {
+      activeId.value = exist.id
+      return exist.id
+    }
+    if (!groupPath.length) return ''
+    const id = nextId('grp')
+    tabs.value.push({
+      id,
+      kind: 'group',
+      rootId,
+      scriptId,
+      groupPath: [...groupPath],
+      name: name || '组合节点',
       dirty: false,
     })
     activeId.value = id
@@ -248,6 +287,7 @@ export const useDocsStore = defineStore('docs', () => {
     refreshScriptIndex,
     openRoot,
     openSub,
+    openGroup,
     activate,
     moveTab,
     replaceRoot,

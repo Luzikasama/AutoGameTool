@@ -541,10 +541,183 @@ def case_node_coverage() -> None:
     """
     print("[0] 节点覆盖面：25 个核心节点在引擎侧都有实现")
     handled = set(nodemod.HANDLERS) | set(nodemod.CONTROL_NODES)
-    labeled = set(executor._STEP_LABEL)
+    labeled = set(executor._STEP_LABEL) - {executor.GROUP_NODE}
     check("实现与中文名数量一致（25）", len(handled) == 25, f"{len(handled)} 个：{sorted(handled)}")
     check("实现集合 == 悬浮框名集合", handled == labeled, f"只在实现里：{sorted(handled - labeled)}；只在校验里：{sorted(labeled - handled)}")
     check("控制流节点不在 HANDLERS 里（避免双重处理）", not (set(nodemod.HANDLERS) & nodemod.CONTROL_NODES), str(set(nodemod.HANDLERS) & nodemod.CONTROL_NODES))
+    # 组合节点是"容器"，不属于六大类，也就不在这 25 个里
+    check("组合节点已登记中文名、且不算进 25 个核心节点", 'group' in executor._STEP_LABEL and 'group' not in handled)
+
+
+# ---------------------------------------------------------------------------
+# 0.1.4：组合节点 / 层级变量作用域 / 按节点输入方式
+# ---------------------------------------------------------------------------
+
+def group_node(nid: str, inner_nodes: list, inner_edges: list, *, name: str = "组合", variables=None) -> dict:
+    return {
+        "id": nid,
+        "type": "group",
+        "params": {"name": name, "nodes": inner_nodes, "edges": inner_edges, "variables": variables or []},
+    }
+
+
+async def case_group_node() -> None:
+    print("[11] 组合节点：内部图就地执行，且对上层的控制流透明")
+    CALLS.clear()
+    flow = {
+        "name": "组合",
+        "repeat": 1,
+        "nodes": [
+            group_node("g1", [delay("a1"), click_node("a2", 11, 12)], [edge("a1", "a2")]),
+            delay("tail"),
+        ],
+        "edges": [edge("g1", "tail")],
+    }
+    _ex, logs, visited = await drive(flow)
+    t = texts(logs)
+    check("组合节点里的鼠标操作真的执行了", any(c[0] == "click" and c[1][:2] == (11, 12) for c in CALLS), str(CALLS))
+    check("日志里明确进了组合节点", "进入组合节点" in t, t)
+    check("组合节点有出口、能继续往下走", "tail" in visited, str(visited))
+
+    # 透明性：组合节点内部的「结束当前循环」要作用到**外层的循环**上
+    CALLS.clear()
+    flow2 = {
+        "name": "循环里的组合",
+        "repeat": 1,
+        "nodes": [
+            loop_times("lp", 5),
+            group_node("g2", [delay("b1"), terminate("b2", "loop")], [edge("b1", "b2")]),
+            delay("after"),
+        ],
+        "edges": [edge("lp", "g2", "body"), edge("g2", "lp"), edge("lp", "after", "next")],
+    }
+    _ex2, logs2, _v2 = await drive(flow2)
+    t2 = texts(logs2)
+    check(
+        "组合节点里的「结束当前循环」打断了外层循环（只跑 1 轮）",
+        "共 1 轮" in t2 and "共 5 轮" not in t2,
+        t2,
+    )
+
+    # 嵌套组合节点
+    CALLS.clear()
+    nested = group_node("n-g", [click_node("n-c", 21, 22)], [])
+    flow3 = {
+        "name": "嵌套组合",
+        "repeat": 1,
+        "nodes": [group_node("g3", [delay("c1"), nested], [edge("c1", "n-g")])],
+        "edges": [],
+    }
+    await drive(flow3)
+    check("嵌套组合节点也能执行到底", any(c[0] == "click" and c[1][:2] == (21, 22) for c in CALLS), str(CALLS))
+
+    # 空组合节点 / 内部坏连线：只报错不崩
+    flow4 = {"name": "空组合", "repeat": 1, "nodes": [group_node("g4", [], [])], "edges": []}
+    ex4, logs4, _v4 = await drive(flow4)
+    check("空组合节点只警告、不崩", "没有节点" in texts(logs4) and ex4.running is False, texts(logs4))
+
+    bad = {"name": "坏组合", "repeat": 1, "edges": [], "nodes": [
+        group_node("g5", [delay("d1")], [{"source": "d1", "target": "不存在", "sourceHandle": None}])]}
+    ex5, logs5, _v5 = await drive(bad)
+    check("组合节点内部的坏连线会被校验拦下", "无效" in texts(logs5) and ex5.running is False, texts(logs5))
+
+
+async def case_var_scope() -> None:
+    print("[12] 层级变量作用域：全局可见 / 局部不外泄 / 可显式写全局")
+    flow = {
+        "name": "作用域",
+        "repeat": 1,
+        "variables": [{"name": "hp", "type": "number", "value": "100"}],
+        "nodes": [
+            judge("j1", "hp", "==", "100"),
+            {"id": "ok", "type": "variable", "params": {"action": "set", "name": "seen", "value": "yes"}},
+        ],
+        "edges": [edge("j1", "ok", "yes")],
+    }
+    ex, _logs, visited = await drive(flow)
+    check("声明的全局变量在开跑时已初始化（数字 100）", ex.vars.get("hp") == 100, repr(ex.vars.get("hp")))
+    check("判断读得到全局变量", "ok" in visited, str(visited))
+
+    flow2 = {
+        "name": "局部不外泄",
+        "repeat": 1,
+        "variables": [{"name": "g", "type": "auto", "value": "G0"}],
+        "nodes": [
+            group_node("g1", [
+                {"id": "s1", "type": "variable", "params": {"action": "set", "name": "local_only", "value": "L"}},
+                {"id": "s2", "type": "variable", "params": {"action": "set", "name": "g", "value": "G1"}},
+            ], [edge("s1", "s2")]),
+        ],
+        "edges": [],
+    }
+    ex2, _l2, _v2 = await drive(flow2)
+    check("组合节点里新建的变量不外泄", ex2.vars.get("local_only") is None, repr(ex2.vars.get("local_only")))
+    check("改同名变量默认只改本层（全局保持原值）", ex2.vars.get("g") == "G0", repr(ex2.vars.get("g")))
+
+    flow3 = {
+        "name": "显式全局",
+        "repeat": 1,
+        "nodes": [
+            group_node("g1", [
+                {"id": "s1", "type": "variable", "params": {"action": "set", "name": "g", "value": "G2", "scope": "global"}},
+            ], []),
+        ],
+        "edges": [],
+    }
+    ex3, _l3, _v3 = await drive(flow3)
+    check("scope=global 能写回全局作用域", ex3.vars.get("g") == "G2", repr(ex3.vars.get("g")))
+
+    flow4 = {
+        "name": "子脚本局部",
+        "repeat": 1,
+        "variables": [{"name": "outer", "type": "auto", "value": "O"}],
+        "nodes": [call_node("c1", "S")],
+        "edges": [],
+        "scripts": {"S": {
+            "id": "S",
+            "name": "子",
+            "edges": [edge("sp", "sw")],
+            "variables": [{"name": "local", "type": "auto", "value": "LV"}],
+            "nodes": [
+                judge("sp", "outer", "==", "O"),
+                {"id": "sw", "type": "variable", "params": {"action": "set", "name": "leak", "value": "X"}},
+            ],
+        }},
+    }
+    ex4, logs4, _v4 = await drive(flow4)
+    check("子脚本读得到外层的全局变量", "判断 → 是" in texts(logs4), texts(logs4))
+    check("子脚本里写的变量不外泄到主脚本", ex4.vars.get("leak") is None, repr(ex4.vars.get("leak")))
+
+
+async def case_input_mode_per_node() -> None:
+    print("[13] 输入方式跟着节点走（0.1.4 起不再有流程级单选）")
+    CALLS.clear()
+    flow = {
+        "name": "输入方式",
+        "repeat": 1,
+        "nodes": [
+            {"id": "m1", "type": "mouse", "params": {"action": "click", "x": 1, "y": 2, "button": "left", "clicks": 1, "input_mode": "simulated"}},
+            {"id": "m2", "type": "mouse", "params": {"action": "click", "x": 3, "y": 4, "button": "left", "clicks": 1}},
+        ],
+        "edges": [edge("m1", "m2")],
+    }
+    await drive(flow)
+    m1 = [c for c in CALLS if c[0] == "click" and c[1][:2] == (1, 2)]
+    m2 = [c for c in CALLS if c[0] == "click" and c[1][:2] == (3, 4)]
+    check("节点写了 simulated → 用后台消息", bool(m1) and m1[0][1][4] == "simulated", str(m1))
+    check("节点没写 → 回落到默认（真实键鼠）", bool(m2) and m2[0][1][4] == "real", str(m2))
+
+    CALLS.clear()
+    flow2 = {
+        "name": "老默认",
+        "repeat": 1,
+        "input_mode": "simulated",
+        "nodes": [{"id": "m", "type": "mouse", "params": {"action": "click", "x": 9, "y": 9, "button": "left", "clicks": 1}}],
+        "edges": [],
+    }
+    await drive(flow2)
+    mm = [c for c in CALLS if c[0] == "click" and c[1][:2] == (9, 9)]
+    check("老脚本的流程级 input_mode 仍作为兜底默认", bool(mm) and mm[0][1][4] == "simulated", str(mm))
 
 
 async def main() -> int:
@@ -558,6 +731,9 @@ async def main() -> int:
     await case_input_nodes()
     await case_resolution()
     await case_abnormal_exit()
+    await case_group_node()
+    await case_var_scope()
+    await case_input_mode_per_node()
 
     print()
     if FAILED:

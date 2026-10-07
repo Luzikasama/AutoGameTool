@@ -1,5 +1,5 @@
 /**
- * 键鼠录制的「拆分」与「打包」：两者互为逆操作，都是纯函数。
+ * 键鼠录制的「拆分」：录制事件 → 可编辑的流程节点（纯函数）。
  *
  * 拆分（录制事件 → 流程节点）的合并规则
  *  - mousedown + 紧随的 mouseup（同键） → 一个「鼠标操作」节点（action=click，保留按下时的坐标）
@@ -9,7 +9,11 @@
  *  - mousemove 一律丢弃：鼠标操作节点自带坐标，回放时会把光标移到该坐标
  *  - 事件之间的间隔 >= minGapMs（见 expandPieces）时插入一个「延时」节点，保留原有节奏
  *
- * 打包（选中的相邻流程节点 → 一个录制节点）见 packStepsToMacro。
+ * ⚠️ 0.1.4 起，画布上的「合并节点」**不再**是"把这些节点打包回一个录制节点"，
+ * 而是生成一个**组合节点**（类型 `group`，把这段流程连同局部变量装起来，
+ * 双击可进入编辑）—— 所以那边用的是下面的 orderChain / isCleanSegment，
+ * 而不是 packStepsToMacro。packStepsToMacro 作为"拆分"的数学逆运算保留下来
+ * （往返自检用），编辑器已不再调用它。
  *
  * ⚠️ 节点类型/参数是「新旧通用」的：这里产出的都是 0.1.3 的新节点形态
  * （mouse / keyboard / record），老文件由 lib/migrateFlow.ts 在加载时升级。
@@ -279,16 +283,26 @@ export function splitAgain(events: any[], minGapMs = 80): MacroStep[] {
 }
 
 /**
- * 把选中的节点按连线顺序排成一条链；不是「一条连续链」时返回 null。
+ * 把选中的节点按连线顺序排成一条**干净的线性段**；否则返回 null。
  *
- * 打包合并要求选中的节点首尾相接，判定条件：
+ * 「合并节点」要求选中的节点首尾相接、且这段流程可以被无损地装进一个组合节点里。
+ * 判定条件：
  *  - 选中集合内部恰好有一个"没有入边"的头（0 个 = 成环，多个 = 不是一条链）
  *  - 顺流而下时中间不能有分支（判断节点有两条出边，表达不了先后顺序）
  *  - 这条链必须覆盖**全部**选中节点（否则有游离在外的）
+ *  - **不跨边界分支**（0.1.4 新增，关键）：
+ *      中间节点不许有连到外面的线（外部的出入边会把这段流程切碎）；
+ *      尾部节点最多只能有一条出边 —— 判断若把"是/否"两条都连到外面，
+ *      合并后这个组合节点只会有**一个**出口，分支信息就丢了。
+ *      头部的入边无所谓（连进来的是别人，改成指向组合节点即可）。
+ *
+ * 之所以要这条：不做这个检查时，"把判断节点放在链尾、两条分支都连出去"
+ * 也会被判定成合法链，合并后 yes/no 两条线都被挂到同一个出口上，
+ * 语义被静默改掉 —— 这比直接拒绝危险得多。
  */
 export function orderChain<T extends { id: string }>(
   selected: T[],
-  edges: { source: string; target: string }[],
+  edges: { source: string; target: string; sourceHandle?: string | null }[],
 ): T[] | null {
   if (!Array.isArray(selected) || selected.length < 2) return null
   const ids = new Set(selected.map((n) => n.id))
@@ -318,7 +332,45 @@ export function orderChain<T extends { id: string }>(
     if (outs.length > 1) return null
     cur = outs.length ? outs[0] : null
   }
-  return chain.length === selected.length ? chain : null
+  if (chain.length !== selected.length) return null
+  if (!isCleanSegment(chain, edges)) return null
+  return chain
+}
+
+/** 这段链有没有跨边界的分支 / 多余的外部连线（合并节点用）。
+ *
+ *  ⚠️ **段内部的连线要跳过**：链自己 n1→n2→n3 的那两条边是这段流程的一部分，
+ *  不能拿"出边只允许来自尾部"去要求它们（n1 不是尾，但它连的是段内的 n2，完全合法）。
+ *  只有**一头在段内、另一头在段外**的边才需要校验：
+ *  入边只允许接到头部、出边只允许从尾部出去且最多一条。
+ */
+export function isCleanSegment<T extends { id: string }>(
+  chain: T[],
+  edges: { source: string; target: string }[],
+): boolean {
+  const ids = new Set(chain.map((n) => n.id))
+  const headId = chain[0].id
+  const tailId = chain[chain.length - 1].id
+  for (const e of edges || []) {
+    const fromIn = ids.has(e.source)
+    const toIn = ids.has(e.target)
+    if (!fromIn && !toIn) continue
+    // 两端都在段内 = 段内部的连线，跳过（这是它自己的流程）
+    if (fromIn && toIn) continue
+    if (fromIn) {
+      // 出边：只有尾部允许连到外面
+      if (e.source !== tailId) return false
+    }
+    if (toIn) {
+      // 入边：只有头部允许从外面接进来
+      if (e.target !== headId) return false
+    }
+  }
+  // 尾部往段外的出边最多一条（段内部的出边不算）
+  const outsOfTail = (edges || []).filter(
+    (e) => e.source === tailId && !ids.has(e.target),
+  ).length
+  return outsOfTail <= 1
 }
 
 // ---------------------------------------------------------------------------

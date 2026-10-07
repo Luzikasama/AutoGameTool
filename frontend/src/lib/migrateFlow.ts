@@ -1,5 +1,5 @@
 /**
- * 老脚本 → 0.1.3 节点体系的**就地升级**。
+ * 老脚本 → 当前节点体系的**就地升级**（0.1.3 节点体系 + 0.1.4 变量/输入方式）。
  *
  * 0.1.3 把「步骤」改名成「节点」，类型从 10 个扩到 25 个。为了让 0.1.2 及更早
  * 保存的 .agflow 还能正常打开，加载时统一走这里升级。要处理三类差异：
@@ -14,12 +14,19 @@
  *     - 老的「判断」（judge，当年语义是"找图 + 分支"）：
  *       拆成 图像识别 → 判断（条件 found == yes），后继连线原样保留在判断上
  *
+ * 0.1.4 又加了两条**语义兼容**升级（都只在 version < 3 时做）：
+ *  4. 脚本级的 `input_mode` 分发到各输入节点的 `params.input_mode`
+ *     （0.1.4 起设置栏里那个全局单选被去掉了）
+ *  5. 子脚本里的「变量」节点标成 `scope: global`。0.1.4 起变量改成层级作用域
+ *     （子脚本 / 组合节点的写入默认不回流外层），老脚本原本是全共享，
+ *     不显式标一次就会**悄悄改变行为**。
+ *
  * 设计原则：**升级是幂等的**，且不丢用户填过的任何值。
  *  - 判断"是不是老节点"看的是**类型名**（mouse/ocr/… 这些新名字绝不会被再升级一次）
  *  - 参数升级一律"老值优先、缺的补默认"，不认识的键原样留着
  *  - 节点 id 尽量复用（被插入的新节点才用新 id），这样外部引用的 id 不会失效
  */
-import { LEGACY_TYPE_MAP, NODE_META, type NodeType } from '../types'
+import { GROUP_META, GROUP_TYPE, LEGACY_TYPE_MAP, NODE_META, type NodeType } from '../types'
 import { mergeWithDefaults } from './nodeSchema'
 
 const COL_PITCH_FALLBACK = 212
@@ -134,6 +141,22 @@ export function migrateFlow(nodesIn: any[] | undefined, edgesIn: any[] | undefin
     const pos = {
       x: Number(node?.position?.x ?? 0) || 0,
       y: Number(node?.position?.y ?? 0) || 0,
+    }
+
+    // ---- 情况 A0：组合节点（0.1.4 新增）→ 递归升级它内部那张图 ----
+    // 组合节点自己没有"改名"的问题，但内部节点可能还是老类型（
+    // 比如把一个老文件里的节点合并后再读回来），所以要钻进去。
+    if (oldType === GROUP_TYPE) {
+      const gp = { ...params }
+      const inner = migrateFlow(gp.nodes, gp.edges)
+      gp.nodes = inner.nodes
+      gp.edges = inner.edges
+      if (!Array.isArray(gp.variables)) gp.variables = []
+      if (!gp.name) gp.name = GROUP_META.label
+      writeParams(node, gp)
+      notes.push(...inner.notes)
+      out.push(node)
+      continue
     }
 
     // ---- 情况 A：老的「判断」（找图 + 分支）→ 图像识别 + 判断 ----
@@ -255,9 +278,58 @@ export function migrateFlow(nodesIn: any[] | undefined, edgesIn: any[] | undefin
   return { nodes: out, edges, notes }
 }
 
+/** 会把输入动作发给系统的节点类型（0.1.4 起输入方式挂在这些节点自己身上）。 */
+const INPUT_TYPES = new Set(['mouse', 'keyboard', 'text_input', 'autoclick', 'record'])
+
+/**
+ * 把老的「脚本级输入方式」分发到各个输入节点（0.1.4 起没有全局单选了）。
+ *
+ * 只在老脚本（version < 3）且当初选的是「模拟输入」时才需要 —— 当初选「键鼠输入」
+ * 正好等于新默认值，不用写任何东西。会钻进组合节点。
+ */
+function distributeInputMode(nodes: any[] | undefined, mode: string, depth = 0): void {
+  if (!Array.isArray(nodes) || depth > 8) return
+  for (const n of nodes) {
+    const t = readType(n)
+    const p = readParams(n)
+    if (t === GROUP_TYPE) {
+      distributeInputMode(p.nodes, mode, depth + 1)
+      continue
+    }
+    if (INPUT_TYPES.has(t)) p.input_mode = mode
+  }
+}
+
+/**
+ * 老脚本（版本 < 3）里的变量是**全工作流共享**的。
+ *
+ * 0.1.4 改成层级作用域后，子脚本 / 组合节点里的写入默认不再回流外层 ——
+ * 直接把老脚本升上来会悄悄改变它的行为。所以这里把老文件里已有的「变量」节点
+ * 显式标成 `scope: global`，让它们保持原来的语义；用户想改用局部，自己在界面上改。
+ */
+function forceGlobalVarScope(nodes: any[] | undefined, depth = 0): number {
+  if (!Array.isArray(nodes) || depth > 8) return 0
+  let n = 0
+  for (const node of nodes) {
+    const t = readType(node)
+    const p = readParams(node)
+    if (t === GROUP_TYPE) {
+      n += forceGlobalVarScope(p.nodes, depth + 1)
+      continue
+    }
+    if (t === 'variable' && !p.scope) {
+      p.scope = 'global'
+      n += 1
+    }
+  }
+  return n
+}
+
 /** 整份脚本（含子脚本库）的升级；返回新对象与说明。 */
 export function migrateScript(data: any): { data: any; notes: string[] } {
   if (!data || typeof data !== 'object') return { data, notes: [] }
+  const version = Number(data.version) || 1
+  const legacy = version < 3
   const notes: string[] = []
   const root = migrateFlow(data.nodes, data.edges)
   notes.push(...root.notes)
@@ -274,6 +346,23 @@ export function migrateScript(data: any): { data: any; notes: string[] } {
       scripts[key] = { ...sub, nodes: r.nodes, edges: r.edges }
     }
   }
+
+  if (legacy) {
+    const mode = data.input_mode === 'simulated' ? 'simulated' : 'real'
+    if (mode === 'simulated') {
+      distributeInputMode(root.nodes, mode)
+      for (const s of Object.values<any>(scripts)) distributeInputMode(s.nodes, mode)
+      notes.push('脚本级的「模拟输入」已分发到各个输入节点（0.1.4 起输入方式按节点设定）')
+    }
+    let kept = 0
+    for (const s of Object.values<any>(scripts)) kept += forceGlobalVarScope(s.nodes)
+    if (kept) {
+      notes.push(
+        `子脚本里的 ${kept} 个「变量」节点已标为「全局作用域」，保持它们原来的跨层共享行为（0.1.4 起默认是局部）`,
+      )
+    }
+  }
+
   return {
     data: { ...data, nodes: root.nodes, edges: root.edges, scripts },
     notes: Array.from(new Set(notes)),

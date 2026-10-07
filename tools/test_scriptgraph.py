@@ -65,8 +65,22 @@ def main() -> int:
     ) == ["Z"])
     check("空 id 被忽略", sg.collect_calls({"nodes": [call_node("n", "")]}) == [])
     check("normalize 丢弃非对象条目", sg.normalize_scripts({"a": 1, "b": {"id": "b"}}) == {
-        "b": {"id": "b", "name": "b", "nodes": [], "edges": []}})
+        "b": {"id": "b", "name": "b", "nodes": [], "edges": [], "variables": []}})
+    check("normalize 保留局部变量声明", sg.normalize_scripts(
+        {"c": {"id": "c", "variables": [{"name": "n", "type": "auto", "value": "1"}]}}
+    )["c"]["variables"] == [{"name": "n", "type": "auto", "value": "1"}])
     check("normalize 容忍 None", sg.normalize_scripts(None) == {})
+
+    # 组合节点（0.1.4）：内部图存在节点参数里，里面的「调用脚本」也必须被收集到，
+    # 否则"子脚本找不到 / 循环调用"会从组合节点里漏过去。
+    grp = {"id": "g1", "type": "group", "params": {
+        "name": "组合", "nodes": [call_node("x", "Q")], "edges": []}}
+    check("collect_calls 钻进组合节点", sg.collect_calls({"nodes": [grp]}) == ["Q"],
+          str(sg.collect_calls({"nodes": [grp]})))
+    check("组合节点里的调用也算进依赖图（能查出环）",
+          sg.find_any_cycle(sg.build_graph(
+              flow(nodes=[grp], scripts=[sub("Q", [call_node("q1", "Q")])]),
+              {"Q": sub("Q", [call_node("q1", "Q")])})) is not None)
 
     print("[2] A 调 B（无环）→ 允许")
     f = flow(nodes=[call_node("n1", "A")], scripts=[sub("A"), sub("B")])

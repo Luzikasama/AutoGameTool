@@ -1,6 +1,6 @@
 [package]
 name = "autotool"
-version = "0.1.3"
+version = "0.1.4"
 description = "轻量级游戏自动化脚本工具 · 桌面壳（Tauri 2）"
 authors = ["AutoTool"]
 edition = "2021"
