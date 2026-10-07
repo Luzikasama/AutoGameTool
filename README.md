@@ -372,7 +372,7 @@ AutoTool/
 
 **方式 B：免安装（绿色）**
 
-下载 `AutoTool_0.1.3_portable_x64.zip`，解压出 `AutoTool\` 目录后双击里面的 `AutoTool\autotool.exe` 即可（建议解压路径不含中文）。目录内容就是 `autotool.exe`（桌面壳）+ `engine\`（Python 引擎）—— **不写注册表、不建快捷方式，删掉目录即卸载**。配置与模板同样写入 `%APPDATA%\AutoTool`。
+下载 `AutoTool_0.1.4_portable_x64.zip`，解压出 `AutoTool\` 目录后双击里面的 `AutoTool\autotool.exe` 即可（建议解压路径不含中文）。目录内容就是 `autotool.exe`（桌面壳）+ `engine\`（Python 引擎）—— **不写注册表、不建快捷方式，删掉目录即卸载**。配置与模板同样写入 `%APPDATA%\AutoTool`。
 
 > 也可以自己动手做绿色版：把安装目录里的 `autotool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可。
 
@@ -677,10 +677,10 @@ cd engine
 | 版本升级 | 直接覆盖安装；卸载项里的 `DisplayVersion` 取自 `tauri.conf.json` 的 `version` |
 | 静默安装 | `AutoTool-Setup.exe /S`（`/D=路径` 可指定目录，须置于最后且不加引号） |
 | 静默卸载 | `"%LOCALAPPDATA%\AutoTool\Uninstall.exe" /S` |
-| 免安装绿色版 | Release 附带 `AutoTool_0.1.3_portable_x64.zip`；也可直接把安装目录里的 `autotool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可，数据同样写入 `%APPDATA%\AutoTool` |
+| 免安装绿色版 | Release 附带 `AutoTool_0.1.4_portable_x64.zip`；也可直接把安装目录里的 `autotool.exe` 与 `engine\` 一起拷到任意位置，双击壳即可，数据同样写入 `%APPDATA%\AutoTool` |
 | WebView2 运行时 | 安装包**内嵌引导程序**（`embedBootstrapper`）：目标机器缺 WebView2 时安装器自行补齐，不需要安装期单独下载 |
 
-> **关于体积**（0.1.2 实测）：`AutoTool-app\` 整目录约 199 MB（1084 个文件），其中大量未压缩的 DLL 会由 NSIS 以 LZMA 压掉大部分，安装包 **55.02 MiB**（57,690,093 字节，SHA256 `1E81B491…8341`）；绿色版 zip 为 **79.41 MiB**（83,266,271 字节，SHA256 `5DFC5822…3E625`）。0.1.1 对应为 55.23 MiB / 73.25 MiB。
+> **关于体积**（0.1.4 实测）：`AutoTool-app\` 整目录约 247 MB（1101 个文件，比 0.1.3 大了约 48 MB，主要是变量 / 组合节点带来的前端与引擎新增依赖），其中大量未压缩的 DLL 会由 NSIS 以 LZMA 压掉大部分，安装包 **67.45 MiB**（70,727,817 字节，SHA256 `2140198D…1FB1E`）；绿色版 zip 为 **98.54 MiB**（103,322,033 字节，SHA256 `E06D4434…D579`）。0.1.2 对应为 55.02 MiB / 79.41 MiB，0.1.1 对应为 55.23 MiB / 73.25 MiB。
 >
 > 安装包比 0.1.0 大约 1.7 MB，是**内嵌 WebView2 引导程序**（`webviewInstallMode: embedBootstrapper`）带来的 —— 换掉默认的 `downloadBootstrapper` 后，目标机器缺 WebView2 时安装器不必先联网单独去下载一个引导程序。
 
